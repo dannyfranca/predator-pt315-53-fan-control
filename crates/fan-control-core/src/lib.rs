@@ -8,6 +8,7 @@ mod coretemp;
 mod curve;
 mod demand;
 mod envelope;
+mod external_power;
 mod nvidia_gpu;
 mod output;
 mod platform;
@@ -24,6 +25,7 @@ pub use coretemp::{CoretempDevice, CoretempError, discover_coretemp};
 pub use curve::{CurvePoint, DemandCurve, DemandCurveError, TemperatureCelsius, TemperatureError};
 pub use demand::{DemandPercent, DemandPercentError, Pwm};
 pub use envelope::{EnvelopeValidationError, validate_against_protected_envelope};
+pub use external_power::observe_external_power;
 pub use nvidia_gpu::{
     NvidiaGpuSampleError, NvidiaGpuSelector, NvidiaGpuSelectorError, NvidiaGpuSelectorKind,
     NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, sample_nvidia_gpu,
