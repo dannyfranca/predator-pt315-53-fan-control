@@ -91,6 +91,17 @@ fn valid_configuration_becomes_runtime_ready_values() {
 }
 
 #[test]
+fn validation_rechecks_the_schema_version_invariant() {
+    let mut config = parse_config_v1(VALID_CONFIG).unwrap();
+    config.schema_version = 2;
+
+    assert_eq!(
+        validate_config_v1(config),
+        Err(ConfigValidationError::UnsupportedSchemaVersion { value: 2 })
+    );
+}
+
+#[test]
 fn every_curve_requires_at_least_two_points() {
     for profile in [Profile::Ac, Profile::Battery] {
         for component in [Component::Cpu, Component::Gpu] {

@@ -171,6 +171,9 @@ impl ValidatedProfileConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConfigValidationError {
+    UnsupportedSchemaVersion {
+        value: u32,
+    },
     HysteresisOutOfRange {
         value: i64,
     },
@@ -223,6 +226,12 @@ pub enum ConfigValidationError {
 impl fmt::Display for ConfigValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedSchemaVersion { value } => {
+                write!(
+                    formatter,
+                    "schema version {value} is unsupported; expected 1"
+                )
+            }
             Self::HysteresisOutOfRange { value } => {
                 write!(formatter, "hysteresis {value} must be in 3..=10 °C")
             }
@@ -312,6 +321,12 @@ impl fmt::Display for ConfigValidationError {
 impl Error for ConfigValidationError {}
 
 pub fn validate_config_v1(config: ConfigV1) -> Result<ValidatedConfig, ConfigValidationError> {
+    if config.schema_version != 1 {
+        return Err(ConfigValidationError::UnsupportedSchemaVersion {
+            value: config.schema_version,
+        });
+    }
+
     let hysteresis_value = config.control.hysteresis_celsius;
     if !(3..=10).contains(&hysteresis_value) {
         return Err(ConfigValidationError::HysteresisOutOfRange {
