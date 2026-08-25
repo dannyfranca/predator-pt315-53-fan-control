@@ -1,10 +1,10 @@
 use std::{error::Error, fmt, path::Path, time::Duration};
 
 use crate::{
-    AcerHwmonDevice, AdmittedPolicyAuthority, ArmingReadySample, BoundedFileAccess, Clock,
-    CompleteSampleSet, ControllerOwnership, EmergencyContainmentReport, EnvelopeValidationError,
-    Fan, FanEndpoints, FirmwareAutoRestorationError, PlatformError, RuntimeLockAccess,
-    ValidatedConfig,
+    AcerHwmonDevice, AcerHwmonDiscoveryError, AdmittedPolicyAuthority, ArmingReadySample,
+    BoundedIdentityBoundFileAccess, Clock, CompleteSampleSet, ControllerOwnership,
+    EmergencyContainmentReport, EnvelopeValidationError, Fan, FanEndpoints,
+    FirmwareAutoRestorationError, PlatformError, RuntimeLockAccess, ValidatedConfig,
 };
 
 const FIRMWARE_AUTO: &str = "2";
@@ -20,10 +20,12 @@ const MAXIMUM_PLAUSIBLE_ARMING_RPM: u32 = 20_000;
 ///
 /// The recorded state is current only while [`Self::is_current_for`] returns true for the owning
 /// controller. Restoring Firmware Auto invalidates the receipt.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct ArmedFanControl {
     ownership_id: u64,
     custom_epoch: u64,
+    config: ValidatedConfig,
+    device: AcerHwmonDevice,
     cpu_rpm: u32,
     gpu_rpm: u32,
 }
@@ -42,6 +44,15 @@ impl ArmedFanControl {
 
     pub const fn gpu_rpm(&self) -> u32 {
         self.gpu_rpm
+    }
+
+    pub(crate) fn into_control_parts(self) -> (u64, u64, ValidatedConfig, AcerHwmonDevice) {
+        (
+            self.ownership_id,
+            self.custom_epoch,
+            self.config,
+            self.device,
+        )
     }
 }
 
@@ -112,6 +123,9 @@ pub enum FanArmingFailure {
     ObsoleteSampleEpoch,
     SampleFromFuture,
     StaleSample,
+    DeviceIdentity(PlatformError),
+    DeviceAbi(AcerHwmonDiscoveryError),
+    DeviceChanged,
     DeadlineOverflow,
     Platform {
         fan: Fan,
@@ -152,6 +166,9 @@ impl fmt::Display for FanArmingFailure {
                 formatter.write_str("fresh sample timestamp is in the future")
             }
             Self::StaleSample => formatter.write_str("fresh sample expired before arming"),
+            Self::DeviceIdentity(error) => write!(formatter, "fan device identity check: {error}"),
+            Self::DeviceAbi(error) => write!(formatter, "fan device ABI check: {error}"),
+            Self::DeviceChanged => formatter.write_str("fan device identity changed during arming"),
             Self::DeadlineOverflow => formatter.write_str("fan arming deadline overflowed"),
             Self::Platform {
                 fan,
@@ -186,6 +203,8 @@ impl Error for FanArmingFailure {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Policy(error) => Some(error),
+            Self::DeviceIdentity(error) => Some(error),
+            Self::DeviceAbi(error) => Some(error),
             Self::Platform { source, .. } => Some(source),
             _ => None,
         }
@@ -234,9 +253,8 @@ impl fmt::Display for FanArmingReadback {
 
 /// Performs the only Auto-to-Custom handover.
 ///
-/// The returned proof leaves both fans at PWM 255. Its initial outputs are calculated from the
-/// already-admitted candidate and the second fresh sample, but are deliberately not written until
-/// the first healthy control cycle.
+/// The returned proof leaves both fans at PWM 255 and carries the admitted configuration into the
+/// first healthy control cycle. Normal demand is calculated only from that cycle's fresh sample.
 pub fn arm_both_fans_safely<P>(
     ownership: &mut ControllerOwnership<'_, P>,
     device: &AcerHwmonDevice,
@@ -245,7 +263,7 @@ pub fn arm_both_fans_safely<P>(
     ready_sample: ArmingReadySample,
 ) -> Result<ArmedFanControl, FanArmingError>
 where
-    P: BoundedFileAccess + Clock + RuntimeLockAccess + ?Sized,
+    P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
 {
     let (sample, sample_ownership_id, sample_epoch) = ready_sample.into_parts();
     let result = if authority.belongs_to_ownership(ownership.ownership_id()) {
@@ -264,7 +282,14 @@ where
         }
         let ownership_id = ownership.ownership_id();
         let (platform, custom_epoch) = ownership.begin_custom_transition();
-        arm(platform, device, sample, ownership_id, custom_epoch)
+        arm(
+            platform,
+            device,
+            sample,
+            candidate.clone(),
+            ownership_id,
+            custom_epoch,
+        )
     });
 
     match result {
@@ -295,11 +320,12 @@ fn arm<P>(
     platform: &mut P,
     device: &AcerHwmonDevice,
     sample: CompleteSampleSet,
+    config: ValidatedConfig,
     ownership_id: u64,
     custom_epoch: u64,
 ) -> Result<ArmedFanControl, FanArmingFailure>
 where
-    P: BoundedFileAccess + Clock + ?Sized,
+    P: BoundedIdentityBoundFileAccess + Clock,
 {
     let started_at = platform.monotonic_now();
     let sample_age = started_at
@@ -311,8 +337,10 @@ where
     let handover_deadline = started_at
         .checked_add(HANDOVER_WINDOW)
         .ok_or(FanArmingFailure::DeadlineOverflow)?;
+    confirm_device_identity(platform, device, handover_deadline)?;
 
     confirm(
+        device,
         device.cpu().enable(),
         Fan::Cpu,
         FanArmingReadback::Mode,
@@ -322,6 +350,7 @@ where
         handover_deadline,
     )?;
     confirm(
+        device,
         device.gpu().enable(),
         Fan::Gpu,
         FanArmingReadback::Mode,
@@ -332,7 +361,12 @@ where
     )?;
 
     write(
+        device,
         device.cpu().pwm(),
+        &[
+            (device.cpu().enable(), FIRMWARE_AUTO),
+            (device.gpu().enable(), FIRMWARE_AUTO),
+        ],
         Fan::Cpu,
         MAXIMUM_PWM,
         FanArmingOperation::StageMaximum,
@@ -340,7 +374,12 @@ where
         handover_deadline,
     )?;
     write(
+        device,
         device.gpu().pwm(),
+        &[
+            (device.cpu().enable(), FIRMWARE_AUTO),
+            (device.gpu().enable(), FIRMWARE_AUTO),
+        ],
         Fan::Gpu,
         MAXIMUM_PWM,
         FanArmingOperation::StageMaximum,
@@ -348,6 +387,7 @@ where
         handover_deadline,
     )?;
     confirm(
+        device,
         device.cpu().pwm(),
         Fan::Cpu,
         FanArmingReadback::Duty,
@@ -357,6 +397,7 @@ where
         handover_deadline,
     )?;
     confirm(
+        device,
         device.gpu().pwm(),
         Fan::Gpu,
         FanArmingReadback::Duty,
@@ -367,7 +408,12 @@ where
     )?;
 
     write(
+        device,
         device.cpu().enable(),
+        &[
+            (device.cpu().enable(), FIRMWARE_AUTO),
+            (device.gpu().enable(), FIRMWARE_AUTO),
+        ],
         Fan::Cpu,
         CUSTOM_CONTROL,
         FanArmingOperation::EnterCustom,
@@ -375,7 +421,12 @@ where
         handover_deadline,
     )?;
     write(
+        device,
         device.gpu().enable(),
+        &[
+            (device.cpu().enable(), CUSTOM_CONTROL),
+            (device.gpu().enable(), FIRMWARE_AUTO),
+        ],
         Fan::Gpu,
         CUSTOM_CONTROL,
         FanArmingOperation::EnterCustom,
@@ -403,35 +454,38 @@ where
         response_deadline,
         FanArmingOperation::FinalConfirmCustom,
     )?;
-
     Ok(ArmedFanControl {
         ownership_id,
         custom_epoch,
+        config,
+        device: device.clone(),
         cpu_rpm,
         gpu_rpm,
     })
 }
 
 fn confirm_custom_at_maximum(
-    platform: &mut (impl BoundedFileAccess + ?Sized),
+    platform: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
     device: &AcerHwmonDevice,
     deadline: Duration,
     mode_operation: FanArmingOperation,
 ) -> Result<(), FanArmingFailure> {
     for (fan, endpoints) in [(Fan::Cpu, device.cpu()), (Fan::Gpu, device.gpu())] {
-        confirm_fan_at_maximum(platform, endpoints, fan, deadline, mode_operation)?;
+        confirm_fan_at_maximum(platform, device, endpoints, fan, deadline, mode_operation)?;
     }
     Ok(())
 }
 
 fn confirm_fan_at_maximum(
-    platform: &mut (impl BoundedFileAccess + ?Sized),
+    platform: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
+    device: &AcerHwmonDevice,
     endpoints: &FanEndpoints,
     fan: Fan,
     deadline: Duration,
     mode_operation: FanArmingOperation,
 ) -> Result<(), FanArmingFailure> {
     confirm(
+        device,
         endpoints.enable(),
         fan,
         FanArmingReadback::Mode,
@@ -441,6 +495,7 @@ fn confirm_fan_at_maximum(
         deadline,
     )?;
     confirm(
+        device,
         endpoints.pwm(),
         fan,
         FanArmingReadback::Duty,
@@ -456,7 +511,7 @@ fn await_tachometer_response<P>(
     device: &AcerHwmonDevice,
 ) -> Result<(u32, u32, Duration), FanArmingFailure>
 where
-    P: BoundedFileAccess + Clock + ?Sized,
+    P: BoundedIdentityBoundFileAccess + Clock + ?Sized,
 {
     let deadline = platform
         .monotonic_now()
@@ -472,7 +527,7 @@ fn await_tachometer_response_before<P>(
     deadline: Duration,
 ) -> Result<(u32, u32), FanArmingFailure>
 where
-    P: BoundedFileAccess + Clock + ?Sized,
+    P: BoundedIdentityBoundFileAccess + Clock + ?Sized,
 {
     let mut last_cpu_rpm = None;
     let mut last_gpu_rpm = None;
@@ -485,8 +540,8 @@ where
                 gpu_rpm: last_gpu_rpm,
             });
         }
-        let cpu_rpm = read_tachometer(platform, device.cpu(), Fan::Cpu, deadline)?;
-        let gpu_rpm = read_tachometer(platform, device.gpu(), Fan::Gpu, deadline)?;
+        let cpu_rpm = read_tachometer(platform, device, device.cpu(), Fan::Cpu, deadline)?;
+        let gpu_rpm = read_tachometer(platform, device, device.gpu(), Fan::Gpu, deadline)?;
         if let (Some(cpu_rpm), Some(gpu_rpm)) = (cpu_rpm, gpu_rpm) {
             return Ok((cpu_rpm, gpu_rpm));
         }
@@ -505,13 +560,20 @@ where
 }
 
 fn read_tachometer(
-    platform: &mut (impl BoundedFileAccess + ?Sized),
+    platform: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
+    device: &AcerHwmonDevice,
     fan: &FanEndpoints,
     identity: Fan,
     deadline: Duration,
 ) -> Result<Option<u32>, FanArmingFailure> {
     let raw = platform
-        .read_before(fan.tachometer(), deadline)
+        .read_bound_before(
+            device.root(),
+            device.backing_identity(),
+            child_name(fan.tachometer()),
+            endpoint_identity(device, fan.tachometer()),
+            deadline,
+        )
         .map_err(|source| FanArmingFailure::Platform {
             fan: identity,
             operation: FanArmingOperation::ReadTachometer,
@@ -542,23 +604,30 @@ fn read_tachometer(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn confirm(
+    device: &AcerHwmonDevice,
     path: &Path,
     fan: Fan,
     field: FanArmingReadback,
     expected: &'static str,
     operation: FanArmingOperation,
-    platform: &mut (impl BoundedFileAccess + ?Sized),
+    platform: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
     deadline: Duration,
 ) -> Result<(), FanArmingFailure> {
-    let actual =
-        platform
-            .read_before(path, deadline)
-            .map_err(|source| FanArmingFailure::Platform {
-                fan,
-                operation,
-                source,
-            })?;
+    let actual = platform
+        .read_bound_before(
+            device.root(),
+            device.backing_identity(),
+            child_name(path),
+            endpoint_identity(device, path),
+            deadline,
+        )
+        .map_err(|source| FanArmingFailure::Platform {
+            fan,
+            operation,
+            source,
+        })?;
     if actual.trim() != expected {
         return Err(FanArmingFailure::UnexpectedReadback {
             fan,
@@ -571,19 +640,63 @@ fn confirm(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write(
+    device: &AcerHwmonDevice,
     path: &Path,
+    guards: &[(&Path, &str)],
     fan: Fan,
     contents: &str,
     operation: FanArmingOperation,
-    platform: &mut (impl BoundedFileAccess + ?Sized),
+    platform: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
     deadline: Duration,
 ) -> Result<(), FanArmingFailure> {
+    let guard_bindings = guards
+        .iter()
+        .map(|(path, expected)| (child_name(path), *expected))
+        .collect::<Vec<_>>();
     platform
-        .write_before(path, contents, deadline)
+        .write_bound_if_before(
+            device.root(),
+            device.backing_identity(),
+            &device
+                .endpoint_bindings()
+                .map(|(path, identity)| (child_name(path), identity)),
+            &guard_bindings,
+            child_name(path),
+            contents,
+            deadline,
+        )
         .map_err(|source| FanArmingFailure::Platform {
             fan,
             operation,
             source,
         })
+}
+
+fn confirm_device_identity(
+    platform: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
+    device: &AcerHwmonDevice,
+    deadline: Duration,
+) -> Result<(), FanArmingFailure> {
+    match device.abi_is_current_before(platform, deadline) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(FanArmingFailure::DeviceChanged),
+        Err(AcerHwmonDiscoveryError::Platform(error)) => {
+            Err(FanArmingFailure::DeviceIdentity(error))
+        }
+        Err(error) => Err(FanArmingFailure::DeviceAbi(error)),
+    }
+}
+
+fn child_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .expect("discovered endpoint must have a UTF-8 child name")
+}
+
+fn endpoint_identity(device: &AcerHwmonDevice, path: &Path) -> crate::FileIdentity {
+    device
+        .endpoint_identity(path)
+        .expect("arming I/O must use a discovered endpoint")
 }

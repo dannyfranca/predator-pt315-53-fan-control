@@ -14,6 +14,13 @@ pub struct FanOutputs {
 }
 
 impl FanOutputs {
+    pub const fn maximum() -> Self {
+        Self {
+            cpu_pwm: Pwm::MAXIMUM,
+            gpu_pwm: Pwm::MAXIMUM,
+        }
+    }
+
     pub const fn cpu_pwm(self) -> Pwm {
         self.cpu_pwm
     }
@@ -29,14 +36,31 @@ pub fn calculate_fan_outputs(
     gpu_temperature: TemperatureCelsius,
     external_power: ExternalPower,
 ) -> FanOutputs {
-    let profile = selected_profile(config, external_power);
-    let cpu_demand = profile.cpu_curve().evaluate(cpu_temperature);
-    let gpu_demand = profile.gpu_curve().evaluate(gpu_temperature);
-    let target = maximum(cpu_demand, gpu_demand);
+    let target = calculate_target_demand(config, cpu_temperature, gpu_temperature, external_power);
 
+    fan_outputs_for_demand(config, target)
+}
+
+pub(crate) fn calculate_target_demand(
+    config: &ValidatedConfig,
+    cpu_temperature: TemperatureCelsius,
+    gpu_temperature: TemperatureCelsius,
+    external_power: ExternalPower,
+) -> DemandPercent {
+    let profile = selected_profile(config, external_power);
+    maximum(
+        profile.cpu_curve().evaluate(cpu_temperature),
+        profile.gpu_curve().evaluate(gpu_temperature),
+    )
+}
+
+pub(crate) fn fan_outputs_for_demand(
+    config: &ValidatedConfig,
+    demand: DemandPercent,
+) -> FanOutputs {
     FanOutputs {
-        cpu_pwm: Pwm::from(maximum(target, config.fans().cpu().minimum_duty())),
-        gpu_pwm: Pwm::from(maximum(target, config.fans().gpu().minimum_duty())),
+        cpu_pwm: Pwm::from(maximum(demand, config.fans().cpu().minimum_duty())),
+        gpu_pwm: Pwm::from(maximum(demand, config.fans().gpu().minimum_duty())),
     }
 }
 

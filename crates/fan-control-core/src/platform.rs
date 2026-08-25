@@ -106,12 +106,83 @@ pub trait IdentityBoundFileAccess: FileAccess {
 pub trait BoundedFileAccess {
     fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError>;
 
+    fn list_before(
+        &mut self,
+        directory: &Path,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError>;
+
     fn write_before(
         &mut self,
         path: &Path,
         contents: &str,
         deadline: Duration,
     ) -> Result<(), PlatformError>;
+}
+
+/// Deadline-bounded I/O tied to one discovered directory and endpoint generation.
+pub trait BoundedIdentityBoundFileAccess: BoundedFileAccess + IdentityBoundFileAccess {
+    fn identity_before(
+        &mut self,
+        path: &Path,
+        deadline: Duration,
+    ) -> Result<FileIdentity, PlatformError>;
+
+    fn read_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<String, PlatformError>;
+
+    fn list_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError>;
+
+    fn permissions_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<FilePermissions, PlatformError>;
+
+    #[allow(clippy::too_many_arguments)]
+    /// Atomically validates the directory and child identities, checks every guard, and writes.
+    ///
+    /// Implementations must bind all checks and the target write to the same backing directory
+    /// handle without an interleaving point, and must enforce `deadline` immediately before the
+    /// write becomes visible.
+    fn write_bound_if_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        expected_children: &[(&str, FileIdentity)],
+        guards: &[(&str, &str)],
+        target_child: &str,
+        contents: &str,
+        deadline: Duration,
+    ) -> Result<(), PlatformError>;
+}
+
+fn direct_bound_child(directory: &Path, child: &str) -> Result<PathBuf, PlatformError> {
+    let child_path = Path::new(child);
+    let mut components = child_path.components();
+    let direct_child = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if !direct_child {
+        return Err(PlatformError::new(
+            PlatformErrorKind::Unavailable,
+            format!("bound operation is not a direct child: {child}"),
+        ));
+    }
+    Ok(directory.join(child))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -537,6 +608,20 @@ impl FakePlatform {
             .retain(|candidate, _| candidate != path && !candidate.starts_with(path));
     }
 
+    /// Simulates a path being rebound to a different backing object without changing contents.
+    pub fn rebind_path_identity(&mut self, path: impl AsRef<Path>) {
+        let path = path.as_ref();
+        assert!(
+            self.identities.contains_key(path),
+            "fake path must exist before its identity can be rebound"
+        );
+        self.next_inode = self.next_inode.saturating_add(1);
+        self.identities.insert(
+            path.to_path_buf(),
+            FileIdentity::from_raw(0, self.next_inode),
+        );
+    }
+
     pub fn file_contents(&self, path: impl AsRef<Path>) -> Option<&str> {
         self.files
             .get(path.as_ref())
@@ -754,6 +839,31 @@ impl FakePlatform {
             .into_iter()
             .collect())
     }
+
+    fn require_bound_identities(
+        &self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &Path,
+        expected_child: FileIdentity,
+    ) -> Result<(), PlatformError> {
+        if self.identities.get(directory).copied() != Some(expected_directory) {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!(
+                    "backing directory identity changed: {}",
+                    directory.display()
+                ),
+            ));
+        }
+        if self.identities.get(child).copied() != Some(expected_child) {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("endpoint identity changed: {}", child.display()),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl FileAccess for FakePlatform {
@@ -863,6 +973,17 @@ impl BoundedFileAccess for FakePlatform {
         self.read_file(path)
     }
 
+    fn list_before(
+        &mut self,
+        directory: &Path,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        self.operations
+            .push(PlatformOperation::List(directory.to_path_buf()));
+        self.apply_next_file_step_before(directory, "list", deadline)?;
+        self.list_directory(directory)
+    }
+
     fn write_before(
         &mut self,
         path: &Path,
@@ -875,6 +996,121 @@ impl BoundedFileAccess for FakePlatform {
         });
         self.apply_next_file_step_before(path, "write", deadline)?;
         self.write_file(path, contents)
+    }
+}
+
+impl BoundedIdentityBoundFileAccess for FakePlatform {
+    fn identity_before(
+        &mut self,
+        path: &Path,
+        deadline: Duration,
+    ) -> Result<FileIdentity, PlatformError> {
+        self.operations
+            .push(PlatformOperation::Identity(path.to_path_buf()));
+        self.apply_next_file_step_before(path, "identity", deadline)?;
+        self.identities
+            .get(path)
+            .copied()
+            .ok_or_else(|| Self::missing(path))
+    }
+
+    fn read_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<String, PlatformError> {
+        let path = direct_bound_child(directory, child)?;
+        self.operations.push(PlatformOperation::Read(path.clone()));
+        self.apply_next_file_step_before(&path, "read", deadline)?;
+        self.require_bound_identities(directory, expected_directory, &path, expected_child)?;
+        self.read_file(&path)
+    }
+
+    fn list_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        self.operations
+            .push(PlatformOperation::List(directory.to_path_buf()));
+        self.apply_next_file_step_before(directory, "bound list", deadline)?;
+        if self.identities.get(directory).copied() != Some(expected_directory) {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!(
+                    "backing directory identity changed: {}",
+                    directory.display()
+                ),
+            ));
+        }
+        self.list_directory(directory)
+    }
+
+    fn permissions_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<FilePermissions, PlatformError> {
+        let path = direct_bound_child(directory, child)?;
+        self.operations
+            .push(PlatformOperation::Permissions(path.clone()));
+        self.apply_next_file_step_before(&path, "permissions", deadline)?;
+        self.require_bound_identities(directory, expected_directory, &path, expected_child)?;
+        self.files
+            .get(&path)
+            .map(|file| file.permissions)
+            .ok_or_else(|| Self::missing(&path))
+    }
+
+    fn write_bound_if_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        expected_children: &[(&str, FileIdentity)],
+        guards: &[(&str, &str)],
+        target_child: &str,
+        contents: &str,
+        deadline: Duration,
+    ) -> Result<(), PlatformError> {
+        let target = direct_bound_child(directory, target_child)?;
+        self.apply_next_file_step_before(&target, "guarded write", deadline)?;
+        for (child, expected) in expected_children {
+            let path = direct_bound_child(directory, child)?;
+            self.require_bound_identities(directory, expected_directory, &path, *expected)?;
+        }
+        for (child, expected_contents) in guards {
+            let path = direct_bound_child(directory, child)?;
+            self.operations.push(PlatformOperation::Read(path.clone()));
+            let actual = self.read_file(&path)?;
+            if actual.trim() != *expected_contents {
+                return Err(PlatformError::new(
+                    PlatformErrorKind::Unavailable,
+                    format!(
+                        "guarded write expected {expected_contents:?} at {}, got {actual:?}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        if self.monotonic_time >= deadline {
+            return Err(Self::timed_out(&target, "guarded write"));
+        }
+        for (child, expected) in expected_children {
+            let path = direct_bound_child(directory, child)?;
+            self.require_bound_identities(directory, expected_directory, &path, *expected)?;
+        }
+        self.operations.push(PlatformOperation::Write {
+            path: target.clone(),
+            contents: contents.to_owned(),
+        });
+        self.write_file(&target, contents)
     }
 }
 

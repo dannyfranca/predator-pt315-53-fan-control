@@ -7,6 +7,7 @@ mod arming;
 mod authority;
 mod compatibility;
 mod config;
+mod control_cycle;
 mod coretemp;
 mod curve;
 mod demand;
@@ -41,6 +42,10 @@ pub use config::{
     ConfigParseError, ConfigV1, ControlConfig, CurvePointConfig, FanConfig, FansConfig, FiniteF64,
     ProfileConfig, ProfilesConfig, parse_config_v1,
 };
+pub use control_cycle::{
+    CompletedControlCycle, ControlCycleOperation, ControlCycleReadback, HealthyControl,
+    HealthyControlCycleError, run_healthy_control_cycle,
+};
 pub use coretemp::{CoretempDevice, CoretempError, discover_coretemp};
 pub use curve::{CurvePoint, DemandCurve, DemandCurveError, TemperatureCelsius, TemperatureError};
 pub use demand::{DemandPercent, DemandPercentError, Pwm};
@@ -57,10 +62,10 @@ pub use ownership::{
     acquire_controller_ownership,
 };
 pub use platform::{
-    BoundedFileAccess, Clock, FakePlatform, FakeRuntimeLock, FakeRuntimeLockBackend, FakeStep,
-    FileAccess, FileIdentity, FilePermissions, IdentityBoundFileAccess, PlatformError,
-    PlatformErrorKind, PlatformOperation, RuntimeLockAccess, RuntimeLockError, ServiceAccess,
-    SystemOwnershipPlatform, SystemRuntimeLock,
+    BoundedFileAccess, BoundedIdentityBoundFileAccess, Clock, FakePlatform, FakeRuntimeLock,
+    FakeRuntimeLockBackend, FakeStep, FileAccess, FileIdentity, FilePermissions,
+    IdentityBoundFileAccess, PlatformError, PlatformErrorKind, PlatformOperation,
+    RuntimeLockAccess, RuntimeLockError, ServiceAccess, SystemOwnershipPlatform, SystemRuntimeLock,
 };
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
@@ -71,9 +76,9 @@ pub use restoration::{
     FirmwareAutoReadback, FirmwareAutoRestorationError, MaximumPwmReadback,
 };
 pub use sampling::{
-    CompleteSampleSet, FreshSampleGate, MAX_SAMPLE_CADENCE_JITTER, NORMAL_SAMPLE_CADENCE,
-    ObservedSample, RequiredInput, SampleCapture, SampleReadiness, SampleSetError,
-    SampleSourceError, SampleSources,
+    CompleteSampleSet, ControlCycleSampleGate, FreshSampleGate, MAX_SAMPLE_CADENCE_JITTER,
+    NORMAL_SAMPLE_CADENCE, ObservedSample, RequiredInput, SampleCapture, SampleReadiness,
+    SampleSetError, SampleSourceError, SampleSources,
 };
 pub use validation::{
     Component, ConfigValidationError, Fan, Profile, ValidatedConfig, ValidatedControlConfig,

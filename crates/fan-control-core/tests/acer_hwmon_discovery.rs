@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use fan_control_core::{
-    AcerHwmonDiscoveryError, FakePlatform, FakeStep, FileAccess, FilePermissions, PlatformError,
-    PlatformErrorKind, discover_acer_hwmon,
+    AcerHwmonDiscoveryError, FakePlatform, FakeStep, FileAccess, FileIdentity, FilePermissions,
+    IdentityBoundFileAccess, PlatformError, PlatformErrorKind, discover_acer_hwmon,
 };
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
@@ -49,6 +49,19 @@ fn discovers_by_identity_at_any_numeric_index_and_maps_both_fans() {
     assert_eq!(device.gpu().pwm(), acer_root.join("pwm2"));
     assert_eq!(device.gpu().enable(), acer_root.join("pwm2_enable"));
     assert_eq!(device.gpu().tachometer(), acer_root.join("fan2_input"));
+}
+
+#[test]
+fn rediscovery_distinguishes_an_invisible_backing_device_rebind() {
+    let mut platform = FakePlatform::new();
+    let root = install_acer(&mut platform, 7);
+    let before = discover_acer_hwmon(&mut platform, Path::new(HWMON_ROOT)).unwrap();
+
+    platform.rebind_path_identity(&root);
+    let after = discover_acer_hwmon(&mut platform, Path::new(HWMON_ROOT)).unwrap();
+
+    assert_ne!(after, before);
+    assert_eq!(after.root(), before.root());
 }
 
 #[test]
@@ -233,6 +246,34 @@ impl FileAccess for InjectedRootListing {
     }
 }
 
+impl IdentityBoundFileAccess for InjectedRootListing {
+    fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
+        self.platform.identity(path)
+    }
+
+    fn read_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+        child: &str,
+    ) -> Result<String, PlatformError> {
+        self.platform.read_bound(directory, expected, child)
+    }
+
+    fn list_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        if directory == self.directory {
+            self.platform.list_bound(directory, expected)?;
+            Ok(self.entries.clone())
+        } else {
+            self.platform.list_bound(directory, expected)
+        }
+    }
+}
+
 #[test]
 fn rejects_malformed_or_out_of_root_candidate_listings() {
     for invalid in [
@@ -329,6 +370,29 @@ impl FileAccess for ChangingPermissions {
     }
 }
 
+impl IdentityBoundFileAccess for ChangingPermissions {
+    fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
+        self.platform.identity(path)
+    }
+
+    fn read_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+        child: &str,
+    ) -> Result<String, PlatformError> {
+        self.platform.read_bound(directory, expected, child)
+    }
+
+    fn list_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        self.platform.list_bound(directory, expected)
+    }
+}
+
 #[test]
 fn endpoint_permissions_changing_before_final_validation_fail_closed() {
     let mut platform = FakePlatform::new();
@@ -372,6 +436,36 @@ impl FileAccess for ChangingIdentity {
 
     fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
         self.platform.permissions(path)
+    }
+}
+
+impl IdentityBoundFileAccess for ChangingIdentity {
+    fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
+        self.platform.identity(path)
+    }
+
+    fn read_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+        child: &str,
+    ) -> Result<String, PlatformError> {
+        let path = directory.join(child);
+        if path == self.path {
+            self.reads += 1;
+            if self.reads > 1 {
+                return Ok("acer\n".into());
+            }
+        }
+        self.platform.read_bound(directory, expected, child)
+    }
+
+    fn list_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        self.platform.list_bound(directory, expected)
     }
 }
 

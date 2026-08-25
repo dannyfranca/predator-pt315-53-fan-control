@@ -1,4 +1,7 @@
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use fan_control_core::{
     BoundedFileAccess, Clock, EmergencyContainmentReport, EmergencyFanStatus, FakePlatform,
@@ -253,6 +256,14 @@ impl AutoAttemptRecorder {
 impl BoundedFileAccess for AutoAttemptRecorder {
     fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError> {
         self.inner.read_before(path, deadline)
+    }
+
+    fn list_before(
+        &mut self,
+        directory: &Path,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        self.inner.list_before(directory, deadline)
     }
 
     fn write_before(
