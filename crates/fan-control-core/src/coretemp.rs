@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    FileIdentity, IdentityBoundFileAccess, PlatformError, PlatformErrorKind, TemperatureCelsius,
+    FileIdentity, IdentityBoundReadAccess, PlatformError, PlatformErrorKind, TemperatureCelsius,
 };
 
 const CORETEMP_NAME_PAYLOAD: &str = "coretemp\n";
@@ -42,7 +42,7 @@ impl CoretempDevice {
     /// Reads one fail-closed CPU sample after revalidating the discovered identity and labels.
     pub fn sample(
         &self,
-        files: &mut dyn IdentityBoundFileAccess,
+        files: &mut dyn IdentityBoundReadAccess,
     ) -> Result<TemperatureCelsius, CoretempError> {
         let before = discover_coretemp(files, &self.hwmon_root)?;
         if before != *self {
@@ -125,7 +125,7 @@ impl From<PlatformError> for CoretempError {
 }
 
 pub fn discover_coretemp(
-    files: &mut dyn IdentityBoundFileAccess,
+    files: &mut dyn IdentityBoundReadAccess,
     hwmon_root: &Path,
 ) -> Result<CoretempDevice, CoretempError> {
     let (root, backing_identity) = unique_coretemp(files, hwmon_root)?;
@@ -155,7 +155,7 @@ pub fn discover_coretemp(
 }
 
 fn unique_coretemp(
-    files: &mut dyn IdentityBoundFileAccess,
+    files: &mut dyn IdentityBoundReadAccess,
     hwmon_root: &Path,
 ) -> Result<(PathBuf, FileIdentity), CoretempError> {
     let mut matches = Vec::new();
@@ -190,7 +190,7 @@ fn validate_hwmon_entry(hwmon_root: &Path, path: &Path) -> Result<(), CoretempEr
 }
 
 fn discover_channels(
-    files: &mut dyn IdentityBoundFileAccess,
+    files: &mut dyn IdentityBoundReadAccess,
     root: &Path,
     backing_identity: FileIdentity,
 ) -> Result<Vec<CoretempChannel>, CoretempError> {
@@ -280,7 +280,7 @@ fn selected_label(payload: &str, path: &Path) -> Result<Option<(String, bool)>, 
 }
 
 fn sample_channel(
-    files: &mut dyn IdentityBoundFileAccess,
+    files: &mut dyn IdentityBoundReadAccess,
     root: &Path,
     backing_identity: FileIdentity,
     channel: &CoretempChannel,
@@ -352,7 +352,7 @@ fn sample_channel(
 }
 
 fn reject_asserted_optional_flag(
-    files: &mut dyn IdentityBoundFileAccess,
+    files: &mut dyn IdentityBoundReadAccess,
     root: &Path,
     backing_identity: FileIdentity,
     channel: &CoretempChannel,

@@ -102,6 +102,68 @@ pub trait IdentityBoundFileAccess: FileAccess {
     ) -> Result<Vec<PathBuf>, PlatformError>;
 }
 
+/// Read-only filesystem operations for stable sensor discovery and sampling.
+pub trait IdentityBoundReadAccess {
+    fn read(&mut self, path: &Path) -> Result<String, PlatformError>;
+
+    fn list(&mut self, directory: &Path) -> Result<Vec<PathBuf>, PlatformError>;
+
+    fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError>;
+
+    fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError>;
+
+    fn read_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+        child: &str,
+    ) -> Result<String, PlatformError>;
+
+    fn list_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+    ) -> Result<Vec<PathBuf>, PlatformError>;
+}
+
+impl<T> IdentityBoundReadAccess for T
+where
+    T: IdentityBoundFileAccess + ?Sized,
+{
+    fn read(&mut self, path: &Path) -> Result<String, PlatformError> {
+        FileAccess::read(self, path)
+    }
+
+    fn list(&mut self, directory: &Path) -> Result<Vec<PathBuf>, PlatformError> {
+        FileAccess::list(self, directory)
+    }
+
+    fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
+        FileAccess::permissions(self, path)
+    }
+
+    fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
+        IdentityBoundFileAccess::identity(self, path)
+    }
+
+    fn read_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+        child: &str,
+    ) -> Result<String, PlatformError> {
+        IdentityBoundFileAccess::read_bound(self, directory, expected, child)
+    }
+
+    fn list_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        IdentityBoundFileAccess::list_bound(self, directory, expected)
+    }
+}
+
 /// File access that returns no later than an absolute monotonic deadline.
 pub trait BoundedFileAccess {
     fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError>;

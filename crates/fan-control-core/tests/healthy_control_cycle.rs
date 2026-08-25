@@ -1,5 +1,5 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     path::{Path, PathBuf},
     rc::Rc,
     time::Duration,
@@ -11,11 +11,13 @@ use fan_control_core::{
     ControllerOwnership, EvidenceCompleteness, ExternalPower, FakePlatform, FakeRuntimeLock, Fan,
     FanWriteBackend, FileAccess, FileIdentity, FilePermissions, FreshSampleGate, HealthyControl,
     HealthyControlCycleError, IdentityBoundFileAccess, ObservedFanAbi, ObservedSample,
-    OwnershipSampleReadiness, PlatformError, PlatformOperation, RuntimeLockAccess,
-    RuntimeLockError, SampleCapture, SampleSetError, SampleSourceError, SampleSources,
-    ServiceAccess, TemperatureCelsius, ValidatedConfig, acquire_controller_ownership,
-    admit_policy_authority, arm_both_fans_safely, calculate_fan_outputs, discover_acer_hwmon,
-    parse_compatibility_v1, parse_config_v1, run_healthy_control_cycle, validate_config_v1,
+    OwnershipSampleReadiness, PlatformError, PlatformErrorKind, PlatformOperation,
+    RuntimeLockAccess, RuntimeLockError, SampleCapture, SampleSetError, SampleSourceError,
+    SampleSources, SensorControlState, SensorControlStep, SensorSourceDiscovery, ServiceAccess,
+    TemperatureCelsius, TransientSensorControl, TransientSensorControlError, ValidatedConfig,
+    acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
+    calculate_fan_outputs, discover_acer_hwmon, parse_compatibility_v1, parse_config_v1,
+    run_healthy_control_cycle, validate_config_v1,
 };
 use sha2::{Digest, Sha256};
 
@@ -169,6 +171,157 @@ impl SampleSources for CountingSources {
         self.frame += 1;
         Ok(capture.capture(power))
     }
+}
+
+type SourceDropProbe = (Rc<Cell<bool>>, Rc<RefCell<Vec<bool>>>);
+
+#[derive(Debug)]
+struct RecoveryScript {
+    frames: Vec<Frame>,
+    frame: usize,
+    cpu_reads: usize,
+    gpu_reads: usize,
+    fail_cpu: bool,
+    fail_gpu: bool,
+    fail_power: bool,
+    rediscoveries: usize,
+    fail_rediscovery_once: bool,
+    next_binding: u64,
+    last_sample_binding: Option<u64>,
+    source_drop_probe: Option<SourceDropProbe>,
+}
+
+impl RecoveryScript {
+    fn new(frames: Vec<Frame>) -> Rc<RefCell<Self>> {
+        Rc::new(RefCell::new(Self {
+            frames,
+            frame: 0,
+            cpu_reads: 0,
+            gpu_reads: 0,
+            fail_cpu: false,
+            fail_gpu: false,
+            fail_power: false,
+            rediscoveries: 0,
+            fail_rediscovery_once: false,
+            next_binding: 1,
+            last_sample_binding: None,
+            source_drop_probe: None,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct RecoverySources {
+    script: Rc<RefCell<RecoveryScript>>,
+    binding: u64,
+}
+
+impl Drop for RecoverySources {
+    fn drop(&mut self) {
+        let probe = self.script.borrow().source_drop_probe.clone();
+        if let Some((firmware_auto_confirmed, observations)) = probe {
+            observations
+                .borrow_mut()
+                .push(firmware_auto_confirmed.get());
+        }
+    }
+}
+
+impl SampleSources for RecoverySources {
+    fn sample_cpu(
+        &mut self,
+        capture: &mut SampleCapture<'_>,
+    ) -> Result<ObservedSample<TemperatureCelsius>, SampleSourceError> {
+        let mut script = self.script.borrow_mut();
+        script.cpu_reads += 1;
+        script.last_sample_binding = Some(self.binding);
+        if script.fail_cpu {
+            return Err(SampleSourceError::new("CPU sample unavailable"));
+        }
+        let cpu = script.frames[script.frame].cpu;
+        drop(script);
+        Ok(capture.capture(TemperatureCelsius::try_from(cpu).unwrap()))
+    }
+
+    fn sample_gpu(
+        &mut self,
+        capture: &mut SampleCapture<'_>,
+    ) -> Result<ObservedSample<TemperatureCelsius>, SampleSourceError> {
+        let mut script = self.script.borrow_mut();
+        script.gpu_reads += 1;
+        if script.fail_gpu {
+            return Err(SampleSourceError::new("GPU sample unavailable"));
+        }
+        let gpu = script.frames[script.frame].gpu;
+        drop(script);
+        Ok(capture.capture(TemperatureCelsius::try_from(gpu).unwrap()))
+    }
+
+    fn observe_external_power(
+        &mut self,
+        capture: &mut SampleCapture<'_>,
+    ) -> Result<ObservedSample<ExternalPower>, SampleSourceError> {
+        let mut script = self.script.borrow_mut();
+        if script.fail_power {
+            return Err(SampleSourceError::new("power sample unavailable"));
+        }
+        let power = script.frames[script.frame].power;
+        script.frame += 1;
+        drop(script);
+        Ok(capture.capture(power))
+    }
+}
+
+#[derive(Debug)]
+struct RecoveryDiscovery {
+    script: Rc<RefCell<RecoveryScript>>,
+}
+
+impl SensorSourceDiscovery for RecoveryDiscovery {
+    type Sources = RecoverySources;
+
+    fn rediscover(
+        &mut self,
+        files: &mut dyn fan_control_core::IdentityBoundReadAccess,
+    ) -> Result<Self::Sources, SampleSourceError> {
+        files
+            .identity(Path::new(ACER_ROOT))
+            .map_err(|error| SampleSourceError::new(error.to_string()))?;
+        let mut script = self.script.borrow_mut();
+        script.rediscoveries += 1;
+        if script.fail_rediscovery_once {
+            script.fail_rediscovery_once = false;
+            return Err(SampleSourceError::new("sensor identities unavailable"));
+        }
+        let binding = script.next_binding;
+        script.next_binding += 1;
+        Ok(RecoverySources {
+            script: Rc::clone(&self.script),
+            binding,
+        })
+    }
+}
+
+fn recovery_control(
+    armed: fan_control_core::ArmedFanControl,
+    authority: fan_control_core::AdmittedPolicyAuthority,
+    frames: Vec<Frame>,
+) -> (
+    TransientSensorControl<RecoveryDiscovery>,
+    Rc<RefCell<RecoveryScript>>,
+) {
+    let script = RecoveryScript::new(frames);
+    let discovery = RecoveryDiscovery {
+        script: Rc::clone(&script),
+    };
+    let initial_sources = RecoverySources {
+        script: Rc::clone(&script),
+        binding: 0,
+    };
+    (
+        TransientSensorControl::from_armed(armed, authority, discovery, initial_sources),
+        script,
+    )
 }
 
 #[test]
@@ -577,12 +730,16 @@ enum RuntimeInterference {
     RebindGpuEndpointBeforeCpuWrite,
     CpuDutyAfterWrite,
     GpuDutyAfterWrite,
+    RestorationUnavailable,
+    CpuModeBeforeRecoveryAutoCheck,
+    ArmingFailureAndRestorationUnavailable,
 }
 
 struct InterferingPlatform {
     inner: FakePlatform,
     interference: Rc<Cell<RuntimeInterference>>,
     last_normal_write: Option<String>,
+    firmware_auto_confirmed: Rc<Cell<bool>>,
 }
 
 impl InterferingPlatform {
@@ -591,6 +748,7 @@ impl InterferingPlatform {
             inner,
             interference,
             last_normal_write: None,
+            firmware_auto_confirmed: Rc::new(Cell::new(false)),
         }
     }
 
@@ -611,6 +769,10 @@ impl InterferingPlatform {
 
     fn operations(&self) -> &[PlatformOperation] {
         self.inner.operations()
+    }
+
+    fn firmware_auto_confirmation(&self) -> Rc<Cell<bool>> {
+        Rc::clone(&self.firmware_auto_confirmed)
     }
 }
 
@@ -658,7 +820,29 @@ impl IdentityBoundFileAccess for InterferingPlatform {
 
 impl BoundedFileAccess for InterferingPlatform {
     fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError> {
-        self.inner.read_before(path, deadline)
+        if self.interference.get() == RuntimeInterference::CpuModeBeforeRecoveryAutoCheck
+            && path == cpu_enable()
+        {
+            self.interference.set(RuntimeInterference::None);
+            self.inner.insert_file(path, "1\n");
+        }
+        if self.interference.get() == RuntimeInterference::RestorationUnavailable
+            && (path == cpu_enable() || path == gpu_enable())
+        {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                "restoration unavailable",
+            ));
+        }
+        let result = self.inner.read_before(path, deadline);
+        if result.is_ok()
+            && (path == cpu_enable() || path == gpu_enable())
+            && self.inner.file_contents(cpu_enable()) == Some("2")
+            && self.inner.file_contents(gpu_enable()) == Some("2")
+        {
+            self.firmware_auto_confirmed.set(true);
+        }
+        result
     }
 
     fn list_before(
@@ -691,6 +875,14 @@ impl BoundedFileAccess for InterferingPlatform {
         contents: &str,
         deadline: Duration,
     ) -> Result<(), PlatformError> {
+        if self.interference.get() == RuntimeInterference::RestorationUnavailable
+            && (path == cpu_enable() || path == gpu_enable())
+        {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                "restoration unavailable",
+            ));
+        }
         self.inner.write_before(path, contents, deadline)
     }
 }
@@ -768,6 +960,14 @@ impl BoundedIdentityBoundFileAccess for InterferingPlatform {
     ) -> Result<FilePermissions, PlatformError> {
         if self.interference.get() == RuntimeInterference::MakeEndpointWorldWritable {
             self.interference.set(RuntimeInterference::None);
+            self.inner.set_file_permissions(
+                Path::new(ACER_ROOT).join("pwm1_enable"),
+                FilePermissions::from_mode(0o666),
+            );
+        }
+        if self.interference.get() == RuntimeInterference::ArmingFailureAndRestorationUnavailable {
+            self.interference
+                .set(RuntimeInterference::RestorationUnavailable);
             self.inner.set_file_permissions(
                 Path::new(ACER_ROOT).join("pwm1_enable"),
                 FilePermissions::from_mode(0o666),
@@ -920,6 +1120,398 @@ fn a_failed_fresh_sample_permanently_invalidates_normal_control() {
 }
 
 #[test]
+fn transient_cpu_failure_restores_auto_then_rediscovers_and_fully_rearms() {
+    let (mut platform, device) = fixture();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let low = Frame {
+        cpu: 40.0,
+        gpu: 35.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script) = recovery_control(armed, authority, vec![frame, frame, frame, low]);
+    assert!(matches!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::Completed(_)
+    ));
+    ownership.delay(Duration::from_secs(2));
+    script.borrow_mut().fail_cpu = true;
+    let marker = ownership.platform().operations().len();
+
+    assert!(matches!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::FirmwareAutoRestored {
+            fault: SampleSetError::Input {
+                input: fan_control_core::RequiredInput::Cpu,
+                ..
+            }
+        }
+    ));
+    assert_eq!(control.state(), SensorControlState::FirmwareAutoRecovery);
+    assert_eq!(ownership.platform().file_contents(cpu_enable()), Some("2"));
+    assert_eq!(ownership.platform().file_contents(gpu_enable()), Some("2"));
+    assert!(
+        ownership.platform().operations()[marker..]
+            .iter()
+            .all(|operation| !is_pwm_write(operation))
+    );
+
+    script.borrow_mut().fail_cpu = false;
+    script.borrow_mut().fail_rediscovery_once = true;
+    assert!(matches!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::AwaitingRediscovery(_)
+    ));
+    assert_eq!(script.borrow().rediscoveries, 1);
+    assert_eq!(
+        (script.borrow().cpu_reads, script.borrow().gpu_reads),
+        (2, 1)
+    );
+
+    assert_eq!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::AwaitingSecondSample
+    );
+    assert_eq!(script.borrow().rediscoveries, 2);
+    assert_eq!(script.borrow().last_sample_binding, Some(1));
+    assert_eq!(control.state(), SensorControlState::FirmwareAutoRecovery);
+    assert_eq!(ownership.platform().file_contents(cpu_enable()), Some("2"));
+    assert_eq!(ownership.platform().file_contents(gpu_enable()), Some("2"));
+
+    ownership.delay(Duration::from_secs(2));
+    assert_eq!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::Rearmed
+    );
+    assert_eq!(control.state(), SensorControlState::CustomControl);
+    assert_eq!(script.borrow().rediscoveries, 2);
+    assert_eq!(ownership.platform().file_contents(cpu_enable()), Some("1"));
+    assert_eq!(ownership.platform().file_contents(gpu_enable()), Some("1"));
+    assert_eq!(ownership.platform().file_contents(cpu_pwm()), Some("255"));
+    assert_eq!(ownership.platform().file_contents(gpu_pwm()), Some("255"));
+
+    let SensorControlStep::Completed(first_cycle) = control.step(&mut ownership).unwrap() else {
+        panic!("rearmed control must resume normal cycles")
+    };
+    assert_eq!(
+        first_cycle.outputs(),
+        calculate_fan_outputs(
+            &protected_config(PROTECTED_POLICY),
+            TemperatureCelsius::try_from(low.cpu).unwrap(),
+            TemperatureCelsius::try_from(low.gpu).unwrap(),
+            low.power,
+        )
+    );
+
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
+fn failed_sources_are_dropped_only_after_firmware_auto_is_confirmed() {
+    let (platform, device) = fixture();
+    let interference = Rc::new(Cell::new(RuntimeInterference::None));
+    let mut platform = InterferingPlatform::new(platform, interference);
+    let auto_confirmed = platform.firmware_auto_confirmation();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script) = recovery_control(armed, authority, vec![frame]);
+    let drop_observations = Rc::new(RefCell::new(Vec::new()));
+    script.borrow_mut().source_drop_probe =
+        Some((Rc::clone(&auto_confirmed), Rc::clone(&drop_observations)));
+    auto_confirmed.set(false);
+    script.borrow_mut().fail_cpu = true;
+
+    assert!(matches!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::FirmwareAutoRestored { .. }
+    ));
+    assert_eq!(*drop_observations.borrow(), vec![true]);
+
+    drop(control);
+    ownership.release().unwrap();
+}
+
+#[test]
+fn rediscovery_retry_reconfirms_and_restores_firmware_auto_first() {
+    let (platform, device) = fixture();
+    let interference = Rc::new(Cell::new(RuntimeInterference::None));
+    let mut platform = InterferingPlatform::new(platform, Rc::clone(&interference));
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script) = recovery_control(armed, authority, vec![frame]);
+    script.borrow_mut().fail_cpu = true;
+    control.step(&mut ownership).unwrap();
+    {
+        let mut script = script.borrow_mut();
+        script.fail_cpu = false;
+        script.fail_rediscovery_once = true;
+    }
+    assert!(matches!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::AwaitingRediscovery(_)
+    ));
+
+    interference.set(RuntimeInterference::CpuModeBeforeRecoveryAutoCheck);
+    assert_eq!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::AwaitingSecondSample
+    );
+    assert_eq!(
+        ownership.platform().inner.file_contents(cpu_enable()),
+        Some("2")
+    );
+    assert_eq!(
+        ownership.platform().inner.file_contents(gpu_enable()),
+        Some("2")
+    );
+    assert_eq!(script.borrow().rediscoveries, 2);
+
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
+fn unconfirmed_auto_during_recovery_retains_sensor_bindings() {
+    let (platform, device) = fixture();
+    let interference = Rc::new(Cell::new(RuntimeInterference::None));
+    let mut platform = InterferingPlatform::new(platform, Rc::clone(&interference));
+    let auto_confirmed = platform.firmware_auto_confirmation();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script) = recovery_control(armed, authority, vec![frame, frame]);
+    script.borrow_mut().fail_cpu = true;
+    control.step(&mut ownership).unwrap();
+    script.borrow_mut().fail_cpu = false;
+    assert_eq!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::AwaitingSecondSample
+    );
+    let drop_observations = Rc::new(RefCell::new(Vec::new()));
+    script.borrow_mut().source_drop_probe =
+        Some((Rc::clone(&auto_confirmed), Rc::clone(&drop_observations)));
+    ownership.delay(Duration::from_secs(2));
+    auto_confirmed.set(false);
+    interference.set(RuntimeInterference::CpuModeBeforeRecoveryAutoCheck);
+
+    assert!(matches!(
+        control.step(&mut ownership),
+        Err(TransientSensorControlError::RecoverySample(
+            SampleSetError::FirmwareAutoUnconfirmed
+        ))
+    ));
+    assert!(drop_observations.borrow().is_empty());
+
+    ownership.restore_firmware_auto(&device).unwrap();
+    drop(control);
+    assert_eq!(*drop_observations.borrow(), vec![true]);
+    ownership.release().unwrap();
+}
+
+#[test]
+fn failed_rearming_restoration_retains_sensor_bindings() {
+    let (platform, device) = fixture();
+    let interference = Rc::new(Cell::new(RuntimeInterference::None));
+    let mut platform = InterferingPlatform::new(platform, Rc::clone(&interference));
+    let auto_confirmed = platform.firmware_auto_confirmation();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script) = recovery_control(armed, authority, vec![frame, frame]);
+    script.borrow_mut().fail_cpu = true;
+    control.step(&mut ownership).unwrap();
+    script.borrow_mut().fail_cpu = false;
+    assert_eq!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::AwaitingSecondSample
+    );
+    let drop_observations = Rc::new(RefCell::new(Vec::new()));
+    script.borrow_mut().source_drop_probe =
+        Some((Rc::clone(&auto_confirmed), Rc::clone(&drop_observations)));
+    ownership.delay(Duration::from_secs(2));
+    auto_confirmed.set(false);
+    interference.set(RuntimeInterference::ArmingFailureAndRestorationUnavailable);
+
+    assert!(matches!(
+        control.step(&mut ownership),
+        Err(TransientSensorControlError::Rearming(
+            fan_control_core::FanArmingError::RestorationFailed { .. }
+        ))
+    ));
+    assert!(drop_observations.borrow().is_empty());
+
+    interference.set(RuntimeInterference::None);
+    ownership.restore_firmware_auto(&device).unwrap();
+    drop(control);
+    assert_eq!(*drop_observations.borrow(), vec![true]);
+    ownership.release().unwrap();
+}
+
+#[test]
+fn a_recovery_sample_failure_discards_identity_and_sample_history() {
+    let (mut platform, device) = fixture();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script) = recovery_control(armed, authority, vec![frame, frame, frame]);
+    script.borrow_mut().fail_cpu = true;
+    control.step(&mut ownership).unwrap();
+
+    script.borrow_mut().fail_cpu = false;
+    assert_eq!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::AwaitingSecondSample
+    );
+    ownership.delay(Duration::from_secs(2));
+    script.borrow_mut().fail_gpu = true;
+    assert!(matches!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::FirmwareAutoRestored {
+            fault: SampleSetError::Input {
+                input: fan_control_core::RequiredInput::Gpu,
+                ..
+            }
+        }
+    ));
+
+    script.borrow_mut().fail_gpu = false;
+    assert_eq!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::AwaitingSecondSample
+    );
+    assert_eq!(script.borrow().rediscoveries, 2);
+    assert_eq!(script.borrow().last_sample_binding, Some(2));
+    assert_eq!(control.state(), SensorControlState::FirmwareAutoRecovery);
+    ownership.delay(Duration::from_secs(2));
+    assert_eq!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::Rearmed
+    );
+
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
+fn a_non_sensor_failure_during_recovery_faults_without_automatic_reentry() {
+    let (mut platform, device) = fixture();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script) = recovery_control(armed, authority, vec![frame]);
+    script.borrow_mut().fail_cpu = true;
+    control.step(&mut ownership).unwrap();
+
+    let marker = ownership.platform().operations().len();
+    {
+        let mut script = script.borrow_mut();
+        script.fail_cpu = false;
+        script.fail_power = true;
+    }
+    assert!(matches!(
+        control.step(&mut ownership),
+        Err(TransientSensorControlError::RecoverySample(
+            SampleSetError::Input {
+                input: fan_control_core::RequiredInput::Power,
+                ..
+            }
+        ))
+    ));
+    assert_eq!(control.state(), SensorControlState::Faulted);
+    assert_eq!(script.borrow().rediscoveries, 1);
+    assert!(
+        ownership.platform().operations()[marker..]
+            .iter()
+            .all(|operation| !matches!(operation, PlatformOperation::Write { .. }))
+    );
+    assert!(matches!(
+        control.step(&mut ownership),
+        Err(TransientSensorControlError::Faulted)
+    ));
+
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
+fn a_failed_firmware_auto_restoration_faults_without_rediscovery() {
+    let (platform, device) = fixture();
+    let interference = Rc::new(Cell::new(RuntimeInterference::None));
+    let mut platform = InterferingPlatform::new(platform, Rc::clone(&interference));
+    let auto_confirmed = platform.firmware_auto_confirmation();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script) = recovery_control(armed, authority, vec![frame]);
+    let drop_observations = Rc::new(RefCell::new(Vec::new()));
+    script.borrow_mut().source_drop_probe =
+        Some((Rc::clone(&auto_confirmed), Rc::clone(&drop_observations)));
+    script.borrow_mut().fail_cpu = true;
+    auto_confirmed.set(false);
+    interference.set(RuntimeInterference::RestorationUnavailable);
+
+    assert!(matches!(
+        control.step(&mut ownership),
+        Err(TransientSensorControlError::RestorationFailed {
+            fault: SampleSetError::Input {
+                input: fan_control_core::RequiredInput::Cpu,
+                ..
+            },
+            ..
+        })
+    ));
+    assert_eq!(control.state(), SensorControlState::Faulted);
+    assert_eq!(script.borrow().rediscoveries, 0);
+    assert!(drop_observations.borrow().is_empty());
+    assert!(matches!(
+        control.step(&mut ownership),
+        Err(TransientSensorControlError::Faulted)
+    ));
+
+    interference.set(RuntimeInterference::None);
+    ownership.restore_firmware_auto(&device).unwrap();
+    drop(control);
+    assert_eq!(*drop_observations.borrow(), vec![true]);
+    ownership.release().unwrap();
+}
+
+#[test]
 fn restoration_invalidates_the_arming_receipt_before_sampling_or_output() {
     let (mut platform, device) = fixture();
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
@@ -1046,6 +1638,25 @@ where
         + fan_control_core::IdentityBoundFileAccess
         + fan_control_core::RuntimeLockAccess,
 {
+    let (authority, armed) = arm_with_authority(ownership, device);
+    let candidate = protected_config(PROTECTED_POLICY);
+    drop(authority);
+    (candidate, armed)
+}
+
+fn arm_with_authority<P>(
+    ownership: &mut ControllerOwnership<'_, P>,
+    device: &fan_control_core::AcerHwmonDevice,
+) -> (
+    fan_control_core::AdmittedPolicyAuthority,
+    fan_control_core::ArmedFanControl,
+)
+where
+    P: fan_control_core::BoundedIdentityBoundFileAccess
+        + fan_control_core::Clock
+        + fan_control_core::IdentityBoundFileAccess
+        + fan_control_core::RuntimeLockAccess,
+{
     ownership.restore_firmware_auto(device).unwrap();
     let authority = admit_policy_authority(
         ownership,
@@ -1083,7 +1694,7 @@ where
         panic!("second complete sample must arm the freshness gate")
     };
     let armed = arm_both_fans_safely(ownership, device, &authority, &candidate, sample).unwrap();
-    (candidate, armed)
+    (authority, armed)
 }
 
 fn fixture() -> (FakePlatform, fan_control_core::AcerHwmonDevice) {
