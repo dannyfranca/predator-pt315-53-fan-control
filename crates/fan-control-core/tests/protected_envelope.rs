@@ -45,7 +45,7 @@ gpu_curve = [
 #[test]
 fn equal_and_more_aggressive_candidates_are_accepted() {
     let protected = validated(PROTECTED_CONFIG);
-    assert!(validate_against_protected_envelope(validated(PROTECTED_CONFIG), &protected).is_ok());
+    assert!(validate_against_protected_envelope(&validated(PROTECTED_CONFIG), &protected).is_ok());
 
     let mut candidate = PROTECTED_CONFIG.parse::<toml::Table>().unwrap();
     candidate["fans"]["cpu"]["minimum_duty_percent"] = toml::Value::Integer(35);
@@ -55,19 +55,12 @@ fn equal_and_more_aggressive_candidates_are_accepted() {
         candidate["profiles"][profile.name()]["gpu_curve"] = curve(&[(0, 30), (45, 80), (82, 100)]);
     }
 
-    let protected_config = validate_against_protected_envelope(
-        validated(&toml::to_string(&candidate).unwrap()),
-        &protected,
-    )
-    .unwrap();
-    assert_eq!(
-        protected_config
-            .config()
-            .fans()
-            .cpu()
-            .minimum_duty()
-            .value(),
-        35.0
+    assert!(
+        validate_against_protected_envelope(
+            &validated(&toml::to_string(&candidate).unwrap()),
+            &protected,
+        )
+        .is_ok()
     );
 }
 
@@ -87,7 +80,7 @@ fn mathematically_equal_curves_ignore_interpolation_round_off() {
     );
 
     assert!(
-        validate_against_protected_envelope(validated(&candidate), &validated(&protected)).is_ok()
+        validate_against_protected_envelope(&validated(&candidate), &validated(&protected)).is_ok()
     );
 }
 
@@ -106,7 +99,7 @@ fn protected_only_breakpoints_expose_weaker_candidate_segments() {
 
             assert_eq!(
                 validate_against_protected_envelope(
-                    validated(&candidate),
+                    &validated(&candidate),
                     &validated(PROTECTED_CONFIG)
                 ),
                 Err(EnvelopeValidationError::CurveBelowProtected {
@@ -135,7 +128,7 @@ fn candidate_only_breakpoints_expose_weaker_candidate_segments() {
     );
 
     assert_eq!(
-        validate_against_protected_envelope(validated(&candidate), &validated(&protected)),
+        validate_against_protected_envelope(&validated(&candidate), &validated(&protected)),
         Err(EnvelopeValidationError::CurveBelowProtected {
             profile: Profile::Ac,
             component: Component::Cpu,
@@ -150,7 +143,7 @@ fn each_candidate_fan_floor_must_meet_its_protected_floor() {
         let candidate = replace_fan_floor(PROTECTED_CONFIG, fan, candidate_value);
         assert_eq!(
             validate_against_protected_envelope(
-                validated(&candidate),
+                &validated(&candidate),
                 &validated(PROTECTED_CONFIG)
             ),
             Err(EnvelopeValidationError::FanFloorBelowProtected {

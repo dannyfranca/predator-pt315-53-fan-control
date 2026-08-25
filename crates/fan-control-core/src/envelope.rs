@@ -2,19 +2,6 @@ use std::{error::Error, fmt};
 
 use crate::{Component, Fan, Profile, ValidatedConfig, ValidatedProfileConfig};
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProtectedConfig(ValidatedConfig);
-
-impl ProtectedConfig {
-    pub const fn config(&self) -> &ValidatedConfig {
-        &self.0
-    }
-
-    pub fn into_config(self) -> ValidatedConfig {
-        self.0
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EnvelopeValidationError {
     FanFloorBelowProtected {
@@ -58,9 +45,9 @@ impl fmt::Display for EnvelopeValidationError {
 impl Error for EnvelopeValidationError {}
 
 pub fn validate_against_protected_envelope(
-    candidate: ValidatedConfig,
+    candidate: &ValidatedConfig,
     protected: &ValidatedConfig,
-) -> Result<ProtectedConfig, EnvelopeValidationError> {
+) -> Result<(), EnvelopeValidationError> {
     validate_floor(
         Fan::Cpu,
         candidate.fans().cpu().minimum_duty().value(),
@@ -83,7 +70,7 @@ pub fn validate_against_protected_envelope(
         protected.profiles().battery(),
     )?;
 
-    Ok(ProtectedConfig(candidate))
+    Ok(())
 }
 
 fn validate_floor(
