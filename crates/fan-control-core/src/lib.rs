@@ -2,6 +2,10 @@
 
 use std::fmt;
 
+mod demand;
+
+pub use demand::{DemandPercent, DemandPercentError, Pwm};
+
 /// Source-build status before model qualification and configuration exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupStatus {
