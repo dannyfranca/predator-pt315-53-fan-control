@@ -38,6 +38,8 @@ impl TryFrom<f64> for DemandPercent {
 pub struct Pwm(u8);
 
 impl Pwm {
+    pub const MAXIMUM: Self = Self(u8::MAX);
+
     /// Returns the PWM value in the inclusive range `0..=255`.
     pub const fn value(self) -> u8 {
         self.0

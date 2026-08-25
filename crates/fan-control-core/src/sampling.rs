@@ -178,6 +178,10 @@ pub enum SampleSetError {
     ClockWentBackwards,
     DeadlineOverflow,
     CaptureCycleOverflow,
+    CadenceMissed {
+        expected_at: Duration,
+        observed_at: Duration,
+    },
 }
 
 impl fmt::Display for SampleSetError {
@@ -195,6 +199,13 @@ impl fmt::Display for SampleSetError {
             Self::ClockWentBackwards => formatter.write_str("monotonic clock went backwards"),
             Self::DeadlineOverflow => formatter.write_str("sample deadline overflowed"),
             Self::CaptureCycleOverflow => formatter.write_str("sample capture cycle overflowed"),
+            Self::CadenceMissed {
+                expected_at,
+                observed_at,
+            } => write!(
+                formatter,
+                "control-cycle cadence missed: expected at {expected_at:?}, observed at {observed_at:?}"
+            ),
         }
     }
 }
@@ -218,11 +229,8 @@ pub struct FreshSampleGate {
 
 impl FreshSampleGate {
     pub fn new() -> Self {
-        let gate_id = NEXT_GATE_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .expect("sample gate ID space exhausted");
         Self {
-            gate_id,
+            gate_id: next_gate_id(),
             next_cycle_id: 0,
             last_successful_cycle_started_at: None,
             last_successful_cycle_completed_at: None,
@@ -290,6 +298,101 @@ impl Default for FreshSampleGate {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Schedules exactly one fresh complete sample set for each normal control cycle.
+#[derive(Debug)]
+pub struct ControlCycleSampleGate {
+    gate_id: u64,
+    next_cycle_id: u64,
+    last_successful_cycle_started_at: Option<Duration>,
+    last_successful_cycle_completed_at: Option<Duration>,
+}
+
+impl ControlCycleSampleGate {
+    pub fn new() -> Self {
+        Self {
+            gate_id: next_gate_id(),
+            next_cycle_id: 0,
+            last_successful_cycle_started_at: None,
+            last_successful_cycle_completed_at: None,
+        }
+    }
+
+    pub fn sample(
+        &mut self,
+        sources: &mut dyn SampleSources,
+        clock: &mut dyn Clock,
+    ) -> Result<CompleteSampleSet, SampleSetError> {
+        if let Some(previous_started_at) = self.last_successful_cycle_started_at {
+            let expected_at = previous_started_at
+                .checked_add(NORMAL_SAMPLE_CADENCE)
+                .ok_or(SampleSetError::DeadlineOverflow)?;
+            let observed_at = clock.monotonic_now();
+            if observed_at < previous_started_at {
+                return Err(SampleSetError::ClockWentBackwards);
+            }
+            let latest = expected_at
+                .checked_add(MAX_SAMPLE_CADENCE_JITTER)
+                .ok_or(SampleSetError::DeadlineOverflow)?;
+            if observed_at > latest {
+                return Err(SampleSetError::CadenceMissed {
+                    expected_at,
+                    observed_at,
+                });
+            }
+            if observed_at < expected_at {
+                clock.delay(expected_at - observed_at);
+            }
+        }
+
+        let capture_cycle = CaptureCycle {
+            gate_id: self.gate_id,
+            cycle_id: self.next_cycle_id,
+        };
+        self.next_cycle_id = self
+            .next_cycle_id
+            .checked_add(1)
+            .ok_or(SampleSetError::CaptureCycleOverflow)?;
+        let sample = collect_complete_set(
+            sources,
+            clock,
+            capture_cycle,
+            self.last_successful_cycle_completed_at,
+        )?;
+
+        if let Some(previous_started_at) = self.last_successful_cycle_started_at {
+            let elapsed = sample
+                .cycle_started_at
+                .checked_sub(previous_started_at)
+                .ok_or(SampleSetError::ClockWentBackwards)?;
+            if !is_normal_cadence(elapsed) {
+                let expected_at = previous_started_at
+                    .checked_add(NORMAL_SAMPLE_CADENCE)
+                    .ok_or(SampleSetError::DeadlineOverflow)?;
+                return Err(SampleSetError::CadenceMissed {
+                    expected_at,
+                    observed_at: sample.cycle_started_at,
+                });
+            }
+        }
+
+        self.last_successful_cycle_started_at = Some(sample.cycle_started_at);
+        self.last_successful_cycle_completed_at = Some(sample.completed_at);
+        Ok(sample)
+    }
+}
+
+impl Default for ControlCycleSampleGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn next_gate_id() -> u64 {
+    NEXT_GATE_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("sample gate ID space exhausted")
 }
 
 fn is_normal_cadence(elapsed: Duration) -> bool {

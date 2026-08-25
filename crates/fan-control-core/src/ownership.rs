@@ -66,6 +66,10 @@ where
         self.platform
     }
 
+    pub(crate) fn platform_mut(&mut self) -> &mut P {
+        self.platform
+    }
+
     /// Collects a fresh sample only after re-confirming both fans remain in Firmware Auto.
     pub fn collect_fresh_sample(
         &mut self,

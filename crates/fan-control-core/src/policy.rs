@@ -78,7 +78,7 @@ impl From<Duration> for MonotonicTime {
 
 impl MonotonicTime {
     fn elapsed_since(self, earlier: Self) -> Duration {
-        self.0 - earlier.0
+        self.0.saturating_sub(earlier.0)
     }
 }
 

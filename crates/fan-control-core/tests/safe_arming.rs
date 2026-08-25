@@ -1,10 +1,14 @@
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use fan_control_core::{
-    AdmittedPolicyAuthority, ArmingReadySample, BoundedFileAccess, Clock,
-    CompatibilityDeclarationV1, CompatibilityObservation, ControllerOwnership, EmergencyFanStatus,
-    EvidenceCompleteness, ExternalPower, FakePlatform, FakeRuntimeLock, Fan, FanArmingError,
-    FanArmingFailure, FanArmingOperation, FanWriteBackend, FilePermissions, FreshSampleGate,
+    AcerHwmonDiscoveryError, AdmittedPolicyAuthority, ArmingReadySample, BoundedFileAccess,
+    BoundedIdentityBoundFileAccess, Clock, CompatibilityDeclarationV1, CompatibilityObservation,
+    ControllerOwnership, EmergencyFanStatus, EvidenceCompleteness, ExternalPower, FakePlatform,
+    FakeRuntimeLock, Fan, FanArmingError, FanArmingFailure, FanArmingOperation, FanWriteBackend,
+    FileAccess, FileIdentity, FilePermissions, FreshSampleGate, IdentityBoundFileAccess,
     ObservedFanAbi, ObservedSample, OwnershipSampleReadiness, PlatformError, PlatformErrorKind,
     PlatformOperation, RuntimeLockAccess, RuntimeLockError, SampleCapture, SampleSetError,
     SampleSourceError, SampleSources, ServiceAccess, TemperatureCelsius, ValidatedConfig,
@@ -260,7 +264,12 @@ fn admitted_two_sample_handover_reaches_verified_maximum_without_normal_demand()
         .iter()
         .position(|operation| is_write(operation, gpu_enable(), "1"))
         .unwrap();
-    assert_eq!(cpu_custom.abs_diff(gpu_custom), 1);
+    assert!(cpu_custom < gpu_custom);
+    assert!(
+        operations[cpu_custom + 1..gpu_custom]
+            .iter()
+            .all(|operation| !matches!(operation, PlatformOperation::Write { .. }))
+    );
     let first_custom = cpu_custom.min(gpu_custom);
     for path in [cpu_pwm(), gpu_pwm()] {
         let write = operations
@@ -881,6 +890,84 @@ where
     (authority, candidate, sample)
 }
 
+#[test]
+fn arming_rejects_root_and_endpoint_rebinds_at_each_handover_phase() {
+    for (fault, expected_fan, expected_operation) in [
+        (
+            InjectedFault::RebindRootBeforeMaximum,
+            Fan::Cpu,
+            FanArmingOperation::StageMaximum,
+        ),
+        (
+            InjectedFault::RebindGpuPwmBeforeMaximum,
+            Fan::Gpu,
+            FanArmingOperation::StageMaximum,
+        ),
+        (
+            InjectedFault::RebindCpuEnableBeforeCustom,
+            Fan::Cpu,
+            FanArmingOperation::EnterCustom,
+        ),
+        (
+            InjectedFault::RebindGpuEnableBeforeCustom,
+            Fan::Gpu,
+            FanArmingOperation::EnterCustom,
+        ),
+        (
+            InjectedFault::RebindCpuTachBeforeRead,
+            Fan::Cpu,
+            FanArmingOperation::ReadTachometer,
+        ),
+        (
+            InjectedFault::RebindGpuTachBeforeRead,
+            Fan::Gpu,
+            FanArmingOperation::ReadTachometer,
+        ),
+    ] {
+        let (platform, device) = fixture("2400\n", "2600\n");
+        let mut platform = PathAwarePlatform::new(platform, fault);
+        let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+        let (authority, candidate, sample) = admit_and_sample(&mut ownership, &device);
+        let marker = ownership.platform().inner.operations().len();
+
+        let error = arm_both_fans_safely(&mut ownership, &device, &authority, &candidate, sample)
+            .unwrap_err();
+
+        assert!(matches!(
+            error.reason(),
+            FanArmingFailure::Platform { fan, operation, .. }
+                if *fan == expected_fan && *operation == expected_operation
+        ));
+        assert_auto_restoration_attempted(&ownership.platform().inner, marker);
+        assert_eq!(
+            ownership.platform().inner.file_contents(cpu_enable()),
+            Some("2")
+        );
+        assert_eq!(
+            ownership.platform().inner.file_contents(gpu_enable()),
+            Some("2")
+        );
+        ownership.release().unwrap();
+    }
+}
+
+#[test]
+fn arming_preserves_post_discovery_ambiguity_attribution() {
+    let (platform, device) = fixture("2400\n", "2600\n");
+    let mut platform = PathAwarePlatform::new(platform, InjectedFault::AddAmbiguousAcerDevice);
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, candidate, sample) = admit_and_sample(&mut ownership, &device);
+
+    let error =
+        arm_both_fans_safely(&mut ownership, &device, &authority, &candidate, sample).unwrap_err();
+
+    assert!(matches!(
+        error.reason(),
+        FanArmingFailure::DeviceAbi(AcerHwmonDiscoveryError::AmbiguousDevices { count: 2 })
+    ));
+    ownership.release().unwrap();
+}
+
 fn fixture(cpu_rpm: &str, gpu_rpm: &str) -> (FakePlatform, fan_control_core::AcerHwmonDevice) {
     let root = Path::new(ACER_ROOT);
     let mut platform = FakePlatform::new();
@@ -925,6 +1012,13 @@ enum InjectedFault {
     RejectCpuTachRead,
     RejectGpuTachRead,
     ExpireCustomConfirmation,
+    RebindRootBeforeMaximum,
+    RebindGpuPwmBeforeMaximum,
+    RebindCpuEnableBeforeCustom,
+    RebindGpuEnableBeforeCustom,
+    RebindCpuTachBeforeRead,
+    RebindGpuTachBeforeRead,
+    AddAmbiguousAcerDevice,
 }
 
 #[derive(Debug)]
@@ -967,6 +1061,47 @@ impl PathAwarePlatform {
 
     fn injected_error(message: &str) -> PlatformError {
         PlatformError::new(PlatformErrorKind::Unavailable, message)
+    }
+}
+
+impl FileAccess for PathAwarePlatform {
+    fn read(&mut self, path: &Path) -> Result<String, PlatformError> {
+        self.inner.read(path)
+    }
+
+    fn write(&mut self, path: &Path, contents: &str) -> Result<(), PlatformError> {
+        self.inner.write(path, contents)
+    }
+
+    fn list(&mut self, directory: &Path) -> Result<Vec<std::path::PathBuf>, PlatformError> {
+        self.inner.list(directory)
+    }
+
+    fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
+        self.inner.permissions(path)
+    }
+}
+
+impl IdentityBoundFileAccess for PathAwarePlatform {
+    fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
+        self.inner.identity(path)
+    }
+
+    fn read_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+        child: &str,
+    ) -> Result<String, PlatformError> {
+        self.inner.read_bound(directory, expected, child)
+    }
+
+    fn list_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+    ) -> Result<Vec<std::path::PathBuf>, PlatformError> {
+        self.inner.list_bound(directory, expected)
     }
 }
 
@@ -1080,6 +1215,44 @@ impl BoundedFileAccess for PathAwarePlatform {
         result
     }
 
+    fn list_before(
+        &mut self,
+        directory: &Path,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        if !self.fault_consumed
+            && self.sampling_delay_seen
+            && self.fault == InjectedFault::AddAmbiguousAcerDevice
+            && directory == Path::new(HWMON_ROOT)
+        {
+            self.fault_consumed = true;
+            let root = Path::new(HWMON_ROOT).join("hwmon8");
+            self.inner.insert_file_with_permissions(
+                root.join("name"),
+                "acer\n",
+                FilePermissions::READ_ONLY,
+            );
+            for channel in 1..=2 {
+                self.inner.insert_file_with_permissions(
+                    root.join(format!("pwm{channel}")),
+                    "128\n",
+                    FilePermissions::READ_WRITE,
+                );
+                self.inner.insert_file_with_permissions(
+                    root.join(format!("pwm{channel}_enable")),
+                    "2\n",
+                    FilePermissions::READ_WRITE,
+                );
+                self.inner.insert_file_with_permissions(
+                    root.join(format!("fan{channel}_input")),
+                    "2500\n",
+                    FilePermissions::READ_ONLY,
+                );
+            }
+        }
+        self.inner.list_before(directory, deadline)
+    }
+
     fn write_before(
         &mut self,
         path: &Path,
@@ -1128,6 +1301,135 @@ impl BoundedFileAccess for PathAwarePlatform {
             return result;
         }
         self.inner.write_before(path, contents, deadline)
+    }
+}
+
+impl BoundedIdentityBoundFileAccess for PathAwarePlatform {
+    fn identity_before(
+        &mut self,
+        path: &Path,
+        deadline: Duration,
+    ) -> Result<FileIdentity, PlatformError> {
+        self.inner.identity_before(path, deadline)
+    }
+
+    fn read_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<String, PlatformError> {
+        let path = directory.join(child);
+        if !self.fault_consumed
+            && ((self.fault == InjectedFault::RebindCpuTachBeforeRead && child == "fan1_input")
+                || (self.fault == InjectedFault::RebindGpuTachBeforeRead && child == "fan2_input"))
+        {
+            self.fault_consumed = true;
+            self.inner.rebind_path_identity(&path);
+        }
+        self.require_identity(directory, expected_directory, deadline)?;
+        self.require_identity(&path, expected_child, deadline)?;
+        let result = self.read_before(&path, deadline)?;
+        self.require_identity(directory, expected_directory, deadline)?;
+        self.require_identity(&path, expected_child, deadline)?;
+        Ok(result)
+    }
+
+    fn list_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        self.inner
+            .list_bound_before(directory, expected_directory, deadline)
+    }
+
+    fn permissions_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<FilePermissions, PlatformError> {
+        self.inner.permissions_bound_before(
+            directory,
+            expected_directory,
+            child,
+            expected_child,
+            deadline,
+        )
+    }
+
+    fn write_bound_if_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        expected_children: &[(&str, FileIdentity)],
+        guards: &[(&str, &str)],
+        target_child: &str,
+        contents: &str,
+        deadline: Duration,
+    ) -> Result<(), PlatformError> {
+        if !self.fault_consumed {
+            let rebind = match self.fault {
+                InjectedFault::RebindRootBeforeMaximum
+                    if target_child == "pwm1" && contents == "255" =>
+                {
+                    Some(directory.to_path_buf())
+                }
+                InjectedFault::RebindGpuPwmBeforeMaximum
+                    if target_child == "pwm2" && contents == "255" =>
+                {
+                    Some(directory.join(target_child))
+                }
+                InjectedFault::RebindCpuEnableBeforeCustom
+                    if target_child == "pwm1_enable" && contents == "1" =>
+                {
+                    Some(directory.join(target_child))
+                }
+                InjectedFault::RebindGpuEnableBeforeCustom
+                    if target_child == "pwm2_enable" && contents == "1" =>
+                {
+                    Some(directory.join(target_child))
+                }
+                _ => None,
+            };
+            if let Some(path) = rebind {
+                self.fault_consumed = true;
+                self.inner.rebind_path_identity(path);
+            }
+        }
+        self.require_identity(directory, expected_directory, deadline)?;
+        for (child, expected) in expected_children {
+            self.require_identity(&directory.join(child), *expected, deadline)?;
+        }
+        for (child, expected) in guards {
+            let path = directory.join(child);
+            let actual = self.read_before(&path, deadline)?;
+            if actual.trim() != *expected {
+                return Err(Self::injected_error("guarded arming state changed"));
+            }
+        }
+        self.write_before(&directory.join(target_child), contents, deadline)
+    }
+}
+
+impl PathAwarePlatform {
+    fn require_identity(
+        &mut self,
+        path: &Path,
+        expected: FileIdentity,
+        deadline: Duration,
+    ) -> Result<(), PlatformError> {
+        if self.inner.identity_before(path, deadline)? == expected {
+            Ok(())
+        } else {
+            Err(Self::injected_error("bound arming identity changed"))
+        }
     }
 }
 

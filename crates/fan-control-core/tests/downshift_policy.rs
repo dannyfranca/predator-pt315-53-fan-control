@@ -109,6 +109,25 @@ fn a_sustained_decrease_holds_then_uses_elapsed_monotonic_time() {
 }
 
 #[test]
+fn first_decrease_after_initialization_starts_a_new_hold_without_panicking() {
+    let policy = DownshiftPolicy::new(Duration::from_secs(10), 1.0).unwrap();
+    let mut smoother = DemandSmoother::new(
+        demand(80.0),
+        policy,
+        MonotonicTime::from(Duration::from_secs(2)),
+    );
+
+    assert_eq!(
+        smoother.update(demand(40.0), MonotonicTime::from(Duration::from_secs(4))),
+        Ok(demand(80.0))
+    );
+    assert_eq!(
+        smoother.update(demand(40.0), MonotonicTime::from(Duration::from_secs(16))),
+        Ok(demand(78.0))
+    );
+}
+
+#[test]
 fn time_regression_is_rejected_without_changing_commanded_demand() {
     let policy = DownshiftPolicy::new(Duration::from_secs(10), 1.0).unwrap();
     let mut smoother = DemandSmoother::new(
