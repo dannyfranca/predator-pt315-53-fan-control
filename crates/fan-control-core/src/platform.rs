@@ -10,6 +10,7 @@ use std::{
 pub enum PlatformErrorKind {
     NotFound,
     PermissionDenied,
+    TimedOut,
     Unavailable,
 }
 
@@ -48,6 +49,18 @@ pub trait FileAccess {
     fn list(&mut self, directory: &Path) -> Result<Vec<PathBuf>, PlatformError>;
 
     fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError>;
+}
+
+/// File access that returns no later than an absolute monotonic deadline.
+pub trait BoundedFileAccess {
+    fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError>;
+
+    fn write_before(
+        &mut self,
+        path: &Path,
+        contents: &str,
+        deadline: Duration,
+    ) -> Result<(), PlatformError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +125,7 @@ pub enum FakeStep {
     Pass,
     Fail(PlatformError),
     Disappear(PathBuf),
+    Advance(Duration),
 }
 
 #[derive(Debug, Default)]
@@ -221,6 +235,10 @@ impl FakePlatform {
                 self.remove_path(path);
                 Ok(())
             }
+            FakeStep::Advance(duration) => {
+                self.monotonic_time = self.monotonic_time.saturating_add(duration);
+                Ok(())
+            }
         }
     }
 
@@ -237,13 +255,48 @@ impl FakePlatform {
             format!("platform path is not {operation}: {}", path.display()),
         )
     }
-}
 
-impl FileAccess for FakePlatform {
-    fn read(&mut self, path: &Path) -> Result<String, PlatformError> {
-        self.operations
-            .push(PlatformOperation::Read(path.to_path_buf()));
-        self.apply_next_step()?;
+    fn timed_out(path: &Path, operation: &str) -> PlatformError {
+        PlatformError::new(
+            PlatformErrorKind::TimedOut,
+            format!(
+                "platform {operation} exceeded its deadline: {}",
+                path.display()
+            ),
+        )
+    }
+
+    fn apply_next_step_before(
+        &mut self,
+        path: &Path,
+        operation: &str,
+        deadline: Duration,
+    ) -> Result<(), PlatformError> {
+        if self.monotonic_time >= deadline {
+            return Err(Self::timed_out(path, operation));
+        }
+
+        match self.steps.pop_front().unwrap_or(FakeStep::Pass) {
+            FakeStep::Advance(duration) => {
+                let completion = self.monotonic_time.saturating_add(duration);
+                if completion > deadline {
+                    self.monotonic_time = deadline;
+                    Err(Self::timed_out(path, operation))
+                } else {
+                    self.monotonic_time = completion;
+                    Ok(())
+                }
+            }
+            FakeStep::Pass => Ok(()),
+            FakeStep::Fail(error) => Err(error),
+            FakeStep::Disappear(path) => {
+                self.remove_path(path);
+                Ok(())
+            }
+        }
+    }
+
+    fn read_file(&self, path: &Path) -> Result<String, PlatformError> {
         let file = self.files.get(path).ok_or_else(|| Self::missing(path))?;
         if !file.permissions.readable() {
             return Err(Self::permission_denied(path, "readable"));
@@ -251,12 +304,7 @@ impl FileAccess for FakePlatform {
         Ok(file.contents.clone())
     }
 
-    fn write(&mut self, path: &Path, contents: &str) -> Result<(), PlatformError> {
-        self.operations.push(PlatformOperation::Write {
-            path: path.to_path_buf(),
-            contents: contents.to_owned(),
-        });
-        self.apply_next_step()?;
+    fn write_file(&mut self, path: &Path, contents: &str) -> Result<(), PlatformError> {
         let file = self
             .files
             .get_mut(path)
@@ -266,6 +314,24 @@ impl FileAccess for FakePlatform {
         }
         contents.clone_into(&mut file.contents);
         Ok(())
+    }
+}
+
+impl FileAccess for FakePlatform {
+    fn read(&mut self, path: &Path) -> Result<String, PlatformError> {
+        self.operations
+            .push(PlatformOperation::Read(path.to_path_buf()));
+        self.apply_next_step()?;
+        self.read_file(path)
+    }
+
+    fn write(&mut self, path: &Path, contents: &str) -> Result<(), PlatformError> {
+        self.operations.push(PlatformOperation::Write {
+            path: path.to_path_buf(),
+            contents: contents.to_owned(),
+        });
+        self.apply_next_step()?;
+        self.write_file(path, contents)
     }
 
     fn list(&mut self, directory: &Path) -> Result<Vec<PathBuf>, PlatformError> {
@@ -299,6 +365,29 @@ impl FileAccess for FakePlatform {
             .get(path)
             .map(|file| file.permissions)
             .ok_or_else(|| Self::missing(path))
+    }
+}
+
+impl BoundedFileAccess for FakePlatform {
+    fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError> {
+        self.operations
+            .push(PlatformOperation::Read(path.to_path_buf()));
+        self.apply_next_step_before(path, "read", deadline)?;
+        self.read_file(path)
+    }
+
+    fn write_before(
+        &mut self,
+        path: &Path,
+        contents: &str,
+        deadline: Duration,
+    ) -> Result<(), PlatformError> {
+        self.operations.push(PlatformOperation::Write {
+            path: path.to_path_buf(),
+            contents: contents.to_owned(),
+        });
+        self.apply_next_step_before(path, "write", deadline)?;
+        self.write_file(path, contents)
     }
 }
 

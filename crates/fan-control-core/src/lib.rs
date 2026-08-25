@@ -10,6 +10,7 @@ mod envelope;
 mod output;
 mod platform;
 mod policy;
+mod restoration;
 mod validation;
 
 pub use acer_hwmon::{AcerHwmonDevice, AcerHwmonDiscoveryError, FanEndpoints, discover_acer_hwmon};
@@ -22,12 +23,15 @@ pub use demand::{DemandPercent, DemandPercentError, Pwm};
 pub use envelope::{EnvelopeValidationError, validate_against_protected_envelope};
 pub use output::{ExternalPower, FanOutputs, calculate_fan_outputs};
 pub use platform::{
-    Clock, FakePlatform, FakeStep, FileAccess, FilePermissions, PlatformError, PlatformErrorKind,
-    PlatformOperation, ServiceAccess,
+    BoundedFileAccess, Clock, FakePlatform, FakeStep, FileAccess, FilePermissions, PlatformError,
+    PlatformErrorKind, PlatformOperation, ServiceAccess,
 };
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
     HysteresisError, MonotonicTime, MonotonicTimeError,
+};
+pub use restoration::{
+    FanRestorationStatus, FirmwareAutoReadback, FirmwareAutoRestorationError, restore_firmware_auto,
 };
 pub use validation::{
     Component, ConfigValidationError, Fan, Profile, ValidatedConfig, ValidatedControlConfig,
