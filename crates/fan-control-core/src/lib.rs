@@ -3,6 +3,7 @@
 use std::fmt;
 
 mod acer_hwmon;
+mod compatibility;
 mod config;
 mod coretemp;
 mod curve;
@@ -17,6 +18,13 @@ mod restoration;
 mod validation;
 
 pub use acer_hwmon::{AcerHwmonDevice, AcerHwmonDiscoveryError, FanEndpoints, discover_acer_hwmon};
+pub use compatibility::{
+    AdmittedCompatibility, CompatibilityAdmissionError, CompatibilityDeclarationError,
+    CompatibilityDeclarationV1, CompatibilityObservation, EscapeHatchCapability,
+    EvidenceCompleteness, FanControlDeclaration, FanWriteBackend, HardwareIdentity, KernelIdentity,
+    ModuleIdentity, ModuleProvenance, ObservedFanAbi, SecureBootRequirements, admit_compatibility,
+    parse_compatibility_v1,
+};
 pub use config::{
     ConfigParseError, ConfigV1, ControlConfig, CurvePointConfig, FanConfig, FansConfig, FiniteF64,
     ProfileConfig, ProfilesConfig, parse_config_v1,
