@@ -6,6 +6,7 @@ mod config;
 mod curve;
 mod demand;
 mod envelope;
+mod output;
 mod policy;
 mod validation;
 
@@ -16,6 +17,7 @@ pub use config::{
 pub use curve::{CurvePoint, DemandCurve, DemandCurveError, TemperatureCelsius, TemperatureError};
 pub use demand::{DemandPercent, DemandPercentError, Pwm};
 pub use envelope::{EnvelopeValidationError, validate_against_protected_envelope};
+pub use output::{ExternalPower, FanOutputs, calculate_fan_outputs};
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
     HysteresisError, MonotonicTime, MonotonicTimeError,
