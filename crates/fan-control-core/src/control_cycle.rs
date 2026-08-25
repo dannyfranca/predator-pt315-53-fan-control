@@ -5,7 +5,7 @@ use crate::{
     Clock, CompleteSampleSet, ControlCycleSampleGate, ControllerOwnership, DemandSmoother,
     EffectiveTemperature, Fan, FanEndpoints, FanOutputs, MonotonicTime, MonotonicTimeError,
     PlatformError, PlatformErrorKind, Pwm, RuntimeLockAccess, SampleSetError, SampleSources,
-    ValidatedConfig,
+    ShutdownRequest, ValidatedConfig,
     output::{calculate_target_demand, fan_outputs_for_demand},
     tachometer::{TachometerObservationError, TachometerValidator},
 };
@@ -23,11 +23,12 @@ pub struct HealthyControl {
     demand_history: Option<ControlDemandHistory>,
     last_outputs: FanOutputs,
     tachometers: TachometerValidator,
+    shutdown: ShutdownRequest,
     invalidated: bool,
 }
 
 impl HealthyControl {
-    pub fn from_armed(armed: ArmedFanControl) -> Self {
+    pub fn from_armed(armed: ArmedFanControl, shutdown: ShutdownRequest) -> Self {
         let crate::arming::ArmedControlParts {
             ownership_id,
             custom_epoch,
@@ -51,6 +52,7 @@ impl HealthyControl {
                 cpu_custom_confirmed_at,
                 gpu_custom_confirmed_at,
             ),
+            shutdown,
             invalidated: false,
         }
     }
@@ -98,6 +100,7 @@ impl CompletedControlCycle {
 pub enum HealthyControlCycleError {
     Invalidated,
     StaleArmingReceipt,
+    ShutdownRequested,
     Sample(SampleSetError),
     PolicyClock(MonotonicTimeError),
     DeadlineOverflow,
@@ -133,6 +136,9 @@ impl fmt::Display for HealthyControlCycleError {
             Self::Invalidated => formatter.write_str("healthy control state is invalidated"),
             Self::StaleArmingReceipt => {
                 formatter.write_str("arming receipt no longer belongs to current ownership")
+            }
+            Self::ShutdownRequested => {
+                formatter.write_str("graceful shutdown permanently cancelled normal control")
             }
             Self::Sample(error) => write!(formatter, "control-cycle sample failed: {error}"),
             Self::PolicyClock(error) => write!(formatter, "control policy clock failed: {error:?}"),
@@ -240,6 +246,17 @@ pub fn run_healthy_control_cycle<P>(
 where
     P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
 {
+    run_control_cycle(ownership, control, sources)
+}
+
+fn run_control_cycle<P>(
+    ownership: &mut ControllerOwnership<'_, P>,
+    control: &mut HealthyControl,
+    sources: &mut dyn SampleSources,
+) -> Result<CompletedControlCycle, HealthyControlCycleError>
+where
+    P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
+{
     if control.invalidated {
         return Err(HealthyControlCycleError::Invalidated);
     }
@@ -248,7 +265,8 @@ where
         return Err(HealthyControlCycleError::StaleArmingReceipt);
     }
 
-    let result = try_run_cycle(ownership, control, sources);
+    let shutdown = control.shutdown.clone();
+    let result = try_run_cycle(ownership, control, sources, &shutdown);
     if result.is_err() {
         control.invalidated = true;
     }
@@ -259,14 +277,17 @@ fn try_run_cycle<P>(
     ownership: &mut ControllerOwnership<'_, P>,
     control: &mut HealthyControl,
     sources: &mut dyn SampleSources,
+    shutdown: &ShutdownRequest,
 ) -> Result<CompletedControlCycle, HealthyControlCycleError>
 where
     P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
 {
+    ensure_running(shutdown)?;
     let device = control.device.clone();
     let sample = control
         .sample_gate
         .sample(sources, ownership.platform_mut())?;
+    ensure_running(shutdown)?;
     let deadline = sample
         .cycle_started_at()
         .checked_add(crate::NORMAL_SAMPLE_CADENCE)
@@ -274,6 +295,7 @@ where
     let (next_history, outputs) = next_outputs(&control.config, control.demand_history, sample)?;
 
     verify_device_before(ownership.platform_mut(), &device, deadline)?;
+    ensure_running(shutdown)?;
     confirm_state(
         ownership.platform_mut(),
         &device,
@@ -282,7 +304,9 @@ where
         ControlCycleOperation::ConfirmBeforeOutput,
         ControlCycleOperation::ReadPriorDuty,
     )?;
+    ensure_running(shutdown)?;
     verify_device_before(ownership.platform_mut(), &device, deadline)?;
+    ensure_running(shutdown)?;
 
     validate_tachometer_response(
         ownership.platform_mut(),
@@ -290,6 +314,7 @@ where
         &mut control.tachometers,
         deadline,
     )?;
+    ensure_running(shutdown)?;
     confirm_state(
         ownership.platform_mut(),
         &device,
@@ -298,7 +323,9 @@ where
         ControlCycleOperation::ConfirmResult,
         ControlCycleOperation::ConfirmResult,
     )?;
+    ensure_running(shutdown)?;
     verify_device_before(ownership.platform_mut(), &device, deadline)?;
+    ensure_running(shutdown)?;
 
     write_changed_outputs(
         ownership.platform_mut(),
@@ -307,8 +334,10 @@ where
         outputs,
         deadline,
         &mut control.tachometers,
+        shutdown,
     )?;
 
+    ensure_running(shutdown)?;
     confirm_state(
         ownership.platform_mut(),
         &device,
@@ -317,7 +346,9 @@ where
         ControlCycleOperation::ConfirmResult,
         ControlCycleOperation::ConfirmResult,
     )?;
+    ensure_running(shutdown)?;
     verify_device_before(ownership.platform_mut(), &device, deadline)?;
+    ensure_running(shutdown)?;
 
     control.demand_history = Some(next_history);
     control.last_outputs = outputs;
@@ -430,6 +461,7 @@ fn write_changed_outputs(
     next: FanOutputs,
     deadline: Duration,
     tachometers: &mut TachometerValidator,
+    shutdown: &ShutdownRequest,
 ) -> Result<(), HealthyControlCycleError> {
     for (fan, endpoints, previous_pwm, next_pwm) in [
         (Fan::Cpu, device.cpu(), previous.cpu_pwm(), next.cpu_pwm()),
@@ -438,6 +470,7 @@ fn write_changed_outputs(
         if previous_pwm == next_pwm {
             continue;
         }
+        ensure_running(shutdown)?;
         confirm(
             platform,
             device,
@@ -448,7 +481,9 @@ fn write_changed_outputs(
             ControlCycleOperation::ConfirmBeforeOutput,
             deadline,
         )?;
+        ensure_running(shutdown)?;
         write(platform, device, endpoints, fan, next_pwm, deadline)?;
+        ensure_running(shutdown)?;
         confirm(
             platform,
             device,
@@ -462,6 +497,14 @@ fn write_changed_outputs(
         tachometers.command_confirmed(fan, next_pwm, platform.monotonic_now());
     }
     Ok(())
+}
+
+fn ensure_running(shutdown: &ShutdownRequest) -> Result<(), HealthyControlCycleError> {
+    if shutdown.is_requested() {
+        Err(HealthyControlCycleError::ShutdownRequested)
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_tachometer_response(

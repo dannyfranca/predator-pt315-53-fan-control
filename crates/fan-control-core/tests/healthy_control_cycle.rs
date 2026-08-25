@@ -14,9 +14,10 @@ use fan_control_core::{
     OwnershipSampleReadiness, PlatformError, PlatformErrorKind, PlatformOperation,
     RuntimeLockAccess, RuntimeLockError, SampleCapture, SampleSetError, SampleSourceError,
     SampleSources, SensorControlState, SensorControlStep, SensorSourceDiscovery, ServiceAccess,
-    TemperatureCelsius, TransientSensorControl, TransientSensorControlError, ValidatedConfig,
-    acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
-    calculate_fan_outputs, discover_acer_hwmon, run_healthy_control_cycle,
+    ShutdownController, ShutdownRequest, TemperatureCelsius, TransientSensorControl,
+    TransientSensorControlError, ValidatedConfig, acquire_controller_ownership,
+    admit_policy_authority, arm_both_fans_safely, calculate_fan_outputs, discover_acer_hwmon,
+    run_healthy_control_cycle,
 };
 
 mod support;
@@ -90,6 +91,37 @@ impl SampleSources for CountingSources {
         let power = self.current().power;
         self.frame += 1;
         Ok(capture.capture(power))
+    }
+}
+
+#[derive(Debug)]
+struct CancellingSources {
+    inner: CountingSources,
+    shutdown: ShutdownRequest,
+}
+
+impl SampleSources for CancellingSources {
+    fn sample_cpu(
+        &mut self,
+        capture: &mut SampleCapture<'_>,
+    ) -> Result<ObservedSample<TemperatureCelsius>, SampleSourceError> {
+        self.inner.sample_cpu(capture)
+    }
+
+    fn sample_gpu(
+        &mut self,
+        capture: &mut SampleCapture<'_>,
+    ) -> Result<ObservedSample<TemperatureCelsius>, SampleSourceError> {
+        let sample = self.inner.sample_gpu(capture)?;
+        self.shutdown.request();
+        Ok(sample)
+    }
+
+    fn observe_external_power(
+        &mut self,
+        capture: &mut SampleCapture<'_>,
+    ) -> Result<ObservedSample<ExternalPower>, SampleSourceError> {
+        self.inner.observe_external_power(capture)
     }
 }
 
@@ -239,9 +271,19 @@ fn recovery_control(
         binding: 0,
     };
     (
-        TransientSensorControl::from_armed(armed, authority, discovery, initial_sources),
+        TransientSensorControl::from_armed(
+            armed,
+            authority,
+            ShutdownRequest::new(),
+            discovery,
+            initial_sources,
+        ),
         script,
     )
+}
+
+fn healthy_control(armed: fan_control_core::ArmedFanControl) -> HealthyControl {
+    HealthyControl::from_armed(armed, ShutdownRequest::new())
 }
 
 #[test]
@@ -249,7 +291,7 @@ fn one_cycle_uses_one_fresh_snapshot_and_verifies_each_changed_output() {
     let (mut platform, device) = fixture();
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (candidate, armed) = arm(&mut ownership, &device);
-    let mut control = HealthyControl::from_armed(armed);
+    let mut control = healthy_control(armed);
     let mut sources = CountingSources::new(vec![Frame {
         cpu: 70.0,
         gpu: 65.0,
@@ -300,11 +342,87 @@ fn one_cycle_uses_one_fresh_snapshot_and_verifies_each_changed_output() {
 }
 
 #[test]
+fn shutdown_during_a_cycle_prevents_normal_writes_and_permanently_invalidates_it() {
+    let (mut platform, device) = fixture();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (_, armed) = arm(&mut ownership, &device);
+    let shutdown = ShutdownController::new();
+    let request = shutdown.request_handle();
+    let mut control = HealthyControl::from_armed(armed, request.clone());
+    let mut sources = CancellingSources {
+        inner: CountingSources::new(vec![Frame {
+            cpu: 70.0,
+            gpu: 65.0,
+            power: ExternalPower::Connected,
+        }]),
+        shutdown: request.clone(),
+    };
+    let marker = ownership.platform().operations().len();
+
+    assert!(matches!(
+        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources),
+        Err(HealthyControlCycleError::ShutdownRequested)
+    ));
+    assert!(
+        !ownership.platform().operations()[marker..]
+            .iter()
+            .any(is_pwm_write)
+    );
+
+    let mut replacement_sources = CountingSources::new(vec![Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    }]);
+    assert!(matches!(
+        run_healthy_control_cycle(&mut ownership, &mut control, &mut replacement_sources,),
+        Err(HealthyControlCycleError::Invalidated)
+    ));
+
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
+fn shutdown_after_cpu_write_prevents_gpu_write() {
+    let (platform, device) = fixture();
+    let injection = Rc::new(Cell::new(RuntimeInterference::None));
+    let shutdown = ShutdownRequest::new();
+    let mut platform =
+        InterferingPlatform::new(platform, Rc::clone(&injection)).with_shutdown(shutdown.clone());
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (_, armed) = arm(&mut ownership, &device);
+    let mut control = HealthyControl::from_armed(armed, shutdown);
+    injection.set(RuntimeInterference::ShutdownAfterCpuWrite);
+    let mut sources = CountingSources::new(vec![Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    }]);
+    let marker = ownership.platform().operations().len();
+
+    assert!(matches!(
+        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources),
+        Err(HealthyControlCycleError::ShutdownRequested)
+    ));
+    let operations = &ownership.platform().operations()[marker..];
+    assert!(operations.iter().any(
+        |operation| matches!(operation, PlatformOperation::Write { path, .. } if path == cpu_pwm())
+    ));
+    assert!(operations.iter().all(
+        |operation| !matches!(operation, PlatformOperation::Write { path, .. } if path == gpu_pwm())
+    ));
+
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
 fn repeated_cycles_wait_for_two_second_cadence_and_never_reuse_samples() {
     let (mut platform, device) = fixture();
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (_, armed) = arm(&mut ownership, &device);
-    let mut control = HealthyControl::from_armed(armed);
+    let mut control = healthy_control(armed);
     let mut sources = CountingSources::new(vec![
         Frame {
             cpu: 60.0,
@@ -345,7 +463,7 @@ fn each_fresh_power_snapshot_selects_that_cycles_profile() {
     let (mut platform, device) = fixture();
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (_, armed) = arm(&mut ownership, &device);
-    let mut control = HealthyControl::from_armed(armed);
+    let mut control = healthy_control(armed);
     let mut sources = CountingSources::new(vec![
         Frame {
             cpu: 70.0,
@@ -383,7 +501,7 @@ fn unchanged_outputs_are_verified_but_not_rewritten() {
     let (mut platform, device) = fixture();
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (_, armed) = arm(&mut ownership, &device);
-    let mut control = HealthyControl::from_armed(armed);
+    let mut control = healthy_control(armed);
     let frame = Frame {
         cpu: 70.0,
         gpu: 65.0,
@@ -417,7 +535,7 @@ fn lower_demand_holds_then_ramps_down_on_fresh_cycle_time() {
     let (mut platform, device) = fixture();
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (_, armed) = arm(&mut ownership, &device);
-    let mut control = HealthyControl::from_armed(armed);
+    let mut control = healthy_control(armed);
     let high = Frame {
         cpu: 80.0,
         gpu: 75.0,
@@ -461,7 +579,7 @@ fn delayed_interpolated_tachometer_response_inside_the_qualified_band_is_accepte
     let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (_, armed) = arm(&mut ownership, &device);
-    let mut control = HealthyControl::from_armed(armed);
+    let mut control = healthy_control(armed);
     injection.set(RuntimeInterference::CpuTachometerZeroOnce);
     let frame = Frame {
         cpu: 60.0,
@@ -486,7 +604,7 @@ fn response_windows_use_confirmed_commands_and_each_fans_own_read_time() {
     let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (_, armed) = arm(&mut ownership, &device);
-    let mut control = HealthyControl::from_armed(armed);
+    let mut control = healthy_control(armed);
     injection.set(RuntimeInterference::DelayCpuConfirmationThenCpuZeroAndDelayedGpuTachometer);
     let frame = Frame {
         cpu: 60.0,
@@ -515,7 +633,7 @@ fn each_fan_faults_independently_after_its_qualified_response_deadline() {
         let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
         let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
         let (_, armed) = arm(&mut ownership, &device);
-        let mut control = HealthyControl::from_armed(armed);
+        let mut control = healthy_control(armed);
         injection.set(interference);
         let frame = Frame {
             cpu: 60.0,
@@ -558,7 +676,7 @@ fn overdue_response_faults_before_a_changed_command_can_replace_it() {
     let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (_, armed) = arm_with_policy_authority(&mut ownership, &device, &policy);
-    let mut control = HealthyControl::from_armed(armed);
+    let mut control = healthy_control(armed);
     injection.set(RuntimeInterference::CpuTachometerZero);
     let mut sources = CountingSources::new(vec![
         Frame {
@@ -601,7 +719,7 @@ fn backing_device_rebind_is_rejected_before_normal_output() {
     let mut platform = InterferingPlatform::new(platform, Rc::clone(&interference));
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (_, armed) = arm(&mut ownership, &device);
-    let mut control = HealthyControl::from_armed(armed);
+    let mut control = healthy_control(armed);
     interference.set(RuntimeInterference::RebindRootOnIdentity);
     let mut sources = CountingSources::new(vec![Frame {
         cpu: 70.0,
@@ -765,7 +883,7 @@ fn run_interfered_cycle(
     let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (_, armed) = arm(&mut ownership, &device);
-    let mut control = HealthyControl::from_armed(armed);
+    let mut control = healthy_control(armed);
     injection.set(interference);
     let mut sources = CountingSources::new(vec![Frame {
         cpu: 70.0,
@@ -785,6 +903,7 @@ fn run_interfered_cycle(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeInterference {
     None,
+    ShutdownAfterCpuWrite,
     RebindRootOnIdentity,
     RebindGpuTachOnIdentity,
     AddAmbiguousAcerDevice,
@@ -829,6 +948,7 @@ struct InterferingPlatform {
     last_normal_write: Option<String>,
     gpu_tachometer_reads_during_interference: usize,
     firmware_auto_confirmed: Rc<Cell<bool>>,
+    shutdown: Option<ShutdownRequest>,
 }
 
 impl InterferingPlatform {
@@ -839,7 +959,13 @@ impl InterferingPlatform {
             last_normal_write: None,
             gpu_tachometer_reads_during_interference: 0,
             firmware_auto_confirmed: Rc::new(Cell::new(false)),
+            shutdown: None,
         }
+    }
+
+    fn with_shutdown(mut self, shutdown: ShutdownRequest) -> Self {
+        self.shutdown = Some(shutdown);
+        self
     }
 
     fn maybe_rebind(&mut self, path: &Path) {
@@ -1282,6 +1408,15 @@ impl BoundedIdentityBoundFileAccess for InterferingPlatform {
         );
         if result.is_ok() {
             self.last_normal_write = Some(target_child.to_owned());
+            if self.interference.get() == RuntimeInterference::ShutdownAfterCpuWrite
+                && target_child == "pwm1"
+            {
+                self.interference.set(RuntimeInterference::None);
+                self.shutdown
+                    .as_ref()
+                    .expect("shutdown interference requires a request handle")
+                    .request();
+            }
             if self.interference.get() == RuntimeInterference::ExpireBeforeCpuReadback
                 && target_child == "pwm1"
             {
@@ -1332,7 +1467,7 @@ fn a_failed_fresh_sample_permanently_invalidates_normal_control() {
     let (mut platform, device) = fixture();
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (_, armed) = arm(&mut ownership, &device);
-    let mut control = HealthyControl::from_armed(armed);
+    let mut control = healthy_control(armed);
     let mut sources = CountingSources::new(vec![Frame {
         cpu: 70.0,
         gpu: 65.0,
@@ -2083,7 +2218,7 @@ fn restoration_invalidates_the_arming_receipt_before_sampling_or_output() {
     let (mut platform, device) = fixture();
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (_, armed) = arm(&mut ownership, &device);
-    let mut control = HealthyControl::from_armed(armed);
+    let mut control = healthy_control(armed);
     ownership.restore_firmware_auto(&device).unwrap();
     let mut sources = CountingSources::new(vec![Frame {
         cpu: 70.0,
