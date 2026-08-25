@@ -246,15 +246,6 @@ fn admitted_two_sample_handover_reaches_verified_maximum_without_normal_demand()
     assert_eq!(armed.cpu_rpm(), 2400);
     assert_eq!(armed.gpu_rpm(), 2600);
     assert!(armed.is_current_for(&ownership));
-    assert_eq!(
-        armed.initial_outputs(),
-        fan_control_core::calculate_fan_outputs(
-            &candidate,
-            TemperatureCelsius::try_from(70.0).unwrap(),
-            TemperatureCelsius::try_from(65.0).unwrap(),
-            ExternalPower::Connected,
-        )
-    );
     assert_eq!(ownership.platform().file_contents(cpu_enable()), Some("1"));
     assert_eq!(ownership.platform().file_contents(gpu_enable()), Some("1"));
     assert_eq!(ownership.platform().file_contents(cpu_pwm()), Some("255"));

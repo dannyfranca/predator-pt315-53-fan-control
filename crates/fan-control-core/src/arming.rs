@@ -3,8 +3,8 @@ use std::{error::Error, fmt, path::Path, time::Duration};
 use crate::{
     AcerHwmonDevice, AdmittedPolicyAuthority, ArmingReadySample, BoundedFileAccess, Clock,
     CompleteSampleSet, ControllerOwnership, EmergencyContainmentReport, EnvelopeValidationError,
-    Fan, FanEndpoints, FanOutputs, FirmwareAutoRestorationError, PlatformError, RuntimeLockAccess,
-    ValidatedConfig, calculate_fan_outputs,
+    Fan, FanEndpoints, FirmwareAutoRestorationError, PlatformError, RuntimeLockAccess,
+    ValidatedConfig,
 };
 
 const FIRMWARE_AUTO: &str = "2";
@@ -24,7 +24,6 @@ const MAXIMUM_PLAUSIBLE_ARMING_RPM: u32 = 20_000;
 pub struct ArmedFanControl {
     ownership_id: u64,
     custom_epoch: u64,
-    initial_outputs: FanOutputs,
     cpu_rpm: u32,
     gpu_rpm: u32,
 }
@@ -35,10 +34,6 @@ impl ArmedFanControl {
         P: RuntimeLockAccess + ?Sized,
     {
         ownership.custom_epoch_is_current(self.ownership_id, self.custom_epoch)
-    }
-
-    pub const fn initial_outputs(&self) -> FanOutputs {
-        self.initial_outputs
     }
 
     pub const fn cpu_rpm(&self) -> u32 {
@@ -267,22 +262,9 @@ where
         if sample_epoch != ownership.sampling_epoch() {
             return Err(FanArmingFailure::ObsoleteSampleEpoch);
         }
-        let initial_outputs = calculate_fan_outputs(
-            candidate,
-            sample.cpu_temperature(),
-            sample.gpu_temperature(),
-            sample.external_power(),
-        );
         let ownership_id = ownership.ownership_id();
         let (platform, custom_epoch) = ownership.begin_custom_transition();
-        arm(
-            platform,
-            device,
-            sample,
-            initial_outputs,
-            ownership_id,
-            custom_epoch,
-        )
+        arm(platform, device, sample, ownership_id, custom_epoch)
     });
 
     match result {
@@ -313,7 +295,6 @@ fn arm<P>(
     platform: &mut P,
     device: &AcerHwmonDevice,
     sample: CompleteSampleSet,
-    initial_outputs: FanOutputs,
     ownership_id: u64,
     custom_epoch: u64,
 ) -> Result<ArmedFanControl, FanArmingFailure>
@@ -426,7 +407,6 @@ where
     Ok(ArmedFanControl {
         ownership_id,
         custom_epoch,
-        initial_outputs,
         cpu_rpm,
         gpu_rpm,
     })
