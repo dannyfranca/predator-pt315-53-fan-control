@@ -23,6 +23,7 @@ mod restoration;
 mod sampling;
 mod sensor_recovery;
 mod tachometer;
+mod termination;
 mod validation;
 
 pub use acer_hwmon::{AcerHwmonDevice, AcerHwmonDiscoveryError, FanEndpoints, discover_acer_hwmon};
@@ -99,6 +100,9 @@ pub use sensor_recovery::{
     TransientSensorControlError,
 };
 pub use tachometer::TachometerCalibrationError;
+pub use termination::{
+    GracefulShutdownFailure, ShutdownController, ShutdownRequest, TerminationSignalHandlers,
+};
 pub use validation::{
     Component, ConfigValidationError, Fan, Profile, ValidatedConfig, ValidatedControlConfig,
     ValidatedFanConfig, ValidatedFansConfig, ValidatedProfileConfig, ValidatedProfilesConfig,

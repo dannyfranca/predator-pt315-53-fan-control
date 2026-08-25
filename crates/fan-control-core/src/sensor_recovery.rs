@@ -5,8 +5,8 @@ use crate::{
     CompletedControlCycle, ControllerOwnership, EmergencyContainmentReport, FanArmingError,
     FirmwareAutoRestorationError, FreshSampleGate, HealthyControl, HealthyControlCycleError,
     IdentityBoundReadAccess, OwnershipSampleReadiness, RequiredInput, RuntimeLockAccess,
-    SampleSetError, SampleSourceError, SampleSources, ValidatedConfig, arm_both_fans_safely,
-    ownership::FirmwareAutoSafingOutcome, run_healthy_control_cycle,
+    SampleSetError, SampleSourceError, SampleSources, ShutdownRequest, ValidatedConfig,
+    arm_both_fans_safely, ownership::FirmwareAutoSafingOutcome, run_healthy_control_cycle,
 };
 
 /// Creates replacement CPU/GPU source bindings while Firmware Auto owns both fans.
@@ -42,6 +42,7 @@ pub enum SensorControlStep {
 #[derive(Debug)]
 pub enum TransientSensorControlError {
     Faulted,
+    ShutdownRequested,
     ControlLatched {
         fault: HealthyControlCycleError,
     },
@@ -75,6 +76,9 @@ impl fmt::Display for TransientSensorControlError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Faulted => formatter.write_str("sensor recovery control is faulted"),
+            Self::ShutdownRequested => {
+                formatter.write_str("graceful shutdown permanently cancelled sensor control")
+            }
             Self::ControlLatched { fault } => {
                 write!(
                     formatter,
@@ -125,7 +129,7 @@ impl fmt::Display for TransientSensorControlError {
 impl Error for TransientSensorControlError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Faulted => None,
+            Self::Faulted | Self::ShutdownRequested => None,
             Self::ControlLatched { fault }
             | Self::ControlLatchContained { fault, .. }
             | Self::ControlLatchCritical { fault, .. } => Some(fault),
@@ -170,6 +174,7 @@ where
 {
     authority: AdmittedPolicyAuthority,
     discovery: D,
+    shutdown: ShutdownRequest,
     state: Option<ControlState<D::Sources>>,
 }
 
@@ -180,14 +185,16 @@ where
     pub fn from_armed(
         armed: crate::ArmedFanControl,
         authority: AdmittedPolicyAuthority,
+        shutdown: ShutdownRequest,
         discovery: D,
         sources: D::Sources,
     ) -> Self {
         Self {
             authority,
             discovery,
+            shutdown: shutdown.clone(),
             state: Some(ControlState::Custom {
-                control: Box::new(HealthyControl::from_armed(armed)),
+                control: Box::new(HealthyControl::from_armed(armed, shutdown)),
                 sources,
             }),
         }
@@ -225,6 +232,12 @@ where
                     self.state = Some(ControlState::Custom { control, sources });
                     Ok(SensorControlStep::Completed(completed))
                 }
+                Err(HealthyControlCycleError::ShutdownRequested) => {
+                    self.state = Some(ControlState::Faulted {
+                        retained_sources: Some(sources),
+                    });
+                    Err(TransientSensorControlError::ShutdownRequested)
+                }
                 Err(error) => {
                     let Some(fault) = recoverable_sensor_cycle_fault(&error).cloned() else {
                         let (_, device) = (*control).into_recovery_parts();
@@ -241,6 +254,12 @@ where
                     mut gate,
                     mut sources,
                 } = *recovery;
+                if self.shutdown.is_requested() {
+                    self.state = Some(ControlState::Faulted {
+                        retained_sources: sources,
+                    });
+                    return Err(TransientSensorControlError::ShutdownRequested);
+                }
                 if sources.is_none() && !ownership.refresh_firmware_auto_confirmation(&device) {
                     return self.latch_recovery_fault(
                         ownership,
@@ -285,6 +304,12 @@ where
                         Ok(SensorControlStep::AwaitingSecondSample)
                     }
                     Ok(OwnershipSampleReadiness::Ready(sample)) => {
+                        if self.shutdown.is_requested() {
+                            self.state = Some(ControlState::Faulted {
+                                retained_sources: sources,
+                            });
+                            return Err(TransientSensorControlError::ShutdownRequested);
+                        }
                         match arm_both_fans_safely(
                             ownership,
                             &device,
@@ -294,7 +319,10 @@ where
                         ) {
                             Ok(armed) => {
                                 self.state = Some(ControlState::Custom {
-                                    control: Box::new(HealthyControl::from_armed(armed)),
+                                    control: Box::new(HealthyControl::from_armed(
+                                        armed,
+                                        self.shutdown.clone(),
+                                    )),
                                     sources: sources
                                         .expect("ready sample was captured from installed sources"),
                                 });
