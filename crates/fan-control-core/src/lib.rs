@@ -15,6 +15,7 @@ mod output;
 mod platform;
 mod policy;
 mod restoration;
+mod sampling;
 mod validation;
 
 pub use acer_hwmon::{AcerHwmonDevice, AcerHwmonDiscoveryError, FanEndpoints, discover_acer_hwmon};
@@ -51,6 +52,11 @@ pub use restoration::{
     EmergencyContainmentReport, EmergencyFanStatus, FanModeFailure, FanRestorationStatus,
     FirmwareAutoReadback, FirmwareAutoRestorationError, MaximumPwmReadback,
     contain_custom_fans_at_maximum, recover_firmware_auto, restore_firmware_auto,
+};
+pub use sampling::{
+    CompleteSampleSet, FreshSampleGate, MAX_SAMPLE_CADENCE_JITTER, NORMAL_SAMPLE_CADENCE,
+    ObservedSample, RequiredInput, SampleCapture, SampleReadiness, SampleSetError,
+    SampleSourceError, SampleSources,
 };
 pub use validation::{
     Component, ConfigValidationError, Fan, Profile, ValidatedConfig, ValidatedControlConfig,
