@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "crates/fan-control-core",
+    "crates/fan-control-daemon",
+    "crates/fan-control-qualify",
+    "crates/fan-control-restore",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
