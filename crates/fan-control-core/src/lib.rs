@@ -7,6 +7,7 @@ mod curve;
 mod demand;
 mod envelope;
 mod output;
+mod platform;
 mod policy;
 mod validation;
 
@@ -18,6 +19,10 @@ pub use curve::{CurvePoint, DemandCurve, DemandCurveError, TemperatureCelsius, T
 pub use demand::{DemandPercent, DemandPercentError, Pwm};
 pub use envelope::{EnvelopeValidationError, validate_against_protected_envelope};
 pub use output::{ExternalPower, FanOutputs, calculate_fan_outputs};
+pub use platform::{
+    Clock, FakePlatform, FakeStep, FileAccess, PlatformError, PlatformErrorKind, PlatformOperation,
+    ServiceAccess,
+};
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
     HysteresisError, MonotonicTime, MonotonicTimeError,
