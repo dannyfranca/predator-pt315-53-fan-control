@@ -51,6 +51,49 @@ pub trait FileAccess {
     fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl FileIdentity {
+    pub const fn from_raw(device: u64, inode: u64) -> Self {
+        Self { device, inode }
+    }
+
+    pub const fn device(self) -> u64 {
+        self.device
+    }
+
+    pub const fn inode(self) -> u64 {
+        self.inode
+    }
+}
+
+/// File access that binds operations to one stable backing directory identity.
+pub trait IdentityBoundFileAccess: FileAccess {
+    fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError>;
+
+    /// Reads one direct child while atomically binding the read to the expected directory identity.
+    ///
+    /// Implementations must not return contents from a different backing directory that is
+    /// temporarily or permanently rebound at `directory`.
+    fn read_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+        child: &str,
+    ) -> Result<String, PlatformError>;
+
+    /// Lists direct children while atomically binding the listing to the expected identity.
+    fn list_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+    ) -> Result<Vec<PathBuf>, PlatformError>;
+}
+
 /// File access that returns no later than an absolute monotonic deadline.
 pub trait BoundedFileAccess {
     fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError>;
@@ -109,6 +152,7 @@ pub enum PlatformOperation {
     Write { path: PathBuf, contents: String },
     List(PathBuf),
     Permissions(PathBuf),
+    Identity(PathBuf),
     ServiceStatus(String),
     MonotonicNow,
     Delay(Duration),
@@ -132,6 +176,8 @@ pub enum FakeStep {
 pub struct FakePlatform {
     files: BTreeMap<PathBuf, FakeFile>,
     directories: BTreeSet<PathBuf>,
+    identities: BTreeMap<PathBuf, FileIdentity>,
+    next_inode: u64,
     services: BTreeMap<String, bool>,
     monotonic_time: Duration,
     delays: Vec<Duration>,
@@ -147,6 +193,7 @@ impl FakePlatform {
     pub fn insert_directory(&mut self, directory: impl Into<PathBuf>) {
         let directory = directory.into();
         self.insert_ancestor_directories(&directory);
+        self.ensure_identity(&directory);
         self.directories.insert(directory);
     }
 
@@ -162,6 +209,7 @@ impl FakePlatform {
     ) {
         let path = path.into();
         self.insert_ancestor_directories(&path);
+        self.ensure_identity(&path);
         self.files.insert(
             path,
             FakeFile {
@@ -183,6 +231,8 @@ impl FakePlatform {
             .retain(|candidate, _| candidate != path && !candidate.starts_with(path));
         self.directories
             .retain(|candidate| candidate != path && !candidate.starts_with(path));
+        self.identities
+            .retain(|candidate, _| candidate != path && !candidate.starts_with(path));
     }
 
     pub fn file_contents(&self, path: impl AsRef<Path>) -> Option<&str> {
@@ -222,8 +272,19 @@ impl FakePlatform {
     fn insert_ancestor_directories(&mut self, path: &Path) {
         let mut parent = path.parent();
         while let Some(directory) = parent {
+            self.ensure_identity(directory);
             self.directories.insert(directory.to_path_buf());
             parent = directory.parent();
+        }
+    }
+
+    fn ensure_identity(&mut self, path: &Path) {
+        if !self.identities.contains_key(path) {
+            self.next_inode = self.next_inode.saturating_add(1);
+            self.identities.insert(
+                path.to_path_buf(),
+                FileIdentity::from_raw(0, self.next_inode),
+            );
         }
     }
 
@@ -315,6 +376,25 @@ impl FakePlatform {
         contents.clone_into(&mut file.contents);
         Ok(())
     }
+
+    fn list_directory(&self, directory: &Path) -> Result<Vec<PathBuf>, PlatformError> {
+        if !self.directories.contains(directory) {
+            return Err(Self::missing(directory));
+        }
+
+        Ok(self
+            .directories
+            .iter()
+            .chain(self.files.keys())
+            .filter_map(|path| {
+                let relative = path.strip_prefix(directory).ok()?;
+                let child = relative.components().next()?;
+                Some(directory.join(child.as_os_str()))
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
+    }
 }
 
 impl FileAccess for FakePlatform {
@@ -338,23 +418,7 @@ impl FileAccess for FakePlatform {
         self.operations
             .push(PlatformOperation::List(directory.to_path_buf()));
         self.apply_next_step()?;
-        if !self.directories.contains(directory) {
-            return Err(Self::missing(directory));
-        }
-
-        let entries = self
-            .directories
-            .iter()
-            .chain(self.files.keys())
-            .filter_map(|path| {
-                let relative = path.strip_prefix(directory).ok()?;
-                let child = relative.components().next()?;
-                Some(directory.join(child.as_os_str()))
-            })
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        Ok(entries)
+        self.list_directory(directory)
     }
 
     fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
@@ -365,6 +429,70 @@ impl FileAccess for FakePlatform {
             .get(path)
             .map(|file| file.permissions)
             .ok_or_else(|| Self::missing(path))
+    }
+}
+
+impl IdentityBoundFileAccess for FakePlatform {
+    fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
+        self.operations
+            .push(PlatformOperation::Identity(path.to_path_buf()));
+        self.apply_next_step()?;
+        self.identities
+            .get(path)
+            .copied()
+            .ok_or_else(|| Self::missing(path))
+    }
+
+    fn read_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+        child: &str,
+    ) -> Result<String, PlatformError> {
+        let child_path = Path::new(child);
+        let mut components = child_path.components();
+        let direct_child = matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none();
+        if !direct_child {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("bound read is not a direct child: {child}"),
+            ));
+        }
+        let path = directory.join(child);
+        self.operations
+            .push(PlatformOperation::Read(path.to_path_buf()));
+        self.apply_next_step()?;
+        if self.identities.get(directory).copied() != Some(expected) {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!(
+                    "backing directory identity changed: {}",
+                    directory.display()
+                ),
+            ));
+        }
+        self.read_file(&path)
+    }
+
+    fn list_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        self.operations
+            .push(PlatformOperation::List(directory.to_path_buf()));
+        self.apply_next_step()?;
+        if self.identities.get(directory).copied() != Some(expected) {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!(
+                    "backing directory identity changed: {}",
+                    directory.display()
+                ),
+            ));
+        }
+        self.list_directory(directory)
     }
 }
 
