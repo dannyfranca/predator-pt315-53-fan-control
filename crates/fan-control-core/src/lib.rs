@@ -2,8 +2,10 @@
 
 use std::fmt;
 
+mod curve;
 mod demand;
 
+pub use curve::{CurvePoint, DemandCurve, DemandCurveError, TemperatureCelsius, TemperatureError};
 pub use demand::{DemandPercent, DemandPercentError, Pwm};
 
 /// Source-build status before model qualification and configuration exist.
