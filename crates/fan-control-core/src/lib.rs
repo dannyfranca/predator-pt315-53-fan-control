@@ -5,6 +5,7 @@ use std::fmt;
 mod config;
 mod curve;
 mod demand;
+mod envelope;
 mod policy;
 mod validation;
 
@@ -14,6 +15,7 @@ pub use config::{
 };
 pub use curve::{CurvePoint, DemandCurve, DemandCurveError, TemperatureCelsius, TemperatureError};
 pub use demand::{DemandPercent, DemandPercentError, Pwm};
+pub use envelope::{EnvelopeValidationError, ProtectedConfig, validate_against_protected_envelope};
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
     HysteresisError, MonotonicTime, MonotonicTimeError,

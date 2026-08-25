@@ -1,5 +1,7 @@
 use crate::DemandPercent;
 
+const ENVELOPE_COMPARISON_EPSILON: f64 = 1e-9;
+
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct TemperatureCelsius(f64);
 
@@ -116,5 +118,16 @@ impl DemandCurve {
             .last()
             .expect("a demand curve always contains at least one point")
             .demand
+    }
+
+    pub(crate) fn first_below(&self, protected: &Self) -> Option<TemperatureCelsius> {
+        self.points
+            .iter()
+            .chain(&protected.points)
+            .map(|point| point.temperature)
+            .find(|&temperature| {
+                self.evaluate(temperature).value() + ENVELOPE_COMPARISON_EPSILON
+                    < protected.evaluate(temperature).value()
+            })
     }
 }
