@@ -13,6 +13,7 @@ mod envelope;
 mod external_power;
 mod nvidia_gpu;
 mod output;
+mod ownership;
 mod platform;
 mod policy;
 mod restoration;
@@ -45,9 +46,15 @@ pub use nvidia_gpu::{
     NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, sample_nvidia_gpu,
 };
 pub use output::{ExternalPower, FanOutputs, calculate_fan_outputs};
+pub use ownership::{
+    COMPETING_FAN_CONTROL_SERVICES, ControllerOwnership, ControllerOwnershipError,
+    ControllerReleaseError, RUNTIME_LOCK_PATH, acquire_controller_ownership,
+};
 pub use platform::{
-    BoundedFileAccess, Clock, FakePlatform, FakeStep, FileAccess, FileIdentity, FilePermissions,
-    IdentityBoundFileAccess, PlatformError, PlatformErrorKind, PlatformOperation, ServiceAccess,
+    BoundedFileAccess, Clock, FakePlatform, FakeRuntimeLock, FakeRuntimeLockBackend, FakeStep,
+    FileAccess, FileIdentity, FilePermissions, IdentityBoundFileAccess, PlatformError,
+    PlatformErrorKind, PlatformOperation, RuntimeLockAccess, RuntimeLockError, ServiceAccess,
+    SystemOwnershipPlatform, SystemRuntimeLock,
 };
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
@@ -56,7 +63,6 @@ pub use policy::{
 pub use restoration::{
     EmergencyContainmentReport, EmergencyFanStatus, FanModeFailure, FanRestorationStatus,
     FirmwareAutoReadback, FirmwareAutoRestorationError, MaximumPwmReadback,
-    contain_custom_fans_at_maximum, recover_firmware_auto, restore_firmware_auto,
 };
 pub use sampling::{
     CompleteSampleSet, FreshSampleGate, MAX_SAMPLE_CADENCE_JITTER, NORMAL_SAMPLE_CADENCE,

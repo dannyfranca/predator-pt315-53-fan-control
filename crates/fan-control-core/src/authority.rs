@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     AcerHwmonDevice, BoundedFileAccess, Clock, CompatibilityAdmissionError,
     CompatibilityDeclarationV1, CompatibilityObservation, ConfigV1, ConfigValidationError,
-    EnvelopeValidationError, FirmwareAutoRestorationError, ValidatedConfig, admit_compatibility,
-    compatibility::validate_declaration, restore_firmware_auto,
+    ControllerOwnership, EnvelopeValidationError, FirmwareAutoRestorationError, RuntimeLockAccess,
+    ValidatedConfig, admit_compatibility, compatibility::validate_declaration,
     validate_against_protected_envelope, validate_config_v1,
 };
 
@@ -177,14 +177,14 @@ fn parse_qualification_record_v1(
 }
 
 pub fn admit_policy_authority<P>(
-    platform: &mut P,
+    ownership: &mut ControllerOwnership<'_, P>,
     device: &AcerHwmonDevice,
     protected_policy_source: &str,
     qualification_record_source: &str,
     compatibility_observations: &[CompatibilityObservation],
 ) -> Result<AdmittedPolicyAuthority, PolicyAuthorityAdmissionError>
 where
-    P: BoundedFileAccess + Clock + ?Sized,
+    P: BoundedFileAccess + Clock + RuntimeLockAccess + ?Sized,
 {
     match validate_policy_authority(
         protected_policy_source,
@@ -192,7 +192,7 @@ where
         compatibility_observations,
     ) {
         Ok(authority) => Ok(authority),
-        Err(reason) => match restore_firmware_auto(platform, device) {
+        Err(reason) => match ownership.restore_firmware_auto(device) {
             Ok(()) => Err(PolicyAuthorityAdmissionError::Rejected(reason)),
             Err(restoration) => Err(PolicyAuthorityAdmissionError::RestorationFailed {
                 reason,

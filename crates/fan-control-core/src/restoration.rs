@@ -120,7 +120,7 @@ impl EmergencyContainmentReport {
     }
 }
 
-pub fn restore_firmware_auto<P>(
+pub(crate) fn restore_firmware_auto<P>(
     platform: &mut P,
     device: &AcerHwmonDevice,
 ) -> Result<(), FirmwareAutoRestorationError>
@@ -192,7 +192,7 @@ where
     })
 }
 
-pub fn contain_custom_fans_at_maximum<P>(
+pub(crate) fn contain_custom_fans_at_maximum<P>(
     platform: &mut P,
     device: &AcerHwmonDevice,
 ) -> EmergencyContainmentReport
@@ -223,7 +223,7 @@ where
     }
 }
 
-pub fn recover_firmware_auto<P>(platform: &mut P, device: &AcerHwmonDevice)
+pub(crate) fn recover_firmware_auto<P>(platform: &mut P, device: &AcerHwmonDevice)
 where
     P: BoundedFileAccess + Clock + ?Sized,
 {
