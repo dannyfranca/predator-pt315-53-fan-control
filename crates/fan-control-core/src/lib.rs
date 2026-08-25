@@ -2,10 +2,15 @@
 
 use std::fmt;
 
+mod config;
 mod curve;
 mod demand;
 mod policy;
 
+pub use config::{
+    ConfigParseError, ConfigV1, ControlConfig, CurvePointConfig, FanConfig, FansConfig, FiniteF64,
+    ProfileConfig, ProfilesConfig, parse_config_v1,
+};
 pub use curve::{CurvePoint, DemandCurve, DemandCurveError, TemperatureCelsius, TemperatureError};
 pub use demand::{DemandPercent, DemandPercentError, Pwm};
 pub use policy::{
