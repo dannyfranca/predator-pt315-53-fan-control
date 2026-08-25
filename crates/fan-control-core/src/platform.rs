@@ -559,12 +559,6 @@ impl FakePlatform {
         self.steps.extend(steps);
     }
 
-    pub fn prepend_steps(&mut self, steps: impl IntoIterator<Item = FakeStep>) {
-        let mut prepended = steps.into_iter().collect::<VecDeque<_>>();
-        prepended.append(&mut self.steps);
-        self.steps = prepended;
-    }
-
     /// Queues failures scoped to file operations, independently of admission
     /// service probes and runtime-lock operations.
     pub fn queue_file_steps(&mut self, steps: impl IntoIterator<Item = FakeStep>) {
