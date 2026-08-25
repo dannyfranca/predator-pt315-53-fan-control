@@ -5,6 +5,7 @@ use crate::{
     BoundedIdentityBoundFileAccess, Clock, CompleteSampleSet, ControllerOwnership,
     EmergencyContainmentReport, EnvelopeValidationError, Fan, FanEndpoints,
     FirmwareAutoRestorationError, PlatformError, RuntimeLockAccess, ValidatedConfig,
+    ownership::FirmwareAutoSafingOutcome,
 };
 
 const FIRMWARE_AUTO: &str = "2";
@@ -294,24 +295,24 @@ where
 
     match result {
         Ok(armed) => Ok(armed),
-        Err(reason) => match ownership.restore_firmware_auto(device) {
-            Ok(()) => Err(FanArmingError::Rejected(reason)),
-            Err(restoration) => {
-                let containment = ownership.contain_custom_fans_at_maximum(device);
-                if containment.restoration_confirmed() {
-                    Err(FanArmingError::Recovered {
-                        reason,
-                        restoration: Box::new(restoration),
-                        containment: Box::new(containment),
-                    })
-                } else {
-                    Err(FanArmingError::RestorationFailed {
-                        reason,
-                        restoration: Box::new(restoration),
-                        containment: Box::new(containment),
-                    })
-                }
-            }
+        Err(reason) => match ownership.restore_or_contain_firmware_auto(device) {
+            FirmwareAutoSafingOutcome::Restored => Err(FanArmingError::Rejected(reason)),
+            FirmwareAutoSafingOutcome::Contained {
+                restoration,
+                containment,
+            } => Err(FanArmingError::Recovered {
+                reason,
+                restoration: Box::new(restoration),
+                containment: Box::new(containment),
+            }),
+            FirmwareAutoSafingOutcome::Critical {
+                restoration,
+                containment,
+            } => Err(FanArmingError::RestorationFailed {
+                reason,
+                restoration: Box::new(restoration),
+                containment: Box::new(containment),
+            }),
         },
     }
 }

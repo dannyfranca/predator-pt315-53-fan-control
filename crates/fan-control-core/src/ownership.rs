@@ -43,6 +43,19 @@ pub enum OwnershipSampleReadiness {
     Ready(ArmingReadySample),
 }
 
+#[derive(Debug)]
+pub(crate) enum FirmwareAutoSafingOutcome {
+    Restored,
+    Contained {
+        restoration: FirmwareAutoRestorationError,
+        containment: EmergencyContainmentReport,
+    },
+    Critical {
+        restoration: FirmwareAutoRestorationError,
+        containment: EmergencyContainmentReport,
+    },
+}
+
 /// Exclusive ownership bound to the only platform allowed to write fan state.
 #[derive(Debug)]
 #[must_use = "ownership must restore Firmware Auto and explicitly release its runtime lock"]
@@ -195,6 +208,32 @@ where
         let report = contain_custom_fans_at_maximum(self.platform, device);
         self.restoration_confirmed = report.restoration_confirmed();
         report
+    }
+
+    pub(crate) fn restore_or_contain_firmware_auto(
+        &mut self,
+        device: &AcerHwmonDevice,
+    ) -> FirmwareAutoSafingOutcome
+    where
+        P: BoundedFileAccess + Clock,
+    {
+        match self.restore_firmware_auto(device) {
+            Ok(()) => FirmwareAutoSafingOutcome::Restored,
+            Err(restoration) => {
+                let containment = self.contain_custom_fans_at_maximum(device);
+                if containment.restoration_confirmed() {
+                    FirmwareAutoSafingOutcome::Contained {
+                        restoration,
+                        containment,
+                    }
+                } else {
+                    FirmwareAutoSafingOutcome::Critical {
+                        restoration,
+                        containment,
+                    }
+                }
+            }
+        }
     }
 
     pub fn recover_firmware_auto(&mut self, device: &AcerHwmonDevice)

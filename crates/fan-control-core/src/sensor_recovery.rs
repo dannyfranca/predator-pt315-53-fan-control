@@ -2,10 +2,11 @@ use std::{error::Error, fmt};
 
 use crate::{
     AcerHwmonDevice, AdmittedPolicyAuthority, BoundedIdentityBoundFileAccess, Clock,
-    CompletedControlCycle, ControllerOwnership, FanArmingError, FirmwareAutoRestorationError,
-    FreshSampleGate, HealthyControl, HealthyControlCycleError, IdentityBoundReadAccess,
-    OwnershipSampleReadiness, RequiredInput, RuntimeLockAccess, SampleSetError, SampleSourceError,
-    SampleSources, ValidatedConfig, arm_both_fans_safely, run_healthy_control_cycle,
+    CompletedControlCycle, ControllerOwnership, EmergencyContainmentReport, FanArmingError,
+    FirmwareAutoRestorationError, FreshSampleGate, HealthyControl, HealthyControlCycleError,
+    IdentityBoundReadAccess, OwnershipSampleReadiness, RequiredInput, RuntimeLockAccess,
+    SampleSetError, SampleSourceError, SampleSources, ValidatedConfig, arm_both_fans_safely,
+    ownership::FirmwareAutoSafingOutcome, run_healthy_control_cycle,
 };
 
 /// Creates replacement CPU/GPU source bindings while Firmware Auto owns both fans.
@@ -41,11 +42,31 @@ pub enum SensorControlStep {
 #[derive(Debug)]
 pub enum TransientSensorControlError {
     Faulted,
-    Control(HealthyControlCycleError),
-    RecoverySample(SampleSetError),
-    RestorationFailed {
+    ControlLatched {
+        fault: HealthyControlCycleError,
+    },
+    ControlLatchContained {
+        fault: HealthyControlCycleError,
+        restoration: Box<FirmwareAutoRestorationError>,
+        containment: Box<EmergencyContainmentReport>,
+    },
+    ControlLatchCritical {
+        fault: HealthyControlCycleError,
+        restoration: Box<FirmwareAutoRestorationError>,
+        containment: Box<EmergencyContainmentReport>,
+    },
+    RecoveryLatched {
         fault: SampleSetError,
-        source: FirmwareAutoRestorationError,
+    },
+    RecoveryLatchContained {
+        fault: SampleSetError,
+        restoration: Box<FirmwareAutoRestorationError>,
+        containment: Box<EmergencyContainmentReport>,
+    },
+    RecoveryLatchCritical {
+        fault: SampleSetError,
+        restoration: FirmwareAutoRestorationError,
+        containment: Box<EmergencyContainmentReport>,
     },
     Rearming(FanArmingError),
 }
@@ -54,16 +75,47 @@ impl fmt::Display for TransientSensorControlError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Faulted => formatter.write_str("sensor recovery control is faulted"),
-            Self::Control(error) => write!(formatter, "normal control failed: {error}"),
-            Self::RecoverySample(error) => {
+            Self::ControlLatched { fault } => {
                 write!(
                     formatter,
-                    "non-recoverable recovery sample failure: {error}"
+                    "normal control fault latched after restoring Firmware Auto: {fault}"
                 )
             }
-            Self::RestorationFailed { fault, source } => write!(
+            Self::ControlLatchContained {
+                fault,
+                restoration,
+                containment,
+            } => write!(
                 formatter,
-                "sensor fault ({fault}) could not restore Firmware Auto: {source}"
+                "normal control fault latched after emergency containment ({fault}); Firmware Auto restoration failed: {restoration}; containment: {containment:?}"
+            ),
+            Self::ControlLatchCritical {
+                fault,
+                restoration,
+                containment,
+            } => write!(
+                formatter,
+                "critical normal control fault latched with Firmware Auto unconfirmed ({fault}); restoration failed: {restoration}; containment: {containment:?}"
+            ),
+            Self::RecoveryLatched { fault } => write!(
+                formatter,
+                "recovery fault latched after restoring Firmware Auto: {fault}"
+            ),
+            Self::RecoveryLatchContained {
+                fault,
+                restoration,
+                containment,
+            } => write!(
+                formatter,
+                "sensor fault latched after emergency containment ({fault}); Firmware Auto restoration failed: {restoration}; containment: {containment:?}"
+            ),
+            Self::RecoveryLatchCritical {
+                fault,
+                restoration,
+                containment,
+            } => write!(
+                formatter,
+                "critical sensor fault latched with Firmware Auto unconfirmed ({fault}); restoration failed: {restoration}; containment: {containment:?}"
             ),
             Self::Rearming(error) => write!(formatter, "sensor recovery rearming failed: {error}"),
         }
@@ -74,9 +126,13 @@ impl Error for TransientSensorControlError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Faulted => None,
-            Self::Control(error) => Some(error),
-            Self::RecoverySample(error) => Some(error),
-            Self::RestorationFailed { source, .. } => Some(source),
+            Self::ControlLatched { fault }
+            | Self::ControlLatchContained { fault, .. }
+            | Self::ControlLatchCritical { fault, .. } => Some(fault),
+            Self::RecoveryLatched { fault } | Self::RecoveryLatchContained { fault, .. } => {
+                Some(fault)
+            }
+            Self::RecoveryLatchCritical { restoration, .. } => Some(restoration),
             Self::Rearming(error) => Some(error),
         }
     }
@@ -168,10 +224,8 @@ where
                 }
                 Err(error) => {
                     let Some(fault) = recoverable_sensor_cycle_fault(&error).cloned() else {
-                        self.state = Some(ControlState::Faulted {
-                            retained_sources: Some(sources),
-                        });
-                        return Err(TransientSensorControlError::Control(error));
+                        let (_, device) = control.into_recovery_parts();
+                        return self.latch_control_fault(ownership, device, error, sources);
                     };
                     let (config, device) = control.into_recovery_parts();
                     self.restore_for_recovery(ownership, config, device, fault, sources)
@@ -183,18 +237,15 @@ where
                 mut gate,
                 mut sources,
             } => {
+                if sources.is_none() && !ownership.refresh_firmware_auto_confirmation(&device) {
+                    return self.latch_recovery_fault(
+                        ownership,
+                        device,
+                        SampleSetError::FirmwareAutoUnconfirmed,
+                        None,
+                    );
+                }
                 if sources.is_none() {
-                    if !ownership.refresh_firmware_auto_confirmation(&device)
-                        && let Err(source) = ownership.restore_firmware_auto(&device)
-                    {
-                        self.state = Some(ControlState::Faulted {
-                            retained_sources: None,
-                        });
-                        return Err(TransientSensorControlError::RestorationFailed {
-                            fault: SampleSetError::FirmwareAutoUnconfirmed,
-                            source,
-                        });
-                    }
                     match self.discovery.rediscover(ownership.platform_mut()) {
                         Ok(rediscovered) => {
                             gate.reset();
@@ -266,17 +317,7 @@ where
                             fault,
                             sources.expect("sample failure requires installed sources"),
                         ),
-                    Err(fault) => {
-                        let retained_sources =
-                            if matches!(&fault, SampleSetError::FirmwareAutoUnconfirmed) {
-                                sources
-                            } else {
-                                drop(sources);
-                                None
-                            };
-                        self.state = Some(ControlState::Faulted { retained_sources });
-                        Err(TransientSensorControlError::RecoverySample(fault))
-                    }
+                    Err(fault) => self.latch_recovery_fault(ownership, device, fault, sources),
                 }
             }
             ControlState::Faulted { retained_sources } => {
@@ -297,8 +338,8 @@ where
     where
         P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
     {
-        match ownership.restore_firmware_auto(&device) {
-            Ok(()) => {
+        match ownership.restore_or_contain_firmware_auto(&device) {
+            FirmwareAutoSafingOutcome::Restored => {
                 self.state = Some(ControlState::Recovering {
                     config,
                     device,
@@ -308,11 +349,128 @@ where
                 drop(sources);
                 Ok(SensorControlStep::FirmwareAutoRestored { fault })
             }
-            Err(source) => {
+            FirmwareAutoSafingOutcome::Contained {
+                restoration,
+                containment,
+            } => {
+                drop(sources);
+                self.state = Some(ControlState::Faulted {
+                    retained_sources: None,
+                });
+                Err(TransientSensorControlError::RecoveryLatchContained {
+                    fault,
+                    restoration: Box::new(restoration),
+                    containment: Box::new(containment),
+                })
+            }
+            FirmwareAutoSafingOutcome::Critical {
+                restoration,
+                containment,
+            } => {
                 self.state = Some(ControlState::Faulted {
                     retained_sources: Some(sources),
                 });
-                Err(TransientSensorControlError::RestorationFailed { fault, source })
+                Err(TransientSensorControlError::RecoveryLatchCritical {
+                    fault,
+                    restoration,
+                    containment: Box::new(containment),
+                })
+            }
+        }
+    }
+
+    fn latch_control_fault<P>(
+        &mut self,
+        ownership: &mut ControllerOwnership<'_, P>,
+        device: AcerHwmonDevice,
+        fault: HealthyControlCycleError,
+        sources: D::Sources,
+    ) -> Result<SensorControlStep, TransientSensorControlError>
+    where
+        P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
+    {
+        match ownership.restore_or_contain_firmware_auto(&device) {
+            FirmwareAutoSafingOutcome::Restored => {
+                drop(sources);
+                self.state = Some(ControlState::Faulted {
+                    retained_sources: None,
+                });
+                Err(TransientSensorControlError::ControlLatched { fault })
+            }
+            FirmwareAutoSafingOutcome::Contained {
+                restoration,
+                containment,
+            } => {
+                drop(sources);
+                self.state = Some(ControlState::Faulted {
+                    retained_sources: None,
+                });
+                Err(TransientSensorControlError::ControlLatchContained {
+                    fault,
+                    restoration: Box::new(restoration),
+                    containment: Box::new(containment),
+                })
+            }
+            FirmwareAutoSafingOutcome::Critical {
+                restoration,
+                containment,
+            } => {
+                self.state = Some(ControlState::Faulted {
+                    retained_sources: Some(sources),
+                });
+                Err(TransientSensorControlError::ControlLatchCritical {
+                    fault,
+                    restoration: Box::new(restoration),
+                    containment: Box::new(containment),
+                })
+            }
+        }
+    }
+
+    fn latch_recovery_fault<P>(
+        &mut self,
+        ownership: &mut ControllerOwnership<'_, P>,
+        device: AcerHwmonDevice,
+        fault: SampleSetError,
+        sources: Option<D::Sources>,
+    ) -> Result<SensorControlStep, TransientSensorControlError>
+    where
+        P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
+    {
+        match ownership.restore_or_contain_firmware_auto(&device) {
+            FirmwareAutoSafingOutcome::Restored => {
+                drop(sources);
+                self.state = Some(ControlState::Faulted {
+                    retained_sources: None,
+                });
+                Err(TransientSensorControlError::RecoveryLatched { fault })
+            }
+            FirmwareAutoSafingOutcome::Contained {
+                restoration,
+                containment,
+            } => {
+                drop(sources);
+                self.state = Some(ControlState::Faulted {
+                    retained_sources: None,
+                });
+                Err(TransientSensorControlError::RecoveryLatchContained {
+                    fault,
+                    restoration: Box::new(restoration),
+                    containment: Box::new(containment),
+                })
+            }
+            FirmwareAutoSafingOutcome::Critical {
+                restoration,
+                containment,
+            } => {
+                self.state = Some(ControlState::Faulted {
+                    retained_sources: sources,
+                });
+                Err(TransientSensorControlError::RecoveryLatchCritical {
+                    fault,
+                    restoration,
+                    containment: Box::new(containment),
+                })
             }
         }
     }
