@@ -369,20 +369,6 @@ fn passing_records_require_observations_and_confirmed_safe_restoration() {
 
     let mut record = parse_evidence_v1(FIXTURE).unwrap();
     record.outcome.status = RunOutcomeStatus::Passed;
-    record.samples[0].freshness = SampleFreshness::Stale;
-    assert!(record.validate().is_err());
-    let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA).unwrap();
-    let mut stale_json: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
-    stale_json["outcome"]["status"] = "passed".into();
-    stale_json["samples"][0]["freshness"] = "stale".into();
-    assert!(
-        !jsonschema::validator_for(&schema)
-            .unwrap()
-            .is_valid(&stale_json)
-    );
-
-    let mut record = parse_evidence_v1(FIXTURE).unwrap();
-    record.outcome.status = RunOutcomeStatus::Passed;
     record.outcome.final_firmware_auto_confirmed = false;
     assert!(record.validate().is_err());
 
@@ -403,6 +389,17 @@ fn passing_records_require_observations_and_confirmed_safe_restoration() {
         jsonschema::validator_for(&schema)
             .unwrap()
             .is_valid(&serde_json::to_value(&active_control).unwrap())
+    );
+
+    let mut stale = active_control.clone();
+    stale.samples[0].freshness = SampleFreshness::Stale;
+    assert!(stale.validate().is_err());
+    let mut stale_json = serde_json::to_value(&active_control).unwrap();
+    stale_json["samples"][0]["freshness"] = "stale".into();
+    assert!(
+        !jsonschema::validator_for(&schema)
+            .unwrap()
+            .is_valid(&stale_json)
     );
 
     let mut post_restoration_command = active_control.commands[0].clone();
