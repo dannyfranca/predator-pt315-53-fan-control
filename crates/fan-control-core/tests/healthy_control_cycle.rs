@@ -1623,9 +1623,9 @@ fn failed_restoration_after_mode_drift_contains_and_retains_sensor_bindings() {
     interference
         .set(RuntimeInterference::CpuModeBeforeRecoveryAutoCheckAndRestorationDeadlineCustom);
 
-    let Err(TransientSensorControlError::RestorationFailed {
+    let Err(TransientSensorControlError::RecoveryLatchCritical {
         fault: SampleSetError::FirmwareAutoUnconfirmed,
-        source,
+        restoration,
         containment,
     }) = control.step(&mut ownership)
     else {
@@ -1633,7 +1633,7 @@ fn failed_restoration_after_mode_drift_contains_and_retains_sensor_bindings() {
     };
     assert!(!containment.restoration_confirmed());
     let fan_control_core::FirmwareAutoRestorationError::DeadlineExceeded { attempts, cpu, gpu } =
-        source
+        restoration
     else {
         panic!("the injected restoration deadline must be preserved")
     };
@@ -1872,13 +1872,13 @@ fn failed_sensor_restoration_contains_at_maximum_without_rediscovery() {
     auto_confirmed.set(false);
     interference.set(RuntimeInterference::RestorationDeadlineCustom);
 
-    let Err(TransientSensorControlError::RestorationFailed {
+    let Err(TransientSensorControlError::RecoveryLatchCritical {
         fault:
             SampleSetError::Input {
                 input: fan_control_core::RequiredInput::Cpu,
                 ..
             },
-        source,
+        restoration,
         containment,
     }) = control.step(&mut ownership)
     else {
@@ -1886,7 +1886,7 @@ fn failed_sensor_restoration_contains_at_maximum_without_rediscovery() {
     };
     assert!(!containment.restoration_confirmed());
     let fan_control_core::FirmwareAutoRestorationError::DeadlineExceeded { attempts, cpu, gpu } =
-        source
+        restoration
     else {
         panic!("the injected restoration deadline must be preserved")
     };

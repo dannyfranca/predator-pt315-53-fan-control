@@ -63,9 +63,9 @@ pub enum TransientSensorControlError {
         restoration: Box<FirmwareAutoRestorationError>,
         containment: Box<EmergencyContainmentReport>,
     },
-    RestorationFailed {
+    RecoveryLatchCritical {
         fault: SampleSetError,
-        source: FirmwareAutoRestorationError,
+        restoration: FirmwareAutoRestorationError,
         containment: Box<EmergencyContainmentReport>,
     },
     Rearming(FanArmingError),
@@ -109,13 +109,13 @@ impl fmt::Display for TransientSensorControlError {
                 formatter,
                 "sensor fault latched after emergency containment ({fault}); Firmware Auto restoration failed: {restoration}; containment: {containment:?}"
             ),
-            Self::RestorationFailed {
+            Self::RecoveryLatchCritical {
                 fault,
-                source,
+                restoration,
                 containment,
             } => write!(
                 formatter,
-                "critical sensor fault latched with Firmware Auto unconfirmed ({fault}); restoration failed: {source}; containment: {containment:?}"
+                "critical sensor fault latched with Firmware Auto unconfirmed ({fault}); restoration failed: {restoration}; containment: {containment:?}"
             ),
             Self::Rearming(error) => write!(formatter, "sensor recovery rearming failed: {error}"),
         }
@@ -132,7 +132,7 @@ impl Error for TransientSensorControlError {
             Self::RecoveryLatched { fault } | Self::RecoveryLatchContained { fault, .. } => {
                 Some(fault)
             }
-            Self::RestorationFailed { source, .. } => Some(source),
+            Self::RecoveryLatchCritical { restoration, .. } => Some(restoration),
             Self::Rearming(error) => Some(error),
         }
     }
@@ -370,9 +370,9 @@ where
                 self.state = Some(ControlState::Faulted {
                     retained_sources: Some(sources),
                 });
-                Err(TransientSensorControlError::RestorationFailed {
+                Err(TransientSensorControlError::RecoveryLatchCritical {
                     fault,
-                    source: restoration,
+                    restoration,
                     containment: Box::new(containment),
                 })
             }
@@ -466,9 +466,9 @@ where
                 self.state = Some(ControlState::Faulted {
                     retained_sources: sources,
                 });
-                Err(TransientSensorControlError::RestorationFailed {
+                Err(TransientSensorControlError::RecoveryLatchCritical {
                     fault,
-                    source: restoration,
+                    restoration,
                     containment: Box::new(containment),
                 })
             }
