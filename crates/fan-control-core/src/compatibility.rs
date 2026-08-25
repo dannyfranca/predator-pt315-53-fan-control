@@ -385,7 +385,7 @@ pub fn admit_compatibility(
     Ok(AdmittedCompatibility(()))
 }
 
-fn validate_declaration(
+pub(crate) fn validate_declaration(
     declaration: &CompatibilityDeclarationV1,
 ) -> Result<(), CompatibilityDeclarationError> {
     require_safe(

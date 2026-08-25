@@ -3,6 +3,7 @@
 use std::fmt;
 
 mod acer_hwmon;
+mod authority;
 mod compatibility;
 mod config;
 mod coretemp;
@@ -19,6 +20,10 @@ mod sampling;
 mod validation;
 
 pub use acer_hwmon::{AcerHwmonDevice, AcerHwmonDiscoveryError, FanEndpoints, discover_acer_hwmon};
+pub use authority::{
+    AdmittedPolicyAuthority, PolicyAuthorityAdmissionError, PolicyAuthorityError,
+    admit_policy_authority,
+};
 pub use compatibility::{
     AdmittedCompatibility, CompatibilityAdmissionError, CompatibilityDeclarationError,
     CompatibilityDeclarationV1, CompatibilityObservation, EscapeHatchCapability,
