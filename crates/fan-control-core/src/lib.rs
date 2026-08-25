@@ -4,9 +4,14 @@ use std::fmt;
 
 mod curve;
 mod demand;
+mod policy;
 
 pub use curve::{CurvePoint, DemandCurve, DemandCurveError, TemperatureCelsius, TemperatureError};
 pub use demand::{DemandPercent, DemandPercentError, Pwm};
+pub use policy::{
+    DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
+    HysteresisError, MonotonicTime, MonotonicTimeError,
+};
 
 /// Source-build status before model qualification and configuration exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
