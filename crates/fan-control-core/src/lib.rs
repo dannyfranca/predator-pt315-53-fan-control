@@ -6,6 +6,7 @@ mod config;
 mod curve;
 mod demand;
 mod policy;
+mod validation;
 
 pub use config::{
     ConfigParseError, ConfigV1, ControlConfig, CurvePointConfig, FanConfig, FansConfig, FiniteF64,
@@ -16,6 +17,11 @@ pub use demand::{DemandPercent, DemandPercentError, Pwm};
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
     HysteresisError, MonotonicTime, MonotonicTimeError,
+};
+pub use validation::{
+    Component, ConfigValidationError, Fan, Profile, ValidatedConfig, ValidatedControlConfig,
+    ValidatedFanConfig, ValidatedFansConfig, ValidatedProfileConfig, ValidatedProfilesConfig,
+    validate_config_v1,
 };
 
 /// Source-build status before model qualification and configuration exist.
