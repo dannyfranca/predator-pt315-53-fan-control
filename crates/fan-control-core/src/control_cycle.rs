@@ -28,7 +28,7 @@ pub struct HealthyControl {
 
 impl HealthyControl {
     pub fn from_armed(armed: ArmedFanControl) -> Self {
-        let (
+        let crate::arming::ArmedControlParts {
             ownership_id,
             custom_epoch,
             config,
@@ -36,7 +36,7 @@ impl HealthyControl {
             calibration,
             cpu_custom_confirmed_at,
             gpu_custom_confirmed_at,
-        ) = armed.into_control_parts();
+        } = armed.into_control_parts();
         Self {
             ownership_id,
             custom_epoch,

@@ -49,27 +49,27 @@ impl ArmedFanControl {
         self.gpu_rpm
     }
 
-    pub(crate) fn into_control_parts(
-        self,
-    ) -> (
-        u64,
-        u64,
-        ValidatedConfig,
-        AcerHwmonDevice,
-        QualifiedTachometerCalibrations,
-        Duration,
-        Duration,
-    ) {
-        (
-            self.ownership_id,
-            self.custom_epoch,
-            self.config,
-            self.device,
-            self.calibration,
-            self.cpu_custom_confirmed_at,
-            self.gpu_custom_confirmed_at,
-        )
+    pub(crate) fn into_control_parts(self) -> ArmedControlParts {
+        ArmedControlParts {
+            ownership_id: self.ownership_id,
+            custom_epoch: self.custom_epoch,
+            config: self.config,
+            device: self.device,
+            calibration: self.calibration,
+            cpu_custom_confirmed_at: self.cpu_custom_confirmed_at,
+            gpu_custom_confirmed_at: self.gpu_custom_confirmed_at,
+        }
     }
+}
+
+pub(crate) struct ArmedControlParts {
+    pub ownership_id: u64,
+    pub custom_epoch: u64,
+    pub config: ValidatedConfig,
+    pub device: AcerHwmonDevice,
+    pub calibration: QualifiedTachometerCalibrations,
+    pub cpu_custom_confirmed_at: Duration,
+    pub gpu_custom_confirmed_at: Duration,
 }
 
 #[derive(Debug)]
