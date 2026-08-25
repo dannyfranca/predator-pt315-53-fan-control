@@ -6,6 +6,7 @@ use crate::{
     EmergencyContainmentReport, EnvelopeValidationError, Fan, FanEndpoints,
     FirmwareAutoRestorationError, PlatformError, RuntimeLockAccess, ValidatedConfig,
     ownership::FirmwareAutoSafingOutcome,
+    tachometer::{MAXIMUM_PLAUSIBLE_RPM, MINIMUM_PLAUSIBLE_RPM, QualifiedTachometerCalibrations},
 };
 
 const FIRMWARE_AUTO: &str = "2";
@@ -14,8 +15,6 @@ const MAXIMUM_PWM: &str = "255";
 const HANDOVER_WINDOW: Duration = Duration::from_secs(2);
 const ARMING_TACHOMETER_RESPONSE_WINDOW: Duration = Duration::from_secs(10);
 const TACHOMETER_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const MINIMUM_PLAUSIBLE_ARMING_RPM: u32 = 100;
-const MAXIMUM_PLAUSIBLE_ARMING_RPM: u32 = 20_000;
 
 /// Receipt for a completed safety handover.
 ///
@@ -27,6 +26,9 @@ pub struct ArmedFanControl {
     custom_epoch: u64,
     config: ValidatedConfig,
     device: AcerHwmonDevice,
+    calibration: QualifiedTachometerCalibrations,
+    cpu_custom_confirmed_at: Duration,
+    gpu_custom_confirmed_at: Duration,
     cpu_rpm: u32,
     gpu_rpm: u32,
 }
@@ -47,14 +49,27 @@ impl ArmedFanControl {
         self.gpu_rpm
     }
 
-    pub(crate) fn into_control_parts(self) -> (u64, u64, ValidatedConfig, AcerHwmonDevice) {
-        (
-            self.ownership_id,
-            self.custom_epoch,
-            self.config,
-            self.device,
-        )
+    pub(crate) fn into_control_parts(self) -> ArmedControlParts {
+        ArmedControlParts {
+            ownership_id: self.ownership_id,
+            custom_epoch: self.custom_epoch,
+            config: self.config,
+            device: self.device,
+            calibration: self.calibration,
+            cpu_custom_confirmed_at: self.cpu_custom_confirmed_at,
+            gpu_custom_confirmed_at: self.gpu_custom_confirmed_at,
+        }
     }
+}
+
+pub(crate) struct ArmedControlParts {
+    pub ownership_id: u64,
+    pub custom_epoch: u64,
+    pub config: ValidatedConfig,
+    pub device: AcerHwmonDevice,
+    pub calibration: QualifiedTachometerCalibrations,
+    pub cpu_custom_confirmed_at: Duration,
+    pub gpu_custom_confirmed_at: Duration,
 }
 
 #[derive(Debug)]
@@ -288,6 +303,7 @@ where
             device,
             sample,
             candidate.clone(),
+            authority.tachometer_calibrations(),
             ownership_id,
             custom_epoch,
         )
@@ -322,6 +338,7 @@ fn arm<P>(
     device: &AcerHwmonDevice,
     sample: CompleteSampleSet,
     config: ValidatedConfig,
+    calibration: QualifiedTachometerCalibrations,
     ownership_id: u64,
     custom_epoch: u64,
 ) -> Result<ArmedFanControl, FanArmingFailure>
@@ -435,7 +452,7 @@ where
         handover_deadline,
     )?;
 
-    confirm_custom_at_maximum(
+    let (cpu_custom_confirmed_at, gpu_custom_confirmed_at) = confirm_custom_at_maximum(
         platform,
         device,
         handover_deadline,
@@ -460,21 +477,39 @@ where
         custom_epoch,
         config,
         device: device.clone(),
+        calibration,
+        cpu_custom_confirmed_at,
+        gpu_custom_confirmed_at,
         cpu_rpm,
         gpu_rpm,
     })
 }
 
 fn confirm_custom_at_maximum(
-    platform: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
+    platform: &mut (impl BoundedIdentityBoundFileAccess + Clock + ?Sized),
     device: &AcerHwmonDevice,
     deadline: Duration,
     mode_operation: FanArmingOperation,
-) -> Result<(), FanArmingFailure> {
-    for (fan, endpoints) in [(Fan::Cpu, device.cpu()), (Fan::Gpu, device.gpu())] {
-        confirm_fan_at_maximum(platform, device, endpoints, fan, deadline, mode_operation)?;
-    }
-    Ok(())
+) -> Result<(Duration, Duration), FanArmingFailure> {
+    confirm_fan_at_maximum(
+        platform,
+        device,
+        device.cpu(),
+        Fan::Cpu,
+        deadline,
+        mode_operation,
+    )?;
+    let cpu_confirmed_at = platform.monotonic_now();
+    confirm_fan_at_maximum(
+        platform,
+        device,
+        device.gpu(),
+        Fan::Gpu,
+        deadline,
+        mode_operation,
+    )?;
+    let gpu_confirmed_at = platform.monotonic_now();
+    Ok((cpu_confirmed_at, gpu_confirmed_at))
 }
 
 fn confirm_fan_at_maximum(
@@ -595,7 +630,7 @@ fn read_tachometer(
     };
     if rpm == 0 {
         Ok(None)
-    } else if (MINIMUM_PLAUSIBLE_ARMING_RPM..=MAXIMUM_PLAUSIBLE_ARMING_RPM).contains(&rpm) {
+    } else if (MINIMUM_PLAUSIBLE_RPM..=MAXIMUM_PLAUSIBLE_RPM).contains(&rpm) {
         Ok(Some(rpm))
     } else {
         Err(FanArmingFailure::InvalidTachometer {

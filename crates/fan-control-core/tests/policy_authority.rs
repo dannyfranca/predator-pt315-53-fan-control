@@ -1,99 +1,20 @@
 use std::path::Path;
 
 use fan_control_core::{
-    CompatibilityAdmissionError, CompatibilityDeclarationV1, CompatibilityObservation,
-    EvidenceCompleteness, FakePlatform, FanWriteBackend, FilePermissions, ObservedFanAbi,
-    PolicyAuthorityAdmissionError, PolicyAuthorityError, ValidatedConfig,
+    CompatibilityAdmissionError, CompatibilityObservation, FakePlatform, FilePermissions,
+    PolicyAuthorityAdmissionError, PolicyAuthorityError, TachometerCalibrationError,
     acquire_controller_ownership, admit_policy_authority, discover_acer_hwmon,
-    parse_compatibility_v1, parse_config_v1, validate_config_v1,
 };
-use sha2::{Digest, Sha256};
 
-const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+mod support;
+use support::{
+    PROTECTED_POLICY, SOURCE_COMMIT, compatibility_declaration, matching_observation,
+    matching_observation_for_policy, matching_record, protected_config, sha256,
+};
+
 const OTHER_SOURCE_COMMIT: &str = "fedcba9876543210fedcba9876543210fedcba98";
-const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
-
-const PROTECTED_POLICY: &str = r#"schema_version = 1
-qualification_id = "pt31553-v1"
-policy_version = "1.0.0"
-
-[compatibility]
-schema_version = 1
-
-[compatibility.hardware]
-dmi_product_name = "Predator PT315-53"
-dmi_board_name = "Civic_TLS"
-bios_version = "V1.17"
-
-[compatibility.kernel]
-release = "7.1.8-1-cachyos-pt31553"
-package = "linux-cachyos-pt31553"
-source_commit = "0123456789abcdef0123456789abcdef01234567"
-image_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-image_signer_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-
-[compatibility.module]
-name = "acer_wmi"
-path = "/usr/lib/modules/7.1.8-1-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst"
-sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-signer_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-vermagic = "7.1.8-1-cachyos-pt31553 SMP preempt mod_unload"
-provenance = "in-tree"
-
-[compatibility.secure_boot]
-required = true
-
-[compatibility.fan_control]
-backend = "acer-hwmon"
-hwmon_name = "acer"
-endpoints = ["pwm1", "pwm1_enable", "fan1_input", "pwm2", "pwm2_enable", "fan2_input"]
-forbidden_capabilities = [
-  "force-caps",
-  "ec-raw-mode",
-  "predator-v4-override",
-  "direct-wmi",
-  "raw-ec",
-  "replacement-wmi-module",
-  "alternate-fan-write-backend",
-]
-
-[protected]
-schema_version = 1
-
-[protected.control]
-hysteresis_celsius = 3
-lower_demand_hold_seconds = 10
-max_down_ramp_percent_per_second = 1.0
-
-[protected.fans.cpu]
-minimum_duty_percent = 30
-
-[protected.fans.gpu]
-minimum_duty_percent = 25
-
-[protected.profiles.ac]
-cpu_curve = [
-  { temperature_c = 40, demand_percent = 30 },
-  { temperature_c = 90, demand_percent = 100 },
-]
-gpu_curve = [
-  { temperature_c = 35, demand_percent = 30 },
-  { temperature_c = 82, demand_percent = 100 },
-]
-
-[protected.profiles.battery]
-cpu_curve = [
-  { temperature_c = 40, demand_percent = 30 },
-  { temperature_c = 90, demand_percent = 100 },
-]
-gpu_curve = [
-  { temperature_c = 35, demand_percent = 30 },
-  { temperature_c = 82, demand_percent = 100 },
-]
-"#;
 
 #[test]
 fn exact_policy_record_and_live_envelope_are_admitted_together() {
@@ -129,9 +50,77 @@ fn exact_policy_record_and_live_envelope_are_admitted_together() {
 }
 
 #[test]
+fn unsafe_or_incomplete_tachometer_calibration_never_becomes_authority() {
+    for (policy, expected_fan) in [
+        (
+            PROTECTED_POLICY.replacen("floor_basis_points = 3000", "floor_basis_points = 2999", 1),
+            fan_control_core::Fan::Cpu,
+        ),
+        (
+            PROTECTED_POLICY.replacen(
+                "[calibration.gpu]\nfloor_basis_points = 2500\nresponse_deadline_millis = 4000",
+                "[calibration.gpu]\nfloor_basis_points = 2500\nresponse_deadline_millis = 0",
+                1,
+            ),
+            fan_control_core::Fan::Gpu,
+        ),
+        (
+            PROTECTED_POLICY.replacen(
+                "[calibration.gpu]\nfloor_basis_points = 2500\nresponse_deadline_millis = 4000",
+                "[calibration.gpu]\nfloor_basis_points = 2500\nresponse_deadline_millis = 30001",
+                1,
+            ),
+            fan_control_core::Fan::Gpu,
+        ),
+        (
+            PROTECTED_POLICY.replacen(
+                "{ duty_basis_points = 10000, median_rpm = 3500 }",
+                "{ duty_basis_points = 3000, median_rpm = 3500 }",
+                1,
+            ),
+            fan_control_core::Fan::Cpu,
+        ),
+        (
+            PROTECTED_POLICY.replacen("median_rpm = 3500", "median_rpm = 2000", 1),
+            fan_control_core::Fan::Cpu,
+        ),
+        (
+            PROTECTED_POLICY.replacen("median_rpm = 2500", "median_rpm = 99", 1),
+            fan_control_core::Fan::Cpu,
+        ),
+        (
+            PROTECTED_POLICY.replacen("median_rpm = 3500", "median_rpm = 20001", 1),
+            fan_control_core::Fan::Cpu,
+        ),
+    ] {
+        let record = matching_record(&policy);
+        let observation = matching_observation_for_policy(&policy);
+        let (result, _) = admit(&policy, &record, &[observation]);
+
+        let error = result.unwrap_err();
+        assert!(
+            matches!(
+                error.reason(),
+                PolicyAuthorityError::InvalidTachometerCalibration(
+                    TachometerCalibrationError::FloorMismatch { fan, .. }
+                        | TachometerCalibrationError::ZeroResponseDeadline { fan }
+                        | TachometerCalibrationError::ResponseDeadlineTooLong { fan, .. }
+                        | TachometerCalibrationError::AnchorRangeMismatch { fan }
+                        | TachometerCalibrationError::AnchorsNotStrictlyIncreasing { fan }
+                        | TachometerCalibrationError::RpmZeroOrDecreasing { fan }
+                        | TachometerCalibrationError::RpmOutOfRange { fan, .. }
+                ) if *fan == expected_fan
+            ),
+            "expected {expected_fan:?}, got {:?}",
+            error.reason()
+        );
+    }
+}
+
+#[test]
 fn both_formats_reject_unsupported_missing_unknown_and_malformed_fields() {
     for policy in [
-        PROTECTED_POLICY.replacen("schema_version = 1", "schema_version = 2", 1),
+        PROTECTED_POLICY.replacen("schema_version = 2", "schema_version = 3", 1),
         PROTECTED_POLICY.replacen("qualification_id = \"pt31553-v1\"\n", "", 1),
         PROTECTED_POLICY.replacen(
             "policy_version = \"1.0.0\"",
@@ -162,6 +151,27 @@ fn both_formats_reject_unsupported_missing_unknown_and_malformed_fields() {
         assert!(result.is_err(), "{candidate}");
         assert_firmware_auto(&platform);
     }
+}
+
+#[test]
+fn pre_calibration_v1_manifest_requires_explicit_requalification() {
+    let calibration_start = PROTECTED_POLICY.find("[calibration.cpu]").unwrap();
+    let protected_start = PROTECTED_POLICY.find("[protected]\n").unwrap();
+    let policy = format!(
+        "{}{}",
+        &PROTECTED_POLICY[..calibration_start],
+        &PROTECTED_POLICY[protected_start..]
+    )
+    .replacen("schema_version = 2", "schema_version = 1", 1);
+    let observation = matching_observation_for_policy(PROTECTED_POLICY);
+    let (result, platform) = admit(&policy, &matching_record(&policy), &[observation]);
+
+    assert!(matches!(
+        result.unwrap_err().reason(),
+        PolicyAuthorityError::ProtectedPolicyParse(error)
+            if error.to_string().contains("V1 manifests require requalification")
+    ));
+    assert_firmware_auto(&platform);
 }
 
 #[test]
@@ -369,60 +379,4 @@ fn assert_firmware_auto(platform: &FakePlatform) {
         platform.file_contents(Path::new(ACER_ROOT).join("pwm2_enable")),
         Some("2")
     );
-}
-
-fn matching_observation_for_policy(policy: &str) -> CompatibilityObservation {
-    matching_observation(&compatibility_declaration(policy))
-}
-
-fn compatibility_declaration(policy: &str) -> CompatibilityDeclarationV1 {
-    let start = policy.find("[compatibility]\n").unwrap();
-    let end = policy.find("\n[protected]\n").unwrap();
-    let source = policy[start..end]
-        .replacen("[compatibility]\n", "", 1)
-        .replace("[compatibility.", "[");
-    parse_compatibility_v1(&source).unwrap()
-}
-
-fn protected_config(policy: &str) -> ValidatedConfig {
-    let start = policy.find("[protected]\n").unwrap();
-    let source = policy[start..]
-        .replacen("[protected]\n", "", 1)
-        .replace("[protected.", "[");
-    validate_config_v1(parse_config_v1(&source).unwrap()).unwrap()
-}
-
-fn matching_observation(declaration: &CompatibilityDeclarationV1) -> CompatibilityObservation {
-    CompatibilityObservation {
-        hardware: declaration.hardware.clone(),
-        kernel: declaration.kernel.clone(),
-        module: declaration.module.clone(),
-        secure_boot_enabled: true,
-        kernel_image_trusted: true,
-        module_signature_trusted: true,
-        fan_abi: ObservedFanAbi {
-            hwmon_name: declaration.fan_control.hwmon_name.clone(),
-            endpoints: declaration.fan_control.endpoints.clone(),
-        },
-        backend_evidence_completeness: EvidenceCompleteness::Complete,
-        backends: vec![FanWriteBackend::AcerHwmon],
-        capability_evidence_completeness: EvidenceCompleteness::Complete,
-        enabled_capabilities: Vec::new(),
-    }
-}
-
-fn matching_record(policy: &str) -> String {
-    format!(
-        r#"{{"schema_version":1,"qualification_id":"pt31553-v1","policy_version":"1.0.0","protected_policy_sha256":"{}","compatibility":{{"schema_version":1,"hardware":{{"dmi_product_name":"Predator PT315-53","dmi_board_name":"Civic_TLS","bios_version":"V1.17"}},"kernel":{{"release":"7.1.8-1-cachyos-pt31553","package":"linux-cachyos-pt31553","source_commit":"{}","image_sha256":"{}","image_signer_fingerprint":"{}"}},"module":{{"name":"acer_wmi","path":"/usr/lib/modules/7.1.8-1-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst","sha256":"{}","signer_fingerprint":"{}","vermagic":"7.1.8-1-cachyos-pt31553 SMP preempt mod_unload","provenance":"in-tree"}},"secure_boot":{{"required":true}},"fan_control":{{"backend":"acer-hwmon","hwmon_name":"acer","endpoints":["pwm1","pwm1_enable","fan1_input","pwm2","pwm2_enable","fan2_input"],"forbidden_capabilities":["force-caps","ec-raw-mode","predator-v4-override","direct-wmi","raw-ec","replacement-wmi-module","alternate-fan-write-backend"]}}}}}}"#,
-        sha256(policy),
-        SOURCE_COMMIT,
-        HASH_A,
-        HASH_B,
-        HASH_A,
-        HASH_B,
-    )
-}
-
-fn sha256(source: &str) -> String {
-    format!("{:x}", Sha256::digest(source.as_bytes()))
 }

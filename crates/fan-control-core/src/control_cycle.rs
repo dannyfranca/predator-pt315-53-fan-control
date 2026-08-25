@@ -7,6 +7,7 @@ use crate::{
     PlatformError, PlatformErrorKind, Pwm, RuntimeLockAccess, SampleSetError, SampleSources,
     ValidatedConfig,
     output::{calculate_target_demand, fan_outputs_for_demand},
+    tachometer::{TachometerObservationError, TachometerValidator},
 };
 
 const CUSTOM_CONTROL: &str = "1";
@@ -21,12 +22,21 @@ pub struct HealthyControl {
     sample_gate: ControlCycleSampleGate,
     demand_history: Option<ControlDemandHistory>,
     last_outputs: FanOutputs,
+    tachometers: TachometerValidator,
     invalidated: bool,
 }
 
 impl HealthyControl {
     pub fn from_armed(armed: ArmedFanControl) -> Self {
-        let (ownership_id, custom_epoch, config, device) = armed.into_control_parts();
+        let crate::arming::ArmedControlParts {
+            ownership_id,
+            custom_epoch,
+            config,
+            device,
+            calibration,
+            cpu_custom_confirmed_at,
+            gpu_custom_confirmed_at,
+        } = armed.into_control_parts();
         Self {
             ownership_id,
             custom_epoch,
@@ -35,6 +45,12 @@ impl HealthyControl {
             sample_gate: ControlCycleSampleGate::new(),
             demand_history: None,
             last_outputs: FanOutputs::maximum(),
+            tachometers: TachometerValidator::new(
+                calibration,
+                Pwm::MAXIMUM,
+                cpu_custom_confirmed_at,
+                gpu_custom_confirmed_at,
+            ),
             invalidated: false,
         }
     }
@@ -100,6 +116,15 @@ pub enum HealthyControlCycleError {
         expected: String,
         actual: String,
     },
+    MalformedTachometer {
+        fan: Fan,
+        actual: String,
+    },
+    TachometerOutOfBand {
+        fan: Fan,
+        expected_rpm: u32,
+        actual_rpm: u32,
+    },
 }
 
 impl fmt::Display for HealthyControlCycleError {
@@ -133,6 +158,20 @@ impl fmt::Display for HealthyControlCycleError {
                 "{} fan {operation} {field} expected {expected:?}, got {actual:?}",
                 fan.name()
             ),
+            Self::MalformedTachometer { fan, actual } => write!(
+                formatter,
+                "{} fan tachometer readback is malformed: {actual:?}",
+                fan.name()
+            ),
+            Self::TachometerOutOfBand {
+                fan,
+                expected_rpm,
+                actual_rpm,
+            } => write!(
+                formatter,
+                "{} fan tachometer settled outside its qualified ±30% band (expected {expected_rpm} RPM, got {actual_rpm} RPM)",
+                fan.name()
+            ),
         }
     }
 }
@@ -161,6 +200,7 @@ pub enum ControlCycleOperation {
     WriteDuty,
     ConfirmWrittenDuty,
     ConfirmResult,
+    ReadTachometer,
 }
 
 impl fmt::Display for ControlCycleOperation {
@@ -171,6 +211,7 @@ impl fmt::Display for ControlCycleOperation {
             Self::WriteDuty => "duty write",
             Self::ConfirmWrittenDuty => "written-duty confirmation",
             Self::ConfirmResult => "result confirmation",
+            Self::ReadTachometer => "tachometer read",
         })
     }
 }
@@ -243,12 +284,29 @@ where
     )?;
     verify_device_before(ownership.platform_mut(), &device, deadline)?;
 
+    validate_tachometer_response(
+        ownership.platform_mut(),
+        &device,
+        &mut control.tachometers,
+        deadline,
+    )?;
+    confirm_state(
+        ownership.platform_mut(),
+        &device,
+        control.last_outputs,
+        deadline,
+        ControlCycleOperation::ConfirmResult,
+        ControlCycleOperation::ConfirmResult,
+    )?;
+    verify_device_before(ownership.platform_mut(), &device, deadline)?;
+
     write_changed_outputs(
         ownership.platform_mut(),
         &device,
         control.last_outputs,
         outputs,
         deadline,
+        &mut control.tachometers,
     )?;
 
     confirm_state(
@@ -366,11 +424,12 @@ fn confirm_state(
 }
 
 fn write_changed_outputs(
-    platform: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
+    platform: &mut (impl BoundedIdentityBoundFileAccess + Clock + ?Sized),
     device: &AcerHwmonDevice,
     previous: FanOutputs,
     next: FanOutputs,
     deadline: Duration,
+    tachometers: &mut TachometerValidator,
 ) -> Result<(), HealthyControlCycleError> {
     for (fan, endpoints, previous_pwm, next_pwm) in [
         (Fan::Cpu, device.cpu(), previous.cpu_pwm(), next.cpu_pwm()),
@@ -400,8 +459,73 @@ fn write_changed_outputs(
             ControlCycleOperation::ConfirmWrittenDuty,
             deadline,
         )?;
+        tachometers.command_confirmed(fan, next_pwm, platform.monotonic_now());
     }
     Ok(())
+}
+
+fn validate_tachometer_response(
+    platform: &mut (impl BoundedIdentityBoundFileAccess + Clock + ?Sized),
+    device: &AcerHwmonDevice,
+    tachometers: &mut TachometerValidator,
+    deadline: Duration,
+) -> Result<(), HealthyControlCycleError> {
+    let cpu_raw = read_tachometer(platform, device, device.cpu(), Fan::Cpu, deadline)?;
+    let cpu_observed_at = platform.monotonic_now();
+    let cpu_rpm = parse_tachometer(Fan::Cpu, cpu_raw)?;
+    observe_tachometer(tachometers, Fan::Cpu, cpu_rpm, cpu_observed_at)?;
+
+    let gpu_raw = read_tachometer(platform, device, device.gpu(), Fan::Gpu, deadline)?;
+    let gpu_observed_at = platform.monotonic_now();
+    let gpu_rpm = parse_tachometer(Fan::Gpu, gpu_raw)?;
+    observe_tachometer(tachometers, Fan::Gpu, gpu_rpm, gpu_observed_at)
+}
+
+fn read_tachometer(
+    platform: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
+    device: &AcerHwmonDevice,
+    endpoints: &FanEndpoints,
+    fan: Fan,
+    deadline: Duration,
+) -> Result<String, HealthyControlCycleError> {
+    platform
+        .read_bound_before(
+            device.root(),
+            device.backing_identity(),
+            child_name(endpoints.tachometer()),
+            endpoint_identity(device, endpoints.tachometer()),
+            deadline,
+        )
+        .map_err(|source| operation_error(fan, ControlCycleOperation::ReadTachometer, source))
+}
+
+fn parse_tachometer(fan: Fan, actual: String) -> Result<u32, HealthyControlCycleError> {
+    actual
+        .trim()
+        .parse()
+        .map_err(|_| HealthyControlCycleError::MalformedTachometer { fan, actual })
+}
+
+fn observe_tachometer(
+    tachometers: &mut TachometerValidator,
+    fan: Fan,
+    rpm: u32,
+    observed_at: Duration,
+) -> Result<(), HealthyControlCycleError> {
+    match tachometers.observe(fan, rpm, observed_at) {
+        Ok(()) => Ok(()),
+        Err(TachometerObservationError::DeadlineOverflow) => {
+            Err(HealthyControlCycleError::DeadlineOverflow)
+        }
+        Err(TachometerObservationError::OutOfBand {
+            expected_rpm,
+            actual_rpm,
+        }) => Err(HealthyControlCycleError::TachometerOutOfBand {
+            fan,
+            expected_rpm,
+            actual_rpm,
+        }),
+    }
 }
 
 fn write(

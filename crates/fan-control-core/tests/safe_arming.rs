@@ -5,102 +5,23 @@ use std::{
 
 use fan_control_core::{
     AcerHwmonDiscoveryError, AdmittedPolicyAuthority, ArmingReadySample, BoundedFileAccess,
-    BoundedIdentityBoundFileAccess, Clock, CompatibilityDeclarationV1, CompatibilityObservation,
-    ControllerOwnership, EmergencyFanStatus, EvidenceCompleteness, ExternalPower, FakePlatform,
-    FakeRuntimeLock, Fan, FanArmingError, FanArmingFailure, FanArmingOperation, FanWriteBackend,
+    BoundedIdentityBoundFileAccess, Clock, ControllerOwnership, EmergencyFanStatus, ExternalPower,
+    FakePlatform, FakeRuntimeLock, Fan, FanArmingError, FanArmingFailure, FanArmingOperation,
     FileAccess, FileIdentity, FilePermissions, FreshSampleGate, IdentityBoundFileAccess,
-    ObservedFanAbi, ObservedSample, OwnershipSampleReadiness, PlatformError, PlatformErrorKind,
-    PlatformOperation, RuntimeLockAccess, RuntimeLockError, SampleCapture, SampleSetError,
-    SampleSourceError, SampleSources, ServiceAccess, TemperatureCelsius, ValidatedConfig,
+    ObservedSample, OwnershipSampleReadiness, PlatformError, PlatformErrorKind, PlatformOperation,
+    RuntimeLockAccess, RuntimeLockError, SampleCapture, SampleSetError, SampleSourceError,
+    SampleSources, ServiceAccess, TemperatureCelsius, ValidatedConfig,
     acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
-    discover_acer_hwmon, parse_compatibility_v1, parse_config_v1, validate_config_v1,
+    discover_acer_hwmon,
 };
-use sha2::{Digest, Sha256};
 
-const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
-const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+mod support;
+use support::{
+    PROTECTED_POLICY, matching_observation_for_policy, matching_record, protected_config,
+};
+
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
-
-const PROTECTED_POLICY: &str = r#"schema_version = 1
-qualification_id = "pt31553-v1"
-policy_version = "1.0.0"
-
-[compatibility]
-schema_version = 1
-
-[compatibility.hardware]
-dmi_product_name = "Predator PT315-53"
-dmi_board_name = "Civic_TLS"
-bios_version = "V1.17"
-
-[compatibility.kernel]
-release = "7.1.8-1-cachyos-pt31553"
-package = "linux-cachyos-pt31553"
-source_commit = "0123456789abcdef0123456789abcdef01234567"
-image_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-image_signer_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-
-[compatibility.module]
-name = "acer_wmi"
-path = "/usr/lib/modules/7.1.8-1-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst"
-sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-signer_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-vermagic = "7.1.8-1-cachyos-pt31553 SMP preempt mod_unload"
-provenance = "in-tree"
-
-[compatibility.secure_boot]
-required = true
-
-[compatibility.fan_control]
-backend = "acer-hwmon"
-hwmon_name = "acer"
-endpoints = ["pwm1", "pwm1_enable", "fan1_input", "pwm2", "pwm2_enable", "fan2_input"]
-forbidden_capabilities = [
-  "force-caps",
-  "ec-raw-mode",
-  "predator-v4-override",
-  "direct-wmi",
-  "raw-ec",
-  "replacement-wmi-module",
-  "alternate-fan-write-backend",
-]
-
-[protected]
-schema_version = 1
-
-[protected.control]
-hysteresis_celsius = 3
-lower_demand_hold_seconds = 10
-max_down_ramp_percent_per_second = 1.0
-
-[protected.fans.cpu]
-minimum_duty_percent = 30
-
-[protected.fans.gpu]
-minimum_duty_percent = 25
-
-[protected.profiles.ac]
-cpu_curve = [
-  { temperature_c = 40, demand_percent = 30 },
-  { temperature_c = 90, demand_percent = 100 },
-]
-gpu_curve = [
-  { temperature_c = 35, demand_percent = 30 },
-  { temperature_c = 82, demand_percent = 100 },
-]
-
-[protected.profiles.battery]
-cpu_curve = [
-  { temperature_c = 40, demand_percent = 30 },
-  { temperature_c = 90, demand_percent = 100 },
-]
-gpu_curve = [
-  { temperature_c = 35, demand_percent = 30 },
-  { temperature_c = 82, demand_percent = 100 },
-]
-"#;
 
 #[derive(Debug, Default)]
 struct HealthySources;
@@ -1483,59 +1404,6 @@ impl RuntimeLockAccess for PathAwarePlatform {
     ) -> Result<(), (Self::RuntimeLock, PlatformError)> {
         self.inner.release_runtime_lock(lock)
     }
-}
-
-fn matching_observation_for_policy(policy: &str) -> CompatibilityObservation {
-    let declaration = compatibility_declaration(policy);
-    CompatibilityObservation {
-        hardware: declaration.hardware.clone(),
-        kernel: declaration.kernel.clone(),
-        module: declaration.module.clone(),
-        secure_boot_enabled: true,
-        kernel_image_trusted: true,
-        module_signature_trusted: true,
-        fan_abi: ObservedFanAbi {
-            hwmon_name: declaration.fan_control.hwmon_name.clone(),
-            endpoints: declaration.fan_control.endpoints.clone(),
-        },
-        backend_evidence_completeness: EvidenceCompleteness::Complete,
-        backends: vec![FanWriteBackend::AcerHwmon],
-        capability_evidence_completeness: EvidenceCompleteness::Complete,
-        enabled_capabilities: Vec::new(),
-    }
-}
-
-fn compatibility_declaration(policy: &str) -> CompatibilityDeclarationV1 {
-    let start = policy.find("[compatibility]\n").unwrap();
-    let end = policy.find("\n[protected]\n").unwrap();
-    let source = policy[start..end]
-        .replacen("[compatibility]\n", "", 1)
-        .replace("[compatibility.", "[");
-    parse_compatibility_v1(&source).unwrap()
-}
-
-fn protected_config(policy: &str) -> ValidatedConfig {
-    let start = policy.find("[protected]\n").unwrap();
-    let source = policy[start..]
-        .replacen("[protected]\n", "", 1)
-        .replace("[protected.", "[");
-    validate_config_v1(parse_config_v1(&source).unwrap()).unwrap()
-}
-
-fn matching_record(policy: &str) -> String {
-    format!(
-        r#"{{"schema_version":1,"qualification_id":"pt31553-v1","policy_version":"1.0.0","protected_policy_sha256":"{}","compatibility":{{"schema_version":1,"hardware":{{"dmi_product_name":"Predator PT315-53","dmi_board_name":"Civic_TLS","bios_version":"V1.17"}},"kernel":{{"release":"7.1.8-1-cachyos-pt31553","package":"linux-cachyos-pt31553","source_commit":"{}","image_sha256":"{}","image_signer_fingerprint":"{}"}},"module":{{"name":"acer_wmi","path":"/usr/lib/modules/7.1.8-1-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst","sha256":"{}","signer_fingerprint":"{}","vermagic":"7.1.8-1-cachyos-pt31553 SMP preempt mod_unload","provenance":"in-tree"}},"secure_boot":{{"required":true}},"fan_control":{{"backend":"acer-hwmon","hwmon_name":"acer","endpoints":["pwm1","pwm1_enable","fan1_input","pwm2","pwm2_enable","fan2_input"],"forbidden_capabilities":["force-caps","ec-raw-mode","predator-v4-override","direct-wmi","raw-ec","replacement-wmi-module","alternate-fan-write-backend"]}}}}}}"#,
-        sha256(policy),
-        SOURCE_COMMIT,
-        HASH_A,
-        HASH_B,
-        HASH_A,
-        HASH_B,
-    )
-}
-
-fn sha256(source: &str) -> String {
-    format!("{:x}", Sha256::digest(source.as_bytes()))
 }
 
 fn is_write(operation: &PlatformOperation, path: &Path, contents: &str) -> bool {
