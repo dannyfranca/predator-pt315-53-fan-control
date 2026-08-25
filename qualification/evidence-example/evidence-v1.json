@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "record_status": "complete",
+  "qualification_envelope": {
+    "qualification_record_schema_version": 1,
+    "qualification_id": "pt31553-v1",
+    "policy_version": "1.0.0",
+    "protected_policy_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "compatibility": {
+      "schema_version": 1,
+      "hardware": {
+        "dmi_product_name": "Predator PT315-53",
+        "dmi_board_name": "Civic_TLS",
+        "bios_version": "V1.17"
+      },
+      "kernel": {
+        "release": "7.1.8-1-cachyos-pt31553",
+        "package": "linux-cachyos-pt31553",
+        "source_commit": "0123456789abcdef0123456789abcdef01234567",
+        "image_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "image_signer_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "module": {
+        "name": "acer_wmi",
+        "path": "/usr/lib/modules/7.1.8-1-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "signer_fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "vermagic": "7.1.8-1-cachyos-pt31553 SMP preempt mod_unload",
+        "provenance": "in-tree"
+      },
+      "secure_boot": {
+        "required": true
+      },
+      "fan_control": {
+        "backend": "acer-hwmon",
+        "hwmon_name": "acer",
+        "endpoints": [
+          "pwm1",
+          "pwm1_enable",
+          "fan1_input",
+          "pwm2",
+          "pwm2_enable",
+          "fan2_input"
+        ],
+        "forbidden_capabilities": [
+          "force-caps",
+          "ec-raw-mode",
+          "predator-v4-override",
+          "direct-wmi",
+          "raw-ec",
+          "replacement-wmi-module",
+          "alternate-fan-write-backend"
+        ]
+      }
+    }
+  },
+  "stage": "matched-workload",
+  "started_at": {
+    "monotonic_millis": 100000,
+    "wall_unix_millis": 1787691600000
+  },
+  "completed_at": {
+    "monotonic_millis": 102000,
+    "wall_unix_millis": 1787691602000
+  },
+  "workload": {
+    "workload_id": "cpu-ac-v1",
+    "command": [
+      "/usr/lib/pt31553-fan-control/workloads/cpu",
+      "--seconds",
+      "1200"
+    ],
+    "version": "1.0.0",
+    "power_profile": "ac",
+    "ambient_millicelsius": 24000,
+    "starting_cpu_millicelsius": 42000,
+    "starting_gpu_millicelsius": 39000
+  },
+  "samples": [
+    {
+      "timestamp": {
+        "monotonic_millis": 100100,
+        "wall_unix_millis": 1787691600100
+      },
+      "cpu_millicelsius": 63000,
+      "gpu_millicelsius": 48000,
+      "freshness": "fresh",
+      "external_power": "ac",
+      "selected_profile": "ac",
+      "cpu_source_demand_basis_points": 6200,
+      "gpu_source_demand_basis_points": 4100,
+      "commanded_demand_basis_points": 6200,
+      "cpu_thermal_throttling": false,
+      "gpu_thermal_throttling": false
+    }
+  ],
+  "commands": [
+    {
+      "timestamp": {
+        "monotonic_millis": 100110,
+        "wall_unix_millis": 1787691600110
+      },
+      "fan": "cpu",
+      "field": "pwm",
+      "value": 158
+    }
+  ],
+  "readbacks": [
+    {
+      "timestamp": {
+        "monotonic_millis": 100120,
+        "wall_unix_millis": 1787691600120
+      },
+      "fan": "cpu",
+      "field": "rpm",
+      "value": 4200,
+      "endpoint_identity": "device-21-inode-101",
+      "outcome": "confirmed"
+    }
+  ],
+  "state_transitions": [
+    {
+      "timestamp": {
+        "monotonic_millis": 100000,
+        "wall_unix_millis": 1787691600000
+      },
+      "from": "firmware-auto",
+      "to": "custom-control"
+    },
+    {
+      "timestamp": {
+        "monotonic_millis": 101960,
+        "wall_unix_millis": 1787691601960
+      },
+      "from": "custom-control",
+      "to": "firmware-auto"
+    }
+  ],
+  "faults": [
+    {
+      "timestamp": {
+        "monotonic_millis": 101900,
+        "wall_unix_millis": 1787691601900
+      },
+      "code": "gpu-telemetry-invalid",
+      "detail": "NVML reported that the GPU requires reset"
+    }
+  ],
+  "restoration_attempts": [
+    {
+      "timestamp": {
+        "monotonic_millis": 101950,
+        "wall_unix_millis": 1787691601950
+      },
+      "fan": "cpu",
+      "auto_write_succeeded": true,
+      "enable_readback": 2,
+      "outcome": "firmware-auto-confirmed"
+    }
+  ],
+  "calibration": [
+    {
+      "fan": "cpu",
+      "floor_basis_points": 4000,
+      "response_deadline_millis": 7000,
+      "anchors": [
+        {
+          "duty_basis_points": 4000,
+          "median_rpm": 3100
+        },
+        {
+          "duty_basis_points": 10000,
+          "median_rpm": 6200
+        }
+      ]
+    }
+  ],
+  "thermal_summary": {
+    "cpu_peak_millicelsius": 71000,
+    "gpu_peak_millicelsius": 55000,
+    "cpu_p95_millicelsius": 69000,
+    "gpu_p95_millicelsius": 53000,
+    "cpu_final_slope_millicelsius_per_minute": 200,
+    "gpu_final_slope_millicelsius_per_minute": -100,
+    "kernel_faults": [],
+    "nvidia_faults": [
+      "gpu-requires-reset"
+    ]
+  },
+  "outcome": {
+    "status": "failed",
+    "reason": "required GPU telemetry became invalid",
+    "another_passing_run_required": true,
+    "final_firmware_auto_confirmed": true
+  }
+}

@@ -1,0 +1,660 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dannyfranca/predator-pt315-53-fan-control/schemas/evidence-v1.json",
+  "title": "PT315-53 qualification evidence v1",
+  "$comment": "Structural validation MUST be followed by semantic validation. The canonical Rust API is parse_evidence_v1, which enforces cross-field invariants including kernel.release equality with the release embedded in module.path and module.vermagic, and final Firmware Auto restoration/state confirmation after every fan command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_status",
+    "qualification_envelope",
+    "stage",
+    "started_at",
+    "completed_at",
+    "workload",
+    "samples",
+    "commands",
+    "readbacks",
+    "state_transitions",
+    "faults",
+    "restoration_attempts",
+    "calibration",
+    "thermal_summary",
+    "outcome"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "record_status": { "const": "complete" },
+    "qualification_envelope": { "$ref": "#/$defs/qualificationEnvelope" },
+    "stage": { "$ref": "#/$defs/identifier" },
+    "started_at": { "$ref": "#/$defs/timestamp" },
+    "completed_at": { "$ref": "#/$defs/timestamp" },
+    "workload": {
+      "anyOf": [
+        { "$ref": "#/$defs/workload" },
+        { "type": "null" }
+      ]
+    },
+    "samples": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sample" }
+    },
+    "commands": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/command" }
+    },
+    "readbacks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/readback" }
+    },
+    "state_transitions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/stateTransition" }
+    },
+    "faults": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fault" }
+    },
+    "restoration_attempts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/restorationAttempt" }
+    },
+    "calibration": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/calibration" }
+    },
+    "thermal_summary": {
+      "anyOf": [
+        { "$ref": "#/$defs/thermalSummary" },
+        { "type": "null" }
+      ]
+    },
+    "outcome": { "$ref": "#/$defs/outcome" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "properties": { "status": { "const": "passed" } },
+            "required": ["status"]
+          }
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "samples": { "minItems": 1 },
+          "readbacks": { "minItems": 1 },
+          "outcome": {
+            "properties": { "final_firmware_auto_confirmed": { "const": true } }
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "stage": { "const": "preflight" },
+              "workload": { "type": "null" },
+              "thermal_summary": { "type": "null" },
+              "commands": { "maxItems": 0 },
+              "state_transitions": { "maxItems": 0 },
+              "restoration_attempts": { "maxItems": 0 },
+              "calibration": { "maxItems": 0 },
+              "readbacks": {
+                "allOf": [
+                  { "contains": { "$ref": "#/$defs/cpuFirmwareAutoReadback" } },
+                  { "contains": { "$ref": "#/$defs/gpuFirmwareAutoReadback" } }
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "stage": { "const": "firmware-auto-baseline" },
+              "workload": { "$ref": "#/$defs/workload" },
+              "thermal_summary": { "$ref": "#/$defs/thermalSummary" },
+              "commands": { "maxItems": 0 },
+              "state_transitions": { "maxItems": 0 },
+              "restoration_attempts": { "maxItems": 0 },
+              "readbacks": {
+                "allOf": [
+                  { "contains": { "$ref": "#/$defs/cpuFirmwareAutoReadback" } },
+                  { "contains": { "$ref": "#/$defs/gpuFirmwareAutoReadback" } }
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "stage": { "not": { "enum": ["preflight", "firmware-auto-baseline"] } },
+              "workload": { "$ref": "#/$defs/workload" },
+              "thermal_summary": { "$ref": "#/$defs/thermalSummary" },
+              "commands": { "minItems": 1 },
+              "state_transitions": {
+                "minItems": 1,
+                "contains": { "$ref": "#/$defs/firmwareAutoTransition" }
+              },
+              "restoration_attempts": {
+                "minItems": 2,
+                "allOf": [
+                  { "contains": { "$ref": "#/$defs/cpuFirmwareAutoRestoration" } },
+                  { "contains": { "$ref": "#/$defs/gpuFirmwareAutoRestoration" } }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": { "commands": { "minItems": 1 } },
+        "required": ["commands"]
+      },
+      "then": {
+        "properties": {
+          "restoration_attempts": { "minItems": 1 },
+          "state_transitions": { "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "properties": { "final_firmware_auto_confirmed": { "const": true } },
+            "required": ["final_firmware_auto_confirmed"]
+          }
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "oneOf": [
+          {
+            "properties": {
+              "commands": { "maxItems": 0 },
+              "readbacks": {
+                "allOf": [
+                  { "contains": { "$ref": "#/$defs/cpuFirmwareAutoReadback" } },
+                  { "contains": { "$ref": "#/$defs/gpuFirmwareAutoReadback" } }
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "commands": { "minItems": 1 },
+              "restoration_attempts": {
+                "minItems": 1,
+                "contains": {
+                  "properties": {
+                    "enable_readback": { "const": 2 },
+                    "outcome": { "const": "firmware-auto-confirmed" }
+                  },
+                  "required": ["enable_readback", "outcome"]
+                }
+              },
+              "state_transitions": {
+                "minItems": 1,
+                "contains": { "$ref": "#/$defs/firmwareAutoTransition" }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["monotonic_millis", "wall_unix_millis"],
+      "properties": {
+        "monotonic_millis": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "wall_unix_millis": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 }
+      }
+    },
+    "qualificationEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "qualification_record_schema_version",
+        "qualification_id",
+        "policy_version",
+        "protected_policy_sha256",
+        "compatibility"
+      ],
+      "properties": {
+        "qualification_record_schema_version": { "const": 1 },
+        "qualification_id": { "$ref": "#/$defs/identifier" },
+        "policy_version": { "$ref": "#/$defs/identifier" },
+        "protected_policy_sha256": { "$ref": "#/$defs/sha256" },
+        "compatibility": { "$ref": "#/$defs/compatibility" }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "hardware", "kernel", "module", "secure_boot", "fan_control"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "hardware": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dmi_product_name", "dmi_board_name", "bios_version"],
+          "properties": {
+            "dmi_product_name": { "const": "Predator PT315-53" },
+            "dmi_board_name": { "const": "Civic_TLS" },
+            "bios_version": { "const": "V1.17" }
+          }
+        },
+        "kernel": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["release", "package", "source_commit", "image_sha256", "image_signer_fingerprint"],
+          "properties": {
+            "release": {
+              "type": "string",
+              "pattern": "^(?:6\\.(?:19|[2-9][0-9]|[1-9][0-9]{2,})|(?:[7-9]|[1-9][0-9]+)\\.(?:0|[1-9][0-9]*))(?:[._+-][A-Za-z0-9]+)*-cachyos-pt31553$"
+            },
+            "package": { "const": "linux-cachyos-pt31553" },
+            "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "image_sha256": { "$ref": "#/$defs/sha256" },
+            "image_signer_fingerprint": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "module": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "path", "sha256", "signer_fingerprint", "vermagic", "provenance"],
+          "properties": {
+            "name": { "const": "acer_wmi" },
+            "path": {
+              "type": "string",
+              "description": "The embedded release must equal kernel.release; parse_evidence_v1 enforces this cross-field invariant.",
+              "pattern": "^/usr/lib/modules/(?:6\\.(?:19|[2-9][0-9]|[1-9][0-9]{2,})|(?:[7-9]|[1-9][0-9]+)\\.(?:0|[1-9][0-9]*))(?:[._+-][A-Za-z0-9]+)*-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi\\.ko\\.zst$"
+            },
+            "sha256": { "$ref": "#/$defs/sha256" },
+            "signer_fingerprint": { "$ref": "#/$defs/sha256" },
+            "vermagic": {
+              "type": "string",
+              "description": "The leading release must equal kernel.release; parse_evidence_v1 enforces this cross-field invariant.",
+              "pattern": "^(?:6\\.(?:19|[2-9][0-9]|[1-9][0-9]{2,})|(?:[7-9]|[1-9][0-9]+)\\.(?:0|[1-9][0-9]*))(?:[._+-][A-Za-z0-9]+)*-cachyos-pt31553 .+$"
+            },
+            "provenance": { "const": "in-tree" }
+          }
+        },
+        "secure_boot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required"],
+          "properties": { "required": { "const": true } }
+        },
+        "fan_control": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["backend", "hwmon_name", "endpoints", "forbidden_capabilities"],
+          "properties": {
+            "backend": { "const": "acer-hwmon" },
+            "hwmon_name": { "const": "acer" },
+            "endpoints": {
+              "type": "array",
+              "minItems": 6,
+              "maxItems": 6,
+              "uniqueItems": true,
+              "items": {
+                "enum": ["pwm1", "pwm1_enable", "fan1_input", "pwm2", "pwm2_enable", "fan2_input"]
+              }
+            },
+            "forbidden_capabilities": {
+              "type": "array",
+              "minItems": 7,
+              "maxItems": 7,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "force-caps",
+                  "ec-raw-mode",
+                  "predator-v4-override",
+                  "direct-wmi",
+                  "raw-ec",
+                  "replacement-wmi-module",
+                  "alternate-fan-write-backend"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "profile": { "enum": ["ac", "battery"] },
+    "fan": { "enum": ["cpu", "gpu"] },
+    "basisPoints": { "type": "integer", "minimum": 0, "maximum": 10000 },
+    "nullableBasisPoints": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "nullableI32": {
+      "type": ["integer", "null"],
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    "nullableU32": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "nullableBoolean": { "type": ["boolean", "null"] },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workload_id",
+        "command",
+        "version",
+        "power_profile",
+        "ambient_millicelsius",
+        "starting_cpu_millicelsius",
+        "starting_gpu_millicelsius"
+      ],
+      "properties": {
+        "workload_id": { "$ref": "#/$defs/identifier" },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "version": { "$ref": "#/$defs/identifier" },
+        "power_profile": { "$ref": "#/$defs/profile" },
+        "ambient_millicelsius": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+        "starting_cpu_millicelsius": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+        "starting_gpu_millicelsius": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timestamp",
+        "cpu_millicelsius",
+        "gpu_millicelsius",
+        "freshness",
+        "external_power",
+        "selected_profile",
+        "cpu_source_demand_basis_points",
+        "gpu_source_demand_basis_points",
+        "commanded_demand_basis_points",
+        "cpu_thermal_throttling",
+        "gpu_thermal_throttling"
+      ],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "cpu_millicelsius": { "$ref": "#/$defs/nullableI32" },
+        "gpu_millicelsius": { "$ref": "#/$defs/nullableI32" },
+        "freshness": { "enum": ["fresh", "stale", "invalid", "missing"] },
+        "external_power": { "enum": ["ac", "battery", null] },
+        "selected_profile": { "enum": ["ac", "battery", null] },
+        "cpu_source_demand_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
+        "gpu_source_demand_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
+        "commanded_demand_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
+        "cpu_thermal_throttling": { "$ref": "#/$defs/nullableBoolean" },
+        "gpu_thermal_throttling": { "$ref": "#/$defs/nullableBoolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "freshness": { "const": "fresh" } }, "required": ["freshness"] },
+          "then": {
+            "properties": {
+              "cpu_millicelsius": { "type": "integer" },
+              "gpu_millicelsius": { "type": "integer" },
+              "external_power": { "enum": ["ac", "battery"] },
+              "selected_profile": { "enum": ["ac", "battery"] },
+              "cpu_source_demand_basis_points": { "$ref": "#/$defs/basisPoints" },
+              "gpu_source_demand_basis_points": { "$ref": "#/$defs/basisPoints" },
+              "commanded_demand_basis_points": { "$ref": "#/$defs/basisPoints" },
+              "cpu_thermal_throttling": { "type": "boolean" },
+              "gpu_thermal_throttling": { "type": "boolean" }
+            }
+          }
+        }
+      ]
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "fan", "field", "value"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "fan": { "$ref": "#/$defs/fan" },
+        "field": { "enum": ["pwm", "enable"] },
+        "value": { "type": "integer", "minimum": 0, "maximum": 255 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "field": { "const": "enable" } }, "required": ["field"] },
+          "then": { "properties": { "value": { "maximum": 2 } } }
+        }
+      ]
+    },
+    "readback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "fan", "field", "value", "endpoint_identity", "outcome"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "fan": { "$ref": "#/$defs/fan" },
+        "field": { "enum": ["pwm", "enable", "rpm"] },
+        "value": { "$ref": "#/$defs/nullableU32" },
+        "endpoint_identity": { "type": "string", "minLength": 1 },
+        "outcome": { "enum": ["confirmed", "unexpected", "unreadable"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "field": { "const": "pwm" } }, "required": ["field"] },
+          "then": {
+            "properties": {
+              "value": {
+                "anyOf": [
+                  { "type": "integer", "minimum": 0, "maximum": 255 },
+                  { "type": "null" }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "field": { "const": "enable" } }, "required": ["field"] },
+          "then": {
+            "properties": {
+              "value": {
+                "anyOf": [
+                  { "type": "integer", "minimum": 0, "maximum": 2 },
+                  { "type": "null" }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "outcome": { "enum": ["confirmed", "unexpected"] } },
+            "required": ["outcome"]
+          },
+          "then": { "properties": { "value": { "type": "integer" } } }
+        },
+        {
+          "if": { "properties": { "outcome": { "const": "unreadable" } }, "required": ["outcome"] },
+          "then": { "properties": { "value": { "type": "null" } } }
+        }
+      ]
+    },
+    "stateTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "from", "to"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "from": { "$ref": "#/$defs/identifier" },
+        "to": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "firmwareAutoTransition": {
+      "type": "object",
+      "properties": { "to": { "const": "firmware-auto" } },
+      "required": ["to"]
+    },
+    "fault": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "code", "detail"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "code": { "$ref": "#/$defs/identifier" },
+        "detail": { "type": "string", "minLength": 1 }
+      }
+    },
+    "restorationAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "fan", "auto_write_succeeded", "enable_readback", "outcome"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "fan": { "$ref": "#/$defs/fan" },
+        "auto_write_succeeded": { "type": "boolean" },
+        "enable_readback": { "enum": [0, 1, 2, null] },
+        "outcome": {
+          "enum": [
+            "firmware-auto-confirmed",
+            "firmware-auto-unconfirmed",
+            "maximum-containment-confirmed",
+            "containment-failed"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "outcome": { "const": "firmware-auto-confirmed" } },
+            "required": ["outcome"]
+          },
+          "then": { "properties": { "enable_readback": { "const": 2 } } }
+        },
+        {
+          "if": {
+            "properties": { "outcome": { "const": "firmware-auto-unconfirmed" } },
+            "required": ["outcome"]
+          },
+          "then": { "properties": { "enable_readback": { "not": { "const": 2 } } } }
+        }
+      ]
+    },
+    "cpuFirmwareAutoReadback": {
+      "type": "object",
+      "properties": {
+        "fan": { "const": "cpu" },
+        "field": { "const": "enable" },
+        "value": { "const": 2 },
+        "outcome": { "const": "confirmed" }
+      },
+      "required": ["fan", "field", "value", "outcome"]
+    },
+    "gpuFirmwareAutoReadback": {
+      "type": "object",
+      "properties": {
+        "fan": { "const": "gpu" },
+        "field": { "const": "enable" },
+        "value": { "const": 2 },
+        "outcome": { "const": "confirmed" }
+      },
+      "required": ["fan", "field", "value", "outcome"]
+    },
+    "cpuFirmwareAutoRestoration": {
+      "type": "object",
+      "properties": {
+        "fan": { "const": "cpu" },
+        "enable_readback": { "const": 2 },
+        "outcome": { "const": "firmware-auto-confirmed" }
+      },
+      "required": ["fan", "enable_readback", "outcome"]
+    },
+    "gpuFirmwareAutoRestoration": {
+      "type": "object",
+      "properties": {
+        "fan": { "const": "gpu" },
+        "enable_readback": { "const": 2 },
+        "outcome": { "const": "firmware-auto-confirmed" }
+      },
+      "required": ["fan", "enable_readback", "outcome"]
+    },
+    "calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fan", "floor_basis_points", "response_deadline_millis", "anchors"],
+      "properties": {
+        "fan": { "$ref": "#/$defs/fan" },
+        "floor_basis_points": { "$ref": "#/$defs/basisPoints" },
+        "response_deadline_millis": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "anchors": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["duty_basis_points", "median_rpm"],
+            "properties": {
+              "duty_basis_points": { "$ref": "#/$defs/basisPoints" },
+              "median_rpm": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+            }
+          }
+        }
+      }
+    },
+    "thermalSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu_peak_millicelsius",
+        "gpu_peak_millicelsius",
+        "cpu_p95_millicelsius",
+        "gpu_p95_millicelsius",
+        "cpu_final_slope_millicelsius_per_minute",
+        "gpu_final_slope_millicelsius_per_minute",
+        "kernel_faults",
+        "nvidia_faults"
+      ],
+      "properties": {
+        "cpu_peak_millicelsius": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+        "gpu_peak_millicelsius": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+        "cpu_p95_millicelsius": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+        "gpu_p95_millicelsius": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+        "cpu_final_slope_millicelsius_per_minute": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+        "gpu_final_slope_millicelsius_per_minute": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+        "kernel_faults": { "type": "array", "items": { "type": "string" } },
+        "nvidia_faults": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason", "another_passing_run_required", "final_firmware_auto_confirmed"],
+      "properties": {
+        "status": { "enum": ["passed", "failed", "no-go"] },
+        "reason": { "type": "string", "minLength": 1 },
+        "another_passing_run_required": { "type": "boolean" },
+        "final_firmware_auto_confirmed": { "type": "boolean" }
+      }
+    }
+  }
+}

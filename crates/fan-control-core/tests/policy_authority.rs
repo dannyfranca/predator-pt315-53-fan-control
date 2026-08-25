@@ -109,6 +109,18 @@ fn exact_policy_record_and_live_envelope_are_admitted_together() {
         authority.protected_policy_sha256(),
         sha256(PROTECTED_POLICY)
     );
+    let evidence_identity = authority.evidence_identity();
+    assert_eq!(evidence_identity.qualification_record_schema_version, 1);
+    assert_eq!(evidence_identity.qualification_id, "pt31553-v1");
+    assert_eq!(evidence_identity.policy_version, "1.0.0");
+    assert_eq!(
+        evidence_identity.protected_policy_sha256,
+        sha256(PROTECTED_POLICY)
+    );
+    assert_eq!(
+        evidence_identity.compatibility,
+        compatibility_declaration(PROTECTED_POLICY)
+    );
     assert!(
         authority
             .validate_candidate(&protected_config(PROTECTED_POLICY))

@@ -6,9 +6,9 @@ use sha2::{Digest, Sha256};
 use crate::{
     AcerHwmonDevice, BoundedFileAccess, Clock, CompatibilityAdmissionError,
     CompatibilityDeclarationV1, CompatibilityObservation, ConfigV1, ConfigValidationError,
-    ControllerOwnership, EnvelopeValidationError, FirmwareAutoRestorationError, RuntimeLockAccess,
-    ValidatedConfig, admit_compatibility, compatibility::validate_declaration,
-    validate_against_protected_envelope, validate_config_v1,
+    ControllerOwnership, EnvelopeValidationError, FirmwareAutoRestorationError,
+    QualificationEnvelopeIdentityV1, RuntimeLockAccess, ValidatedConfig, admit_compatibility,
+    compatibility::validate_declaration, validate_against_protected_envelope, validate_config_v1,
 };
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -39,6 +39,7 @@ pub struct AdmittedPolicyAuthority {
     qualification_id: String,
     policy_version: String,
     protected_policy_sha256: String,
+    compatibility: CompatibilityDeclarationV1,
     protected: ValidatedConfig,
 }
 
@@ -57,6 +58,17 @@ impl AdmittedPolicyAuthority {
 
     pub fn protected_policy_sha256(&self) -> &str {
         &self.protected_policy_sha256
+    }
+
+    /// Returns the exact envelope identity retained from this admitted authority.
+    pub fn evidence_identity(&self) -> QualificationEnvelopeIdentityV1 {
+        QualificationEnvelopeIdentityV1 {
+            qualification_record_schema_version: 1,
+            qualification_id: self.qualification_id.clone(),
+            policy_version: self.policy_version.clone(),
+            protected_policy_sha256: self.protected_policy_sha256.clone(),
+            compatibility: self.compatibility.clone(),
+        }
     }
 
     pub fn validate_candidate(
@@ -260,6 +272,7 @@ fn validate_policy_authority(
         qualification_id: manifest.qualification_id,
         policy_version: manifest.policy_version,
         protected_policy_sha256,
+        compatibility: manifest.compatibility,
         protected,
     })
 }
