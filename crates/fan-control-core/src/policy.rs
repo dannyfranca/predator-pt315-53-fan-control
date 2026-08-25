@@ -111,6 +111,14 @@ impl DownshiftPolicy {
             max_down_rate_percent_per_second,
         })
     }
+
+    pub const fn hold(self) -> Duration {
+        self.hold
+    }
+
+    pub const fn max_down_rate_percent_per_second(self) -> f64 {
+        self.max_down_rate_percent_per_second
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
