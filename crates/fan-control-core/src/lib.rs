@@ -4,6 +4,7 @@ use std::fmt;
 
 mod acer_hwmon;
 mod config;
+mod coretemp;
 mod curve;
 mod demand;
 mod envelope;
@@ -18,13 +19,14 @@ pub use config::{
     ConfigParseError, ConfigV1, ControlConfig, CurvePointConfig, FanConfig, FansConfig, FiniteF64,
     ProfileConfig, ProfilesConfig, parse_config_v1,
 };
+pub use coretemp::{CoretempDevice, CoretempError, discover_coretemp};
 pub use curve::{CurvePoint, DemandCurve, DemandCurveError, TemperatureCelsius, TemperatureError};
 pub use demand::{DemandPercent, DemandPercentError, Pwm};
 pub use envelope::{EnvelopeValidationError, validate_against_protected_envelope};
 pub use output::{ExternalPower, FanOutputs, calculate_fan_outputs};
 pub use platform::{
-    BoundedFileAccess, Clock, FakePlatform, FakeStep, FileAccess, FilePermissions, PlatformError,
-    PlatformErrorKind, PlatformOperation, ServiceAccess,
+    BoundedFileAccess, Clock, FakePlatform, FakeStep, FileAccess, FileIdentity, FilePermissions,
+    IdentityBoundFileAccess, PlatformError, PlatformErrorKind, PlatformOperation, ServiceAccess,
 };
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
