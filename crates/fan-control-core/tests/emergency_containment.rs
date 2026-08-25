@@ -1,9 +1,10 @@
 use std::{path::Path, time::Duration};
 
 use fan_control_core::{
-    BoundedFileAccess, Clock, EmergencyFanStatus, FakePlatform, FakeStep, FanModeFailure,
-    FilePermissions, MaximumPwmReadback, PlatformError, PlatformErrorKind, PlatformOperation,
-    contain_custom_fans_at_maximum, discover_acer_hwmon, recover_firmware_auto,
+    BoundedFileAccess, Clock, EmergencyContainmentReport, EmergencyFanStatus, FakePlatform,
+    FakeRuntimeLock, FakeStep, FanModeFailure, FilePermissions, MaximumPwmReadback, PlatformError,
+    PlatformErrorKind, PlatformOperation, RuntimeLockAccess, RuntimeLockError, ServiceAccess,
+    acquire_controller_ownership, discover_acer_hwmon,
 };
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
@@ -26,7 +27,7 @@ fn confirmed_custom_fan_is_verified_at_maximum_while_auto_fan_is_untouched() {
 fn unreadable_mode_prevents_pwm_write_and_reports_unconfirmed() {
     let (mut platform, device, marker) = fixture("1\n", "2\n");
     let mode_error = PlatformError::new(PlatformErrorKind::Unavailable, "mode unavailable");
-    platform.queue_steps([FakeStep::Fail(mode_error.clone()), FakeStep::Pass]);
+    platform.queue_file_steps([FakeStep::Fail(mode_error.clone()), FakeStep::Pass]);
 
     let report = contain_custom_fans_at_maximum(&mut platform, &device);
 
@@ -56,7 +57,7 @@ fn failed_maximum_write_is_not_reported_as_confirmed() {
     let (mut platform, device, _) = fixture("1\n", "2\n");
     platform.insert_file(cpu_pwm(), "255\n");
     let write_error = PlatformError::new(PlatformErrorKind::Unavailable, "PWM write rejected");
-    platform.queue_steps([
+    platform.queue_file_steps([
         FakeStep::Pass,
         FakeStep::Fail(write_error.clone()),
         FakeStep::Pass,
@@ -78,7 +79,7 @@ fn failed_maximum_write_is_not_reported_as_confirmed() {
 fn failed_maximum_readback_is_reported_after_a_successful_write() {
     let (mut platform, device, _) = fixture("1\n", "2\n");
     let read_error = PlatformError::new(PlatformErrorKind::Unavailable, "PWM read unavailable");
-    platform.queue_steps([
+    platform.queue_file_steps([
         FakeStep::Pass,
         FakeStep::Pass,
         FakeStep::Fail(read_error.clone()),
@@ -100,7 +101,7 @@ fn failed_maximum_readback_is_reported_after_a_successful_write() {
 #[test]
 fn custom_mode_at_its_deadline_still_has_time_for_write_and_readback() {
     let (mut platform, device, _) = fixture("1\n", "2\n");
-    platform.queue_steps([
+    platform.queue_file_steps([
         FakeStep::Advance(Duration::from_secs(1) / 3),
         FakeStep::Pass,
         FakeStep::Pass,
@@ -116,7 +117,7 @@ fn custom_mode_at_its_deadline_still_has_time_for_write_and_readback() {
 #[test]
 fn slow_failure_containment_does_not_postpone_the_next_auto_attempt() {
     let (mut platform, device, _) = fixture("1\n", "1\n");
-    platform.queue_steps([
+    platform.queue_file_steps([
         FakeStep::Advance(Duration::from_secs(1)),
         FakeStep::Advance(Duration::from_millis(500)),
     ]);
@@ -144,7 +145,7 @@ fn recovery_keeps_retrying_until_both_auto_readbacks_succeed() {
         ]);
     }
     steps.extend((0..6).map(|_| FakeStep::Pass));
-    platform.queue_steps(steps);
+    platform.queue_file_steps(steps);
     recover_firmware_auto(&mut platform, &device);
 
     assert_eq!(platform.delays(), &[Duration::from_secs(2)]);
@@ -189,6 +190,23 @@ fn pwm_writes(platform: &FakePlatform, marker: usize) -> Vec<PlatformOperation> 
         })
         .cloned()
         .collect()
+}
+
+fn contain_custom_fans_at_maximum(
+    platform: &mut FakePlatform,
+    device: &fan_control_core::AcerHwmonDevice,
+) -> EmergencyContainmentReport {
+    let mut ownership = acquire_controller_ownership(platform).unwrap();
+    ownership.contain_custom_fans_at_maximum(device)
+}
+
+fn recover_firmware_auto<P>(platform: &mut P, device: &fan_control_core::AcerHwmonDevice)
+where
+    P: BoundedFileAccess + Clock + RuntimeLockAccess + ServiceAccess + ?Sized,
+{
+    let mut ownership = acquire_controller_ownership(platform).unwrap();
+    ownership.recover_firmware_auto(device);
+    ownership.release().unwrap();
 }
 
 fn write(path: &Path, contents: &str) -> PlatformOperation {
@@ -257,5 +275,29 @@ impl Clock for AutoAttemptRecorder {
 
     fn delay(&mut self, duration: Duration) {
         self.inner.delay(duration);
+    }
+}
+
+impl ServiceAccess for AutoAttemptRecorder {
+    fn is_service_active(&mut self, service: &str) -> Result<bool, PlatformError> {
+        self.inner.is_service_active(service)
+    }
+}
+
+impl RuntimeLockAccess for AutoAttemptRecorder {
+    type RuntimeLock = FakeRuntimeLock;
+
+    fn try_acquire_root_runtime_lock(
+        &mut self,
+        path: &Path,
+    ) -> Result<Self::RuntimeLock, RuntimeLockError> {
+        self.inner.try_acquire_root_runtime_lock(path)
+    }
+
+    fn release_runtime_lock(
+        &mut self,
+        lock: Self::RuntimeLock,
+    ) -> Result<(), (Self::RuntimeLock, PlatformError)> {
+        self.inner.release_runtime_lock(lock)
     }
 }

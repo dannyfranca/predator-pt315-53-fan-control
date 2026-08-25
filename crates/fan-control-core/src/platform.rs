@@ -2,7 +2,15 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt,
+    fs::{self, File, OpenOptions},
+    io,
+    os::{
+        fd::AsRawFd,
+        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
+    process::Command,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -140,6 +148,239 @@ pub trait ServiceAccess {
     fn is_service_active(&mut self, service: &str) -> Result<bool, PlatformError>;
 }
 
+/// Atomic non-blocking access to a lock file owned by UID 0.
+///
+/// Implementations must reject lock files not owned by root and keep the lock held until either
+/// `release_runtime_lock` succeeds or the owning process exits.
+pub trait RuntimeLockAccess {
+    type RuntimeLock;
+
+    fn try_acquire_root_runtime_lock(
+        &mut self,
+        path: &Path,
+    ) -> Result<Self::RuntimeLock, RuntimeLockError>;
+
+    fn release_runtime_lock(
+        &mut self,
+        lock: Self::RuntimeLock,
+    ) -> Result<(), (Self::RuntimeLock, PlatformError)>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeLockError {
+    AlreadyHeld,
+    NotRootOwned,
+    Platform(PlatformError),
+}
+
+/// Linux ownership boundary used by the daemon and recovery executables.
+#[derive(Debug, Default)]
+pub struct SystemOwnershipPlatform {
+    required_lock_owner: u32,
+}
+
+impl SystemOwnershipPlatform {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[cfg(test)]
+    fn with_required_lock_owner(required_lock_owner: u32) -> Self {
+        Self {
+            required_lock_owner,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SystemRuntimeLock {
+    file: Option<File>,
+    path: PathBuf,
+}
+
+impl Drop for SystemRuntimeLock {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            std::mem::forget(file);
+        }
+    }
+}
+
+impl ServiceAccess for SystemOwnershipPlatform {
+    fn is_service_active(&mut self, service: &str) -> Result<bool, PlatformError> {
+        let output = Command::new("systemctl")
+            .args([
+                "show",
+                "--no-pager",
+                "--property=LoadState",
+                "--property=ActiveState",
+                service,
+            ])
+            .output()
+            .map_err(|error| io_platform_error("cannot execute systemctl", error))?;
+        let status = String::from_utf8(output.stdout).map_err(|error| {
+            PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("systemctl returned non-UTF-8 status for {service}: {error}"),
+            )
+        })?;
+        parse_systemd_service_status(service, &status)
+    }
+}
+
+fn parse_systemd_service_status(service: &str, status: &str) -> Result<bool, PlatformError> {
+    let mut load_state = None;
+    let mut active_state = None;
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("LoadState=") {
+            load_state = Some(value);
+        } else if let Some(value) = line.strip_prefix("ActiveState=") {
+            active_state = Some(value);
+        }
+    }
+    if load_state == Some("not-found") {
+        return Err(PlatformError::new(
+            PlatformErrorKind::NotFound,
+            format!("service does not exist: {service}"),
+        ));
+    }
+    if load_state != Some("loaded") {
+        return Err(PlatformError::new(
+            PlatformErrorKind::Unavailable,
+            format!("cannot establish load state for service {service}"),
+        ));
+    }
+    match active_state {
+        Some("active" | "activating" | "reloading" | "deactivating") => Ok(true),
+        Some("inactive" | "failed" | "maintenance") => Ok(false),
+        _ => Err(PlatformError::new(
+            PlatformErrorKind::Unavailable,
+            format!("cannot establish active state for service {service}"),
+        )),
+    }
+}
+
+impl RuntimeLockAccess for SystemOwnershipPlatform {
+    type RuntimeLock = SystemRuntimeLock;
+
+    fn try_acquire_root_runtime_lock(
+        &mut self,
+        path: &Path,
+    ) -> Result<Self::RuntimeLock, RuntimeLockError> {
+        let parent = path.parent().ok_or_else(|| {
+            RuntimeLockError::Platform(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("runtime lock has no parent directory: {}", path.display()),
+            ))
+        })?;
+        fs::create_dir_all(parent).map_err(|error| {
+            RuntimeLockError::Platform(io_platform_error(
+                "cannot create runtime lock directory",
+                error,
+            ))
+        })?;
+        let parent_metadata = fs::symlink_metadata(parent).map_err(|error| {
+            RuntimeLockError::Platform(io_platform_error(
+                "cannot inspect runtime lock directory",
+                error,
+            ))
+        })?;
+        if !parent_metadata.file_type().is_dir()
+            || parent_metadata.uid() != self.required_lock_owner
+            || parent_metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(RuntimeLockError::NotRootOwned);
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| {
+                RuntimeLockError::Platform(io_platform_error("cannot open runtime lock", error))
+            })?;
+        let metadata = file.metadata().map_err(|error| {
+            RuntimeLockError::Platform(io_platform_error("cannot inspect runtime lock", error))
+        })?;
+        if metadata.uid() != self.required_lock_owner || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(RuntimeLockError::NotRootOwned);
+        }
+
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            return if matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+            {
+                Err(RuntimeLockError::AlreadyHeld)
+            } else {
+                Err(RuntimeLockError::Platform(io_platform_error(
+                    "cannot acquire runtime lock",
+                    error,
+                )))
+            };
+        }
+
+        Ok(SystemRuntimeLock {
+            file: Some(file),
+            path: path.to_path_buf(),
+        })
+    }
+
+    fn release_runtime_lock(
+        &mut self,
+        mut lock: Self::RuntimeLock,
+    ) -> Result<(), (Self::RuntimeLock, PlatformError)> {
+        let file = lock
+            .file
+            .as_ref()
+            .expect("held runtime lock must own a file");
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        if result == 0 {
+            drop(lock.file.take());
+            Ok(())
+        } else {
+            let error = io_platform_error(
+                &format!("cannot release runtime lock {}", lock.path.display()),
+                io::Error::last_os_error(),
+            );
+            Err((lock, error))
+        }
+    }
+}
+
+fn io_platform_error(context: &str, error: io::Error) -> PlatformError {
+    let kind = match error.kind() {
+        io::ErrorKind::NotFound => PlatformErrorKind::NotFound,
+        io::ErrorKind::PermissionDenied => PlatformErrorKind::PermissionDenied,
+        io::ErrorKind::TimedOut => PlatformErrorKind::TimedOut,
+        _ => PlatformErrorKind::Unavailable,
+    };
+    PlatformError::new(kind, format!("{context}: {error}"))
+}
+
+impl fmt::Display for RuntimeLockError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyHeld => formatter.write_str("runtime lock is already held"),
+            Self::NotRootOwned => formatter.write_str("runtime lock is not owned by root"),
+            Self::Platform(error) => write!(formatter, "runtime lock failed: {error}"),
+        }
+    }
+}
+
+impl Error for RuntimeLockError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::AlreadyHeld | Self::NotRootOwned => None,
+            Self::Platform(error) => Some(error),
+        }
+    }
+}
+
 pub trait Clock {
     fn monotonic_now(&mut self) -> Duration;
 
@@ -154,6 +395,8 @@ pub enum PlatformOperation {
     Permissions(PathBuf),
     Identity(PathBuf),
     ServiceStatus(String),
+    AcquireRuntimeLock(PathBuf),
+    ReleaseRuntimeLock(PathBuf),
     MonotonicNow,
     Delay(Duration),
 }
@@ -172,6 +415,52 @@ pub enum FakeStep {
     Advance(Duration),
 }
 
+#[derive(Debug)]
+struct FakeRuntimeLockState {
+    root_owned: bool,
+    locks: BTreeMap<PathBuf, u64>,
+    next_identity: u64,
+}
+
+/// Shared fake backend that models an OS lock visible to independent processes.
+#[derive(Debug, Clone)]
+pub struct FakeRuntimeLockBackend {
+    state: Arc<Mutex<FakeRuntimeLockState>>,
+}
+
+impl Default for FakeRuntimeLockBackend {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(FakeRuntimeLockState {
+                root_owned: true,
+                locks: BTreeMap::new(),
+                next_identity: 0,
+            })),
+        }
+    }
+}
+
+impl FakeRuntimeLockBackend {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_root_owned(&self, root_owned: bool) {
+        self.state
+            .lock()
+            .expect("fake runtime lock mutex must not be poisoned")
+            .root_owned = root_owned;
+    }
+}
+
+/// Opaque hold returned by [`FakePlatform`]'s shared runtime-lock backend.
+#[derive(Debug)]
+pub struct FakeRuntimeLock {
+    backend: Arc<Mutex<FakeRuntimeLockState>>,
+    path: PathBuf,
+    identity: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct FakePlatform {
     files: BTreeMap<PathBuf, FakeFile>,
@@ -179,15 +468,28 @@ pub struct FakePlatform {
     identities: BTreeMap<PathBuf, FileIdentity>,
     next_inode: u64,
     services: BTreeMap<String, bool>,
+    runtime_lock_backend: FakeRuntimeLockBackend,
     monotonic_time: Duration,
     delays: Vec<Duration>,
     steps: VecDeque<FakeStep>,
+    file_steps: VecDeque<FakeStep>,
     operations: Vec<PlatformOperation>,
 }
 
 impl FakePlatform {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_runtime_lock_backend(runtime_lock_backend: FakeRuntimeLockBackend) -> Self {
+        Self {
+            runtime_lock_backend,
+            ..Self::default()
+        }
+    }
+
+    pub fn runtime_lock_backend(&self) -> FakeRuntimeLockBackend {
+        self.runtime_lock_backend.clone()
     }
 
     pub fn insert_directory(&mut self, directory: impl Into<PathBuf>) {
@@ -257,6 +559,18 @@ impl FakePlatform {
         self.steps.extend(steps);
     }
 
+    pub fn prepend_steps(&mut self, steps: impl IntoIterator<Item = FakeStep>) {
+        let mut prepended = steps.into_iter().collect::<VecDeque<_>>();
+        prepended.append(&mut self.steps);
+        self.steps = prepended;
+    }
+
+    /// Queues failures scoped to file operations, independently of admission
+    /// service probes and runtime-lock operations.
+    pub fn queue_file_steps(&mut self, steps: impl IntoIterator<Item = FakeStep>) {
+        self.file_steps.extend(steps);
+    }
+
     pub fn pending_steps(&self) -> usize {
         self.steps.len()
     }
@@ -290,6 +604,24 @@ impl FakePlatform {
 
     fn apply_next_step(&mut self) -> Result<(), PlatformError> {
         match self.steps.pop_front().unwrap_or(FakeStep::Pass) {
+            FakeStep::Pass => Ok(()),
+            FakeStep::Fail(error) => Err(error),
+            FakeStep::Disappear(path) => {
+                self.remove_path(path);
+                Ok(())
+            }
+            FakeStep::Advance(duration) => {
+                self.monotonic_time = self.monotonic_time.saturating_add(duration);
+                Ok(())
+            }
+        }
+    }
+
+    fn apply_next_file_step(&mut self) -> Result<(), PlatformError> {
+        let Some(step) = self.file_steps.pop_front() else {
+            return self.apply_next_step();
+        };
+        match step {
             FakeStep::Pass => Ok(()),
             FakeStep::Fail(error) => Err(error),
             FakeStep::Disappear(path) => {
@@ -357,6 +689,39 @@ impl FakePlatform {
         }
     }
 
+    fn apply_next_file_step_before(
+        &mut self,
+        path: &Path,
+        operation: &str,
+        deadline: Duration,
+    ) -> Result<(), PlatformError> {
+        if self.file_steps.is_empty() {
+            return self.apply_next_step_before(path, operation, deadline);
+        }
+        if self.monotonic_time >= deadline {
+            return Err(Self::timed_out(path, operation));
+        }
+
+        match self.file_steps.pop_front().expect("file step is present") {
+            FakeStep::Advance(duration) => {
+                let completion = self.monotonic_time.saturating_add(duration);
+                if completion > deadline {
+                    self.monotonic_time = deadline;
+                    Err(Self::timed_out(path, operation))
+                } else {
+                    self.monotonic_time = completion;
+                    Ok(())
+                }
+            }
+            FakeStep::Pass => Ok(()),
+            FakeStep::Fail(error) => Err(error),
+            FakeStep::Disappear(path) => {
+                self.remove_path(path);
+                Ok(())
+            }
+        }
+    }
+
     fn read_file(&self, path: &Path) -> Result<String, PlatformError> {
         let file = self.files.get(path).ok_or_else(|| Self::missing(path))?;
         if !file.permissions.readable() {
@@ -401,7 +766,7 @@ impl FileAccess for FakePlatform {
     fn read(&mut self, path: &Path) -> Result<String, PlatformError> {
         self.operations
             .push(PlatformOperation::Read(path.to_path_buf()));
-        self.apply_next_step()?;
+        self.apply_next_file_step()?;
         self.read_file(path)
     }
 
@@ -410,21 +775,21 @@ impl FileAccess for FakePlatform {
             path: path.to_path_buf(),
             contents: contents.to_owned(),
         });
-        self.apply_next_step()?;
+        self.apply_next_file_step()?;
         self.write_file(path, contents)
     }
 
     fn list(&mut self, directory: &Path) -> Result<Vec<PathBuf>, PlatformError> {
         self.operations
             .push(PlatformOperation::List(directory.to_path_buf()));
-        self.apply_next_step()?;
+        self.apply_next_file_step()?;
         self.list_directory(directory)
     }
 
     fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
         self.operations
             .push(PlatformOperation::Permissions(path.to_path_buf()));
-        self.apply_next_step()?;
+        self.apply_next_file_step()?;
         self.files
             .get(path)
             .map(|file| file.permissions)
@@ -436,7 +801,7 @@ impl IdentityBoundFileAccess for FakePlatform {
     fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
         self.operations
             .push(PlatformOperation::Identity(path.to_path_buf()));
-        self.apply_next_step()?;
+        self.apply_next_file_step()?;
         self.identities
             .get(path)
             .copied()
@@ -462,7 +827,7 @@ impl IdentityBoundFileAccess for FakePlatform {
         let path = directory.join(child);
         self.operations
             .push(PlatformOperation::Read(path.to_path_buf()));
-        self.apply_next_step()?;
+        self.apply_next_file_step()?;
         if self.identities.get(directory).copied() != Some(expected) {
             return Err(PlatformError::new(
                 PlatformErrorKind::Unavailable,
@@ -482,7 +847,7 @@ impl IdentityBoundFileAccess for FakePlatform {
     ) -> Result<Vec<PathBuf>, PlatformError> {
         self.operations
             .push(PlatformOperation::List(directory.to_path_buf()));
-        self.apply_next_step()?;
+        self.apply_next_file_step()?;
         if self.identities.get(directory).copied() != Some(expected) {
             return Err(PlatformError::new(
                 PlatformErrorKind::Unavailable,
@@ -500,7 +865,7 @@ impl BoundedFileAccess for FakePlatform {
     fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError> {
         self.operations
             .push(PlatformOperation::Read(path.to_path_buf()));
-        self.apply_next_step_before(path, "read", deadline)?;
+        self.apply_next_file_step_before(path, "read", deadline)?;
         self.read_file(path)
     }
 
@@ -514,7 +879,7 @@ impl BoundedFileAccess for FakePlatform {
             path: path.to_path_buf(),
             contents: contents.to_owned(),
         });
-        self.apply_next_step_before(path, "write", deadline)?;
+        self.apply_next_file_step_before(path, "write", deadline)?;
         self.write_file(path, contents)
     }
 }
@@ -533,6 +898,88 @@ impl ServiceAccess for FakePlatform {
     }
 }
 
+impl RuntimeLockAccess for FakePlatform {
+    type RuntimeLock = FakeRuntimeLock;
+
+    fn try_acquire_root_runtime_lock(
+        &mut self,
+        path: &Path,
+    ) -> Result<Self::RuntimeLock, RuntimeLockError> {
+        self.operations
+            .push(PlatformOperation::AcquireRuntimeLock(path.to_path_buf()));
+        self.apply_next_step().map_err(RuntimeLockError::Platform)?;
+        let mut state = self.runtime_lock_backend.state.lock().map_err(|_| {
+            RuntimeLockError::Platform(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                "runtime lock backend is unavailable",
+            ))
+        })?;
+        if !state.root_owned {
+            return Err(RuntimeLockError::NotRootOwned);
+        }
+        if state.locks.contains_key(path) {
+            return Err(RuntimeLockError::AlreadyHeld);
+        }
+
+        state.next_identity = state.next_identity.saturating_add(1);
+        let identity = state.next_identity;
+        state.locks.insert(path.to_path_buf(), identity);
+        Ok(FakeRuntimeLock {
+            backend: self.runtime_lock_backend.state.clone(),
+            path: path.to_path_buf(),
+            identity,
+        })
+    }
+
+    fn release_runtime_lock(
+        &mut self,
+        lock: Self::RuntimeLock,
+    ) -> Result<(), (Self::RuntimeLock, PlatformError)> {
+        self.operations
+            .push(PlatformOperation::ReleaseRuntimeLock(lock.path.clone()));
+        if let Err(error) = self.apply_next_step() {
+            return Err((lock, error));
+        }
+        if !Arc::ptr_eq(&lock.backend, &self.runtime_lock_backend.state) {
+            return Err((
+                lock,
+                PlatformError::new(
+                    PlatformErrorKind::Unavailable,
+                    "runtime lock belongs to a different backend",
+                ),
+            ));
+        }
+        let mut state = match self.runtime_lock_backend.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                return Err((
+                    lock,
+                    PlatformError::new(
+                        PlatformErrorKind::Unavailable,
+                        "runtime lock backend is unavailable",
+                    ),
+                ));
+            }
+        };
+        match state.locks.get(&lock.path) {
+            Some(identity) if *identity == lock.identity => {
+                state.locks.remove(&lock.path);
+                Ok(())
+            }
+            _ => {
+                drop(state);
+                Err((
+                    lock,
+                    PlatformError::new(
+                        PlatformErrorKind::Unavailable,
+                        "runtime lock token is no longer held",
+                    ),
+                ))
+            }
+        }
+    }
+}
+
 impl Clock for FakePlatform {
     fn monotonic_now(&mut self) -> Duration {
         self.operations.push(PlatformOperation::MonotonicNow);
@@ -543,5 +990,156 @@ impl Clock for FakePlatform {
         self.operations.push(PlatformOperation::Delay(duration));
         self.delays.push(duration);
         self.monotonic_time = self.monotonic_time.saturating_add(duration);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env,
+        io::{BufRead, Read, Write},
+        process::{Command, Stdio},
+    };
+
+    use super::*;
+
+    const CHILD_LOCK_PATH: &str = "FAN_CONTROL_TEST_LOCK_PATH";
+    const CHILD_EXPECTATION: &str = "FAN_CONTROL_TEST_LOCK_EXPECTATION";
+
+    #[test]
+    fn system_runtime_lock_serializes_separate_processes() {
+        let directory =
+            env::temp_dir().join(format!("fan-control-runtime-lock-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("lock");
+        let owner = unsafe { libc::geteuid() };
+        let mut platform = SystemOwnershipPlatform::with_required_lock_owner(owner);
+        let lock = platform.try_acquire_root_runtime_lock(&path).unwrap();
+
+        run_lock_child(&path, "held");
+        platform.release_runtime_lock(lock).unwrap();
+        run_lock_child(&path, "free");
+        run_dropped_lock_holder(&path);
+        run_lock_child(&path, "free");
+
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn production_runtime_lock_rejects_non_root_ownership() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let directory = env::temp_dir().join(format!(
+            "fan-control-root-lock-check-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("lock");
+        let mut platform = SystemOwnershipPlatform::new();
+
+        assert!(matches!(
+            platform.try_acquire_root_runtime_lock(&path),
+            Err(RuntimeLockError::NotRootOwned)
+        ));
+
+        fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn runtime_lock_rejects_group_or_world_writable_directory() {
+        let directory = env::temp_dir().join(format!(
+            "fan-control-writable-lock-check-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+        let path = directory.join("lock");
+        let owner = unsafe { libc::geteuid() };
+        let mut platform = SystemOwnershipPlatform::with_required_lock_owner(owner);
+
+        assert!(matches!(
+            platform.try_acquire_root_runtime_lock(&path),
+            Err(RuntimeLockError::NotRootOwned)
+        ));
+
+        fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn deactivating_competing_service_remains_active_for_admission() {
+        assert_eq!(
+            parse_systemd_service_status(
+                "fancontrol.service",
+                "LoadState=loaded\nActiveState=deactivating\n",
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn system_runtime_lock_child_probe() {
+        let Ok(path) = env::var(CHILD_LOCK_PATH) else {
+            return;
+        };
+        let expectation = env::var(CHILD_EXPECTATION).unwrap();
+        let owner = unsafe { libc::geteuid() };
+        let mut platform = SystemOwnershipPlatform::with_required_lock_owner(owner);
+        let result = platform.try_acquire_root_runtime_lock(Path::new(&path));
+        match expectation.as_str() {
+            "held" => assert!(matches!(result, Err(RuntimeLockError::AlreadyHeld))),
+            "free" => assert!(result.is_ok()),
+            "drop-hold" => {
+                drop(result.unwrap());
+                println!("ready");
+                std::io::stdout().flush().unwrap();
+                let mut signal = [0_u8];
+                std::io::stdin().read_exact(&mut signal).unwrap();
+            }
+            other => panic!("unknown child lock expectation: {other}"),
+        }
+    }
+
+    fn run_lock_child(path: &Path, expectation: &str) {
+        let status = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::tests::system_runtime_lock_child_probe",
+                "--nocapture",
+            ])
+            .env(CHILD_LOCK_PATH, path)
+            .env(CHILD_EXPECTATION, expectation)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn run_dropped_lock_holder(path: &Path) {
+        let mut child = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::tests::system_runtime_lock_child_probe",
+                "--nocapture",
+            ])
+            .env(CHILD_LOCK_PATH, path)
+            .env(CHILD_EXPECTATION, "drop-hold")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        loop {
+            let mut line = String::new();
+            assert_ne!(stdout.read_line(&mut line).unwrap(), 0);
+            if line.contains("ready") {
+                break;
+            }
+        }
+        run_lock_child(path, "held");
+        child.stdin.take().unwrap().write_all(&[1]).unwrap();
+        let mut remainder = String::new();
+        stdout.read_to_string(&mut remainder).unwrap();
+        assert!(child.wait().unwrap().success());
     }
 }

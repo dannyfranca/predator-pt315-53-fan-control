@@ -2,7 +2,7 @@ use std::{path::Path, time::Duration};
 
 use fan_control_core::{
     Clock, FakePlatform, FakeStep, FilePermissions, FirmwareAutoRestorationError, PlatformError,
-    PlatformErrorKind, PlatformOperation, discover_acer_hwmon, restore_firmware_auto,
+    PlatformErrorKind, PlatformOperation, acquire_controller_ownership, discover_acer_hwmon,
 };
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
@@ -26,7 +26,7 @@ fn restores_both_fans_and_confirms_both_readbacks() {
 #[test]
 fn attempts_both_enable_writes_when_each_other_write_fails() {
     let (mut platform, device, marker) = fixture("1\n", "1\n");
-    platform.queue_steps([
+    platform.queue_file_steps([
         fail("cpu attempt 1"),
         FakeStep::Pass,
         FakeStep::Pass,
@@ -48,18 +48,18 @@ fn attempts_both_enable_writes_when_each_other_write_fails() {
         FirmwareAutoRestorationError::Unconfirmed { attempts: 3, .. }
     ));
     let writes = restore_operations(&platform, marker)
-        .iter()
+        .into_iter()
         .filter(|operation| matches!(operation, PlatformOperation::Write { .. }))
         .collect::<Vec<_>>();
     assert_eq!(writes.len(), 6);
-    assert_eq!(writes[4], &write(cpu_enable()));
-    assert_eq!(writes[5], &write(gpu_enable()));
+    assert_eq!(writes[4], write(cpu_enable()));
+    assert_eq!(writes[5], write(gpu_enable()));
 }
 
 #[test]
 fn one_auto_readback_never_counts_as_success() {
     let (mut platform, device, _) = fixture("2\n", "1\n");
-    platform.queue_steps((0..12).map(|index| {
+    platform.queue_file_steps((0..12).map(|index| {
         if index % 4 < 2 {
             fail("write rejected")
         } else {
@@ -80,7 +80,7 @@ fn one_auto_readback_never_counts_as_success() {
 #[test]
 fn three_failed_attempts_finish_at_the_two_second_bound() {
     let (mut platform, device, marker) = fixture("1\n", "1\n");
-    platform.queue_steps((0..12).map(|index| {
+    platform.queue_file_steps((0..12).map(|index| {
         if index % 4 < 2 {
             fail("write rejected")
         } else {
@@ -103,7 +103,7 @@ fn three_failed_attempts_finish_at_the_two_second_bound() {
 #[test]
 fn third_failed_attempt_at_exact_deadline_is_unconfirmed_not_timed_out() {
     let (mut platform, device, _) = fixture("1\n", "1\n");
-    platform.queue_steps([
+    platform.queue_file_steps([
         fail("cpu write rejected"),
         fail("gpu write rejected"),
         FakeStep::Advance(Duration::ZERO),
@@ -130,7 +130,7 @@ fn third_failed_attempt_at_exact_deadline_is_unconfirmed_not_timed_out() {
 #[test]
 fn late_confirmation_is_rejected_and_stops_further_attempts() {
     let (mut platform, device, marker) = fixture("1\n", "1\n");
-    platform.queue_steps((0..4).map(|_| FakeStep::Advance(Duration::from_millis(600))));
+    platform.queue_file_steps((0..4).map(|_| FakeStep::Advance(Duration::from_millis(600))));
 
     let error = restore_firmware_auto(&mut platform, &device).unwrap_err();
 
@@ -151,7 +151,7 @@ fn late_confirmation_is_rejected_and_stops_further_attempts() {
 #[test]
 fn unreadable_first_readback_can_recover_on_an_immediate_retry() {
     let (mut platform, device, marker) = fixture("1\n", "1\n");
-    platform.queue_steps([
+    platform.queue_file_steps([
         fail("cpu write rejected"),
         fail("gpu write rejected"),
         fail("cpu read unavailable"),
@@ -184,7 +184,7 @@ fn unreadable_first_readback_can_recover_on_an_immediate_retry() {
 #[test]
 fn unreadable_gpu_readback_triggers_a_retry() {
     let (mut platform, device, marker) = fixture("1\n", "1\n");
-    platform.queue_steps([
+    platform.queue_file_steps([
         fail("cpu write rejected"),
         fail("gpu write rejected"),
         FakeStep::Pass,
@@ -209,7 +209,7 @@ fn unreadable_gpu_readback_triggers_a_retry() {
 #[test]
 fn write_errors_are_not_fatal_when_both_readbacks_confirm_auto() {
     let (mut platform, device, marker) = fixture("2\n", "2\n");
-    platform.queue_steps([
+    platform.queue_file_steps([
         fail("cpu write rejected"),
         fail("gpu write rejected"),
         FakeStep::Pass,
@@ -275,8 +275,33 @@ fn fixture(
     (platform, device, operation_count)
 }
 
-fn restore_operations(platform: &FakePlatform, marker: usize) -> &[PlatformOperation] {
-    &platform.operations()[marker..]
+fn restore_operations(platform: &FakePlatform, marker: usize) -> Vec<PlatformOperation> {
+    platform.operations()[marker..]
+        .iter()
+        .filter(|operation| {
+            !matches!(
+                operation,
+                PlatformOperation::ServiceStatus(_)
+                    | PlatformOperation::AcquireRuntimeLock(_)
+                    | PlatformOperation::ReleaseRuntimeLock(_)
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+fn restore_firmware_auto(
+    platform: &mut FakePlatform,
+    device: &fan_control_core::AcerHwmonDevice,
+) -> Result<(), FirmwareAutoRestorationError> {
+    let mut ownership = acquire_controller_ownership(platform).unwrap();
+    match ownership.restore_firmware_auto(device) {
+        Ok(()) => {
+            ownership.release().unwrap();
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn expected_successful_attempt() -> Vec<PlatformOperation> {

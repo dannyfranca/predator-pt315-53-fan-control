@@ -3,8 +3,9 @@ use std::path::Path;
 use fan_control_core::{
     CompatibilityAdmissionError, CompatibilityDeclarationV1, CompatibilityObservation,
     EvidenceCompleteness, FakePlatform, FanWriteBackend, FilePermissions, ObservedFanAbi,
-    PolicyAuthorityAdmissionError, PolicyAuthorityError, ValidatedConfig, admit_policy_authority,
-    discover_acer_hwmon, parse_compatibility_v1, parse_config_v1, validate_config_v1,
+    PolicyAuthorityAdmissionError, PolicyAuthorityError, ValidatedConfig,
+    acquire_controller_ownership, admit_policy_authority, discover_acer_hwmon,
+    parse_compatibility_v1, parse_config_v1, validate_config_v1,
 };
 use sha2::{Digest, Sha256};
 
@@ -291,7 +292,12 @@ fn admit(
     FakePlatform,
 ) {
     let (mut platform, device) = fan_fixture();
-    let result = admit_policy_authority(&mut platform, &device, policy, record, observations);
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let result = admit_policy_authority(&mut ownership, &device, policy, record, observations);
+    if result.is_ok() {
+        ownership.restore_firmware_auto(&device).unwrap();
+    }
+    ownership.release().unwrap();
     (result, platform)
 }
 
