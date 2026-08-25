@@ -184,6 +184,17 @@ where
                 mut sources,
             } => {
                 if sources.is_none() {
+                    if !ownership.refresh_firmware_auto_confirmation(&device)
+                        && let Err(source) = ownership.restore_firmware_auto(&device)
+                    {
+                        self.state = Some(ControlState::Faulted {
+                            retained_sources: None,
+                        });
+                        return Err(TransientSensorControlError::RestorationFailed {
+                            fault: SampleSetError::FirmwareAutoUnconfirmed,
+                            source,
+                        });
+                    }
                     match self.discovery.rediscover(ownership.platform_mut()) {
                         Ok(rediscovered) => {
                             gate.reset();
@@ -235,9 +246,14 @@ where
                                 Ok(SensorControlStep::Rearmed)
                             }
                             Err(error) => {
-                                self.state = Some(ControlState::Faulted {
-                                    retained_sources: None,
-                                });
+                                let retained_sources =
+                                    if matches!(&error, FanArmingError::RestorationFailed { .. }) {
+                                        sources
+                                    } else {
+                                        drop(sources);
+                                        None
+                                    };
+                                self.state = Some(ControlState::Faulted { retained_sources });
                                 Err(TransientSensorControlError::Rearming(error))
                             }
                         }
@@ -251,10 +267,14 @@ where
                             sources.expect("sample failure requires installed sources"),
                         ),
                     Err(fault) => {
-                        drop(sources);
-                        self.state = Some(ControlState::Faulted {
-                            retained_sources: None,
-                        });
+                        let retained_sources =
+                            if matches!(&fault, SampleSetError::FirmwareAutoUnconfirmed) {
+                                sources
+                            } else {
+                                drop(sources);
+                                None
+                            };
+                        self.state = Some(ControlState::Faulted { retained_sources });
                         Err(TransientSensorControlError::RecoverySample(fault))
                     }
                 }
