@@ -284,6 +284,22 @@ where
     )?;
     verify_device_before(ownership.platform_mut(), &device, deadline)?;
 
+    validate_tachometer_response(
+        ownership.platform_mut(),
+        &device,
+        &mut control.tachometers,
+        deadline,
+    )?;
+    confirm_state(
+        ownership.platform_mut(),
+        &device,
+        control.last_outputs,
+        deadline,
+        ControlCycleOperation::ConfirmResult,
+        ControlCycleOperation::ConfirmResult,
+    )?;
+    verify_device_before(ownership.platform_mut(), &device, deadline)?;
+
     write_changed_outputs(
         ownership.platform_mut(),
         &device,
@@ -293,21 +309,6 @@ where
         &mut control.tachometers,
     )?;
 
-    confirm_state(
-        ownership.platform_mut(),
-        &device,
-        outputs,
-        deadline,
-        ControlCycleOperation::ConfirmResult,
-        ControlCycleOperation::ConfirmResult,
-    )?;
-    verify_device_before(ownership.platform_mut(), &device, deadline)?;
-    validate_tachometer_response(
-        ownership.platform_mut(),
-        &device,
-        &mut control.tachometers,
-        deadline,
-    )?;
     confirm_state(
         ownership.platform_mut(),
         &device,

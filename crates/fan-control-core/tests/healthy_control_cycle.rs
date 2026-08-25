@@ -547,6 +547,54 @@ fn each_fan_faults_independently_after_its_qualified_response_deadline() {
 }
 
 #[test]
+fn overdue_response_faults_before_a_changed_command_can_replace_it() {
+    let policy = PROTECTED_POLICY.replacen(
+        "response_deadline_millis = 4000",
+        "response_deadline_millis = 1000",
+        1,
+    );
+    let (platform, device) = fixture();
+    let injection = Rc::new(Cell::new(RuntimeInterference::None));
+    let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (_, armed) = arm_with_policy_authority(&mut ownership, &device, &policy);
+    let mut control = HealthyControl::from_armed(armed);
+    injection.set(RuntimeInterference::CpuTachometerZero);
+    let mut sources = CountingSources::new(vec![
+        Frame {
+            cpu: 60.0,
+            gpu: 55.0,
+            power: ExternalPower::Connected,
+        },
+        Frame {
+            cpu: 70.0,
+            gpu: 55.0,
+            power: ExternalPower::Connected,
+        },
+    ]);
+
+    run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
+    let marker = ownership.platform().operations().len();
+    let error = run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap_err();
+
+    assert!(matches!(
+        error,
+        HealthyControlCycleError::TachometerOutOfBand {
+            fan: Fan::Cpu,
+            actual_rpm: 0,
+            ..
+        }
+    ));
+    assert!(
+        ownership.platform().operations()[marker..]
+            .iter()
+            .all(|operation| !is_pwm_write(operation))
+    );
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
 fn backing_device_rebind_is_rejected_before_normal_output() {
     let (platform, device) = fixture();
     let interference = Rc::new(Cell::new(RuntimeInterference::None));
