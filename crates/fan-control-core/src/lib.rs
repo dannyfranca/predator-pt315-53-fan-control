@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+mod acer_hwmon;
 mod config;
 mod curve;
 mod demand;
@@ -11,6 +12,7 @@ mod platform;
 mod policy;
 mod validation;
 
+pub use acer_hwmon::{AcerHwmonDevice, AcerHwmonDiscoveryError, FanEndpoints, discover_acer_hwmon};
 pub use config::{
     ConfigParseError, ConfigV1, ControlConfig, CurvePointConfig, FanConfig, FansConfig, FiniteF64,
     ProfileConfig, ProfilesConfig, parse_config_v1,
@@ -20,8 +22,8 @@ pub use demand::{DemandPercent, DemandPercentError, Pwm};
 pub use envelope::{EnvelopeValidationError, validate_against_protected_envelope};
 pub use output::{ExternalPower, FanOutputs, calculate_fan_outputs};
 pub use platform::{
-    Clock, FakePlatform, FakeStep, FileAccess, PlatformError, PlatformErrorKind, PlatformOperation,
-    ServiceAccess,
+    Clock, FakePlatform, FakeStep, FileAccess, FilePermissions, PlatformError, PlatformErrorKind,
+    PlatformOperation, ServiceAccess,
 };
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,

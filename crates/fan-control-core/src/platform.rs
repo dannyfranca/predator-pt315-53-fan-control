@@ -46,6 +46,38 @@ pub trait FileAccess {
     fn write(&mut self, path: &Path, contents: &str) -> Result<(), PlatformError>;
 
     fn list(&mut self, directory: &Path) -> Result<Vec<PathBuf>, PlatformError>;
+
+    fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilePermissions {
+    mode: u32,
+}
+
+impl FilePermissions {
+    pub const NONE: Self = Self::from_mode(0o000);
+    pub const READ_ONLY: Self = Self::from_mode(0o444);
+    pub const WRITE_ONLY: Self = Self::from_mode(0o200);
+    pub const READ_WRITE: Self = Self::from_mode(0o644);
+
+    pub const fn from_mode(mode: u32) -> Self {
+        Self {
+            mode: mode & 0o7777,
+        }
+    }
+
+    pub const fn mode(self) -> u32 {
+        self.mode
+    }
+
+    pub const fn readable(self) -> bool {
+        self.mode & 0o444 != 0
+    }
+
+    pub const fn writable(self) -> bool {
+        self.mode & 0o222 != 0
+    }
 }
 
 pub trait ServiceAccess {
@@ -63,9 +95,16 @@ pub enum PlatformOperation {
     Read(PathBuf),
     Write { path: PathBuf, contents: String },
     List(PathBuf),
+    Permissions(PathBuf),
     ServiceStatus(String),
     MonotonicNow,
     Delay(Duration),
+}
+
+#[derive(Debug)]
+struct FakeFile {
+    contents: String,
+    permissions: FilePermissions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +116,7 @@ pub enum FakeStep {
 
 #[derive(Debug, Default)]
 pub struct FakePlatform {
-    files: BTreeMap<PathBuf, String>,
+    files: BTreeMap<PathBuf, FakeFile>,
     directories: BTreeSet<PathBuf>,
     services: BTreeMap<String, bool>,
     monotonic_time: Duration,
@@ -98,9 +137,30 @@ impl FakePlatform {
     }
 
     pub fn insert_file(&mut self, path: impl Into<PathBuf>, contents: impl Into<String>) {
+        self.insert_file_with_permissions(path, contents, FilePermissions::READ_WRITE);
+    }
+
+    pub fn insert_file_with_permissions(
+        &mut self,
+        path: impl Into<PathBuf>,
+        contents: impl Into<String>,
+        permissions: FilePermissions,
+    ) {
         let path = path.into();
         self.insert_ancestor_directories(&path);
-        self.files.insert(path, contents.into());
+        self.files.insert(
+            path,
+            FakeFile {
+                contents: contents.into(),
+                permissions,
+            },
+        );
+    }
+
+    pub fn set_file_permissions(&mut self, path: impl AsRef<Path>, permissions: FilePermissions) {
+        if let Some(file) = self.files.get_mut(path.as_ref()) {
+            file.permissions = permissions;
+        }
     }
 
     pub fn remove_path(&mut self, path: impl AsRef<Path>) {
@@ -112,7 +172,9 @@ impl FakePlatform {
     }
 
     pub fn file_contents(&self, path: impl AsRef<Path>) -> Option<&str> {
-        self.files.get(path.as_ref()).map(String::as_str)
+        self.files
+            .get(path.as_ref())
+            .map(|file| file.contents.as_str())
     }
 
     pub fn insert_service(&mut self, service: impl Into<String>, active: bool) {
@@ -168,6 +230,13 @@ impl FakePlatform {
             format!("platform path does not exist: {}", path.display()),
         )
     }
+
+    fn permission_denied(path: &Path, operation: &str) -> PlatformError {
+        PlatformError::new(
+            PlatformErrorKind::PermissionDenied,
+            format!("platform path is not {operation}: {}", path.display()),
+        )
+    }
 }
 
 impl FileAccess for FakePlatform {
@@ -175,10 +244,11 @@ impl FileAccess for FakePlatform {
         self.operations
             .push(PlatformOperation::Read(path.to_path_buf()));
         self.apply_next_step()?;
-        self.files
-            .get(path)
-            .cloned()
-            .ok_or_else(|| Self::missing(path))
+        let file = self.files.get(path).ok_or_else(|| Self::missing(path))?;
+        if !file.permissions.readable() {
+            return Err(Self::permission_denied(path, "readable"));
+        }
+        Ok(file.contents.clone())
     }
 
     fn write(&mut self, path: &Path, contents: &str) -> Result<(), PlatformError> {
@@ -187,11 +257,14 @@ impl FileAccess for FakePlatform {
             contents: contents.to_owned(),
         });
         self.apply_next_step()?;
-        let stored = self
+        let file = self
             .files
             .get_mut(path)
             .ok_or_else(|| Self::missing(path))?;
-        contents.clone_into(stored);
+        if !file.permissions.writable() {
+            return Err(Self::permission_denied(path, "writable"));
+        }
+        contents.clone_into(&mut file.contents);
         Ok(())
     }
 
@@ -216,6 +289,16 @@ impl FileAccess for FakePlatform {
             .into_iter()
             .collect();
         Ok(entries)
+    }
+
+    fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
+        self.operations
+            .push(PlatformOperation::Permissions(path.to_path_buf()));
+        self.apply_next_step()?;
+        self.files
+            .get(path)
+            .map(|file| file.permissions)
+            .ok_or_else(|| Self::missing(path))
     }
 }
 
