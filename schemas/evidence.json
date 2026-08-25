@@ -85,7 +85,13 @@
       },
       "then": {
         "properties": {
-          "samples": { "minItems": 1 },
+          "samples": {
+            "minItems": 1,
+            "contains": {
+              "properties": { "freshness": { "const": "fresh" } },
+              "required": ["freshness"]
+            }
+          },
           "readbacks": { "minItems": 1 },
           "outcome": {
             "properties": { "final_firmware_auto_confirmed": { "const": true } }

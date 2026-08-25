@@ -615,7 +615,10 @@ impl EvidenceRecordV1 {
             });
         }
         if matches!(self.outcome.status, RunOutcomeStatus::Passed)
-            && (self.samples.is_empty()
+            && (!self
+                .samples
+                .iter()
+                .any(|sample| sample.freshness == SampleFreshness::Fresh)
                 || self.readbacks.is_empty()
                 || !self.outcome.final_firmware_auto_confirmed)
         {
