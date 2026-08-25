@@ -8,10 +8,10 @@ use std::{
 use fan_control_core::{
     BoundedFileAccess, BoundedIdentityBoundFileAccess, Clock, CompatibilityDeclarationV1,
     CompatibilityObservation, ControlCycleOperation, ControlCycleReadback, ControlCycleSampleGate,
-    ControllerOwnership, EvidenceCompleteness, ExternalPower, FakePlatform, FakeRuntimeLock, Fan,
-    FanWriteBackend, FileAccess, FileIdentity, FilePermissions, FreshSampleGate, HealthyControl,
-    HealthyControlCycleError, IdentityBoundFileAccess, ObservedFanAbi, ObservedSample,
-    OwnershipSampleReadiness, PlatformError, PlatformErrorKind, PlatformOperation,
+    ControllerOwnership, EvidenceCompleteness, ExternalPower, FakePlatform, FakeRuntimeLock,
+    FakeStep, Fan, FanWriteBackend, FileAccess, FileIdentity, FilePermissions, FreshSampleGate,
+    HealthyControl, HealthyControlCycleError, IdentityBoundFileAccess, ObservedFanAbi,
+    ObservedSample, OwnershipSampleReadiness, PlatformError, PlatformErrorKind, PlatformOperation,
     RuntimeLockAccess, RuntimeLockError, SampleCapture, SampleSetError, SampleSourceError,
     SampleSources, SensorControlState, SensorControlStep, SensorSourceDiscovery, ServiceAccess,
     TemperatureCelsius, TransientSensorControl, TransientSensorControlError, ValidatedConfig,
@@ -707,7 +707,7 @@ fn run_interfered_cycle(
     (error, operations)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeInterference {
     None,
     RebindRootOnIdentity,
@@ -720,7 +720,9 @@ enum RuntimeInterference {
     ExpireBetweenFanWrites,
     RebindRootBeforeWrite,
     RebindTargetBeforeWrite,
+    DisappearTargetBeforeWrite,
     CpuModeBeforeRead,
+    CpuModeBeforeReadAndRestorationDeadlineAuto,
     GpuModeBeforeRead,
     CpuModeBeforeWrite,
     GpuModeBeforeWrite,
@@ -730,6 +732,8 @@ enum RuntimeInterference {
     RebindGpuEndpointBeforeCpuWrite,
     CpuDutyAfterWrite,
     GpuDutyAfterWrite,
+    FailCpuDutyReadback,
+    GpuDutyReadbackFailureAndRestorationDeadlineCustom,
     RestorationUnavailable,
     CpuModeBeforeRecoveryAutoCheck,
     ArmingFailureAndRestorationUnavailable,
@@ -837,8 +841,14 @@ impl BoundedFileAccess for InterferingPlatform {
         let result = self.inner.read_before(path, deadline);
         if result.is_ok()
             && (path == cpu_enable() || path == gpu_enable())
-            && self.inner.file_contents(cpu_enable()) == Some("2")
-            && self.inner.file_contents(gpu_enable()) == Some("2")
+            && self
+                .inner
+                .file_contents(cpu_enable())
+                .is_some_and(|value| value.trim() == "2")
+            && self
+                .inner
+                .file_contents(gpu_enable())
+                .is_some_and(|value| value.trim() == "2")
         {
             self.firmware_auto_confirmed.set(true);
         }
@@ -875,6 +885,15 @@ impl BoundedFileAccess for InterferingPlatform {
         contents: &str,
         deadline: Duration,
     ) -> Result<(), PlatformError> {
+        if matches!(
+            self.interference.get(),
+            RuntimeInterference::CpuModeBeforeReadAndRestorationDeadlineAuto
+                | RuntimeInterference::GpuDutyReadbackFailureAndRestorationDeadlineCustom
+        ) && (path == cpu_enable() || path == gpu_enable())
+        {
+            self.interference.set(RuntimeInterference::None);
+            self.inner.delay(Duration::from_secs(3));
+        }
         if self.interference.get() == RuntimeInterference::RestorationUnavailable
             && (path == cpu_enable() || path == gpu_enable())
         {
@@ -906,11 +925,27 @@ impl BoundedIdentityBoundFileAccess for InterferingPlatform {
         deadline: Duration,
     ) -> Result<String, PlatformError> {
         let interference = self.interference.get();
-        if (interference == RuntimeInterference::CpuModeBeforeRead && child == "pwm1_enable")
+        if (matches!(
+            interference,
+            RuntimeInterference::CpuModeBeforeRead
+                | RuntimeInterference::CpuModeBeforeReadAndRestorationDeadlineAuto
+        ) && child == "pwm1_enable")
             || (interference == RuntimeInterference::GpuModeBeforeRead && child == "pwm2_enable")
         {
-            self.interference.set(RuntimeInterference::None);
+            self.interference.set(
+                if matches!(
+                    interference,
+                    RuntimeInterference::CpuModeBeforeReadAndRestorationDeadlineAuto
+                ) {
+                    interference
+                } else {
+                    RuntimeInterference::None
+                },
+            );
             self.inner.insert_file(directory.join(child), "2\n");
+            if interference == RuntimeInterference::CpuModeBeforeReadAndRestorationDeadlineAuto {
+                self.inner.insert_file(gpu_enable(), "2\n");
+            }
         }
         if (interference == RuntimeInterference::CpuDutyAfterWrite
             && self.last_normal_write.as_deref() == Some("pwm1")
@@ -921,6 +956,25 @@ impl BoundedIdentityBoundFileAccess for InterferingPlatform {
         {
             self.interference.set(RuntimeInterference::None);
             self.inner.insert_file(directory.join(child), "0\n");
+        }
+        if interference == RuntimeInterference::FailCpuDutyReadback
+            && self.last_normal_write.as_deref() == Some("pwm1")
+            && child == "pwm1"
+        {
+            self.interference.set(RuntimeInterference::None);
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                "CPU PWM readback unavailable",
+            ));
+        }
+        if interference == RuntimeInterference::GpuDutyReadbackFailureAndRestorationDeadlineCustom
+            && self.last_normal_write.as_deref() == Some("pwm2")
+            && child == "pwm2"
+        {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                "GPU PWM readback unavailable",
+            ));
         }
         let result = self.inner.read_bound_before(
             directory,
@@ -1001,6 +1055,11 @@ impl BoundedIdentityBoundFileAccess for InterferingPlatform {
                 self.interference.set(RuntimeInterference::None);
                 self.inner
                     .rebind_path_identity(directory.join(target_child));
+            }
+            RuntimeInterference::DisappearTargetBeforeWrite => {
+                self.interference.set(RuntimeInterference::None);
+                self.inner
+                    .queue_file_steps([FakeStep::Disappear(directory.join(target_child))]);
             }
             RuntimeInterference::CpuModeBeforeWrite if target_child == "pwm1" => {
                 self.interference.set(RuntimeInterference::None);
@@ -1116,6 +1175,228 @@ fn a_failed_fresh_sample_permanently_invalidates_normal_control() {
     ));
 
     ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
+fn control_path_fault_classes_restore_auto_and_permanently_latch() {
+    for interference in [
+        RuntimeInterference::RebindRootOnIdentity,
+        RuntimeInterference::AddMalformedFanEndpoint,
+        RuntimeInterference::DisappearTargetBeforeWrite,
+        RuntimeInterference::CpuModeBeforeRead,
+        RuntimeInterference::GpuModeBeforeRead,
+        RuntimeInterference::CpuDutyAfterWrite,
+        RuntimeInterference::GpuDutyAfterWrite,
+        RuntimeInterference::FailCpuDutyReadback,
+    ] {
+        let (platform, device) = fixture();
+        let injection = Rc::new(Cell::new(RuntimeInterference::None));
+        let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
+        let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+        let (authority, armed) = arm_with_authority(&mut ownership, &device);
+        let frame = Frame {
+            cpu: 70.0,
+            gpu: 65.0,
+            power: ExternalPower::Connected,
+        };
+        let (mut control, script) = recovery_control(armed, authority, vec![frame]);
+        injection.set(interference);
+        let marker = ownership.platform().operations().len();
+
+        let Err(TransientSensorControlError::ControlLatched { fault }) =
+            control.step(&mut ownership)
+        else {
+            panic!("{interference:?} must report its latched control fault")
+        };
+        match interference {
+            RuntimeInterference::RebindRootOnIdentity => {
+                assert!(matches!(fault, HealthyControlCycleError::DeviceChanged));
+            }
+            RuntimeInterference::AddMalformedFanEndpoint => {
+                assert!(matches!(fault, HealthyControlCycleError::Device(_)));
+            }
+            RuntimeInterference::DisappearTargetBeforeWrite => assert!(matches!(
+                fault,
+                HealthyControlCycleError::Platform {
+                    operation: ControlCycleOperation::WriteDuty,
+                    ..
+                }
+            )),
+            RuntimeInterference::CpuModeBeforeRead | RuntimeInterference::GpuModeBeforeRead => {
+                assert!(matches!(
+                    fault,
+                    HealthyControlCycleError::UnexpectedReadback {
+                        field: ControlCycleReadback::Mode,
+                        ..
+                    }
+                ))
+            }
+            RuntimeInterference::CpuDutyAfterWrite | RuntimeInterference::GpuDutyAfterWrite => {
+                assert!(matches!(
+                    fault,
+                    HealthyControlCycleError::UnexpectedReadback {
+                        field: ControlCycleReadback::Duty,
+                        ..
+                    }
+                ))
+            }
+            RuntimeInterference::FailCpuDutyReadback => assert!(matches!(
+                fault,
+                HealthyControlCycleError::Platform {
+                    fan: Fan::Cpu,
+                    operation: ControlCycleOperation::ConfirmWrittenDuty,
+                    ..
+                }
+            )),
+            _ => unreachable!("the fault-class matrix contains only covered interference"),
+        }
+        assert_eq!(control.state(), SensorControlState::Faulted);
+        assert_eq!(
+            ownership.platform().inner.file_contents(cpu_enable()),
+            Some("2")
+        );
+        assert_eq!(
+            ownership.platform().inner.file_contents(gpu_enable()),
+            Some("2")
+        );
+        assert_eq!(script.borrow().rediscoveries, 0);
+
+        let operations = &ownership.platform().operations()[marker..];
+        let restoration_started = operations
+            .iter()
+            .position(|operation| {
+                matches!(
+                    operation,
+                    PlatformOperation::Write { path, contents }
+                        if (path == cpu_enable() || path == gpu_enable()) && contents == "2"
+                )
+            })
+            .expect("a latched fault must begin Firmware Auto restoration");
+        assert!(
+            operations[restoration_started..]
+                .iter()
+                .all(|operation| !is_pwm_write(operation))
+        );
+        assert!(matches!(
+            control.step(&mut ownership),
+            Err(TransientSensorControlError::Faulted)
+        ));
+        assert_eq!(script.borrow().rediscoveries, 0);
+
+        ownership.release().unwrap();
+    }
+}
+
+#[test]
+fn post_write_fault_stops_normal_output_then_contains_at_maximum_and_stays_critical() {
+    let (platform, device) = fixture();
+    let injection = Rc::new(Cell::new(RuntimeInterference::None));
+    let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
+    let auto_confirmed = platform.firmware_auto_confirmation();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script) = recovery_control(armed, authority, vec![frame]);
+    let drop_observations = Rc::new(RefCell::new(Vec::new()));
+    script.borrow_mut().source_drop_probe =
+        Some((Rc::clone(&auto_confirmed), Rc::clone(&drop_observations)));
+    auto_confirmed.set(false);
+    let marker = ownership.platform().operations().len();
+    injection.set(RuntimeInterference::GpuDutyReadbackFailureAndRestorationDeadlineCustom);
+
+    let Err(TransientSensorControlError::ControlLatchCritical { containment, .. }) =
+        control.step(&mut ownership)
+    else {
+        panic!("unconfirmed containment must remain a critical latch")
+    };
+    assert!(!containment.restoration_confirmed());
+    assert!(matches!(
+        containment.cpu(),
+        fan_control_core::EmergencyFanStatus::MaximumConfirmed
+    ));
+    assert!(matches!(
+        containment.gpu(),
+        fan_control_core::EmergencyFanStatus::MaximumConfirmed
+    ));
+    assert_eq!(
+        ownership.platform().inner.file_contents(cpu_pwm()),
+        Some("255")
+    );
+    assert_eq!(
+        ownership.platform().inner.file_contents(gpu_pwm()),
+        Some("255")
+    );
+    let operations = &ownership.platform().operations()[marker..];
+    let restoration_started = operations
+        .iter()
+        .position(|operation| {
+            matches!(
+                operation,
+                PlatformOperation::Write { path, contents }
+                    if (path == cpu_enable() || path == gpu_enable()) && contents == "2"
+            )
+        })
+        .expect("post-write fault must begin Firmware Auto restoration");
+    assert!(operations[..restoration_started].iter().any(|operation| {
+        matches!(operation, PlatformOperation::Write { contents, .. } if is_pwm_write(operation) && contents != "255")
+    }));
+    assert!(operations[restoration_started..].iter().all(|operation| {
+        !is_pwm_write(operation)
+            || matches!(operation, PlatformOperation::Write { contents, .. } if contents == "255")
+    }));
+    assert_eq!(control.state(), SensorControlState::Faulted);
+    assert!(drop_observations.borrow().is_empty());
+    assert!(matches!(
+        control.step(&mut ownership),
+        Err(TransientSensorControlError::Faulted)
+    ));
+
+    injection.set(RuntimeInterference::None);
+    ownership.restore_firmware_auto(&device).unwrap();
+    drop(control);
+    assert_eq!(*drop_observations.borrow(), vec![true]);
+    ownership.release().unwrap();
+}
+
+#[test]
+fn auto_confirmed_containment_reports_latch_and_drops_obsolete_bindings() {
+    let (platform, device) = fixture();
+    let injection = Rc::new(Cell::new(RuntimeInterference::None));
+    let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
+    let auto_confirmed = platform.firmware_auto_confirmation();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script) = recovery_control(armed, authority, vec![frame]);
+    let drop_observations = Rc::new(RefCell::new(Vec::new()));
+    script.borrow_mut().source_drop_probe =
+        Some((Rc::clone(&auto_confirmed), Rc::clone(&drop_observations)));
+    auto_confirmed.set(false);
+    injection.set(RuntimeInterference::CpuModeBeforeReadAndRestorationDeadlineAuto);
+
+    let Err(TransientSensorControlError::ControlLatchContained { containment, .. }) =
+        control.step(&mut ownership)
+    else {
+        panic!("Auto-confirmed containment must report a permanent latch")
+    };
+    assert!(containment.restoration_confirmed());
+    assert_eq!(*drop_observations.borrow(), vec![true]);
+    assert_eq!(control.state(), SensorControlState::Faulted);
+    assert!(matches!(
+        control.step(&mut ownership),
+        Err(TransientSensorControlError::Faulted)
+    ));
+    assert_eq!(script.borrow().rediscoveries, 0);
+
     ownership.release().unwrap();
 }
 
