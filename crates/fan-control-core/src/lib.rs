@@ -12,6 +12,7 @@ mod coretemp;
 mod curve;
 mod demand;
 mod envelope;
+mod evidence;
 mod external_power;
 mod nvidia_gpu;
 mod output;
@@ -50,6 +51,16 @@ pub use coretemp::{CoretempDevice, CoretempError, discover_coretemp};
 pub use curve::{CurvePoint, DemandCurve, DemandCurveError, TemperatureCelsius, TemperatureError};
 pub use demand::{DemandPercent, DemandPercentError, Pwm};
 pub use envelope::{EnvelopeValidationError, validate_against_protected_envelope};
+pub use evidence::{
+    EVIDENCE_SCHEMA_VERSION, EvidenceExternalPower, EvidenceFan, EvidenceParseError,
+    EvidenceProfile, EvidenceRecordStatus, EvidenceRecordV1, EvidenceTimestamp,
+    EvidenceValidationError, EvidenceWriteError, FanCalibrationEvidence, FanCommandEvidence,
+    FanControlField, FanReadbackEvidence, FanReadbackField, FaultEvidence, ObservationOutcome,
+    QualificationEnvelopeIdentityV1, RestorationAttemptEvidence, RestorationOutcome,
+    RpmAnchorEvidence, RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness,
+    StateTransitionEvidence, TelemetrySampleEvidence, ThermalSummaryEvidence, WorkloadEvidence,
+    parse_evidence_v1, write_evidence_atomically,
+};
 pub use external_power::observe_external_power;
 pub use nvidia_gpu::{
     NvidiaGpuSampleError, NvidiaGpuSelector, NvidiaGpuSelectorError, NvidiaGpuSelectorKind,

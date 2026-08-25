@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, error::Error, fmt};
 
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser};
 
 const EXPECTED_PRODUCT: &str = "Predator PT315-53";
 const EXPECTED_BOARD: &str = "Civic_TLS";
@@ -26,10 +26,13 @@ const FORBIDDEN_CAPABILITIES: [EscapeHatchCapability; 7] = [
     EscapeHatchCapability::AlternateFanWriteBackend,
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompatibilityDeclarationV1 {
-    #[serde(deserialize_with = "deserialize_schema_version")]
+    #[serde(
+        serialize_with = "serialize_schema_version",
+        deserialize_with = "deserialize_schema_version"
+    )]
     pub schema_version: u32,
     pub hardware: HardwareIdentity,
     pub kernel: KernelIdentity,
@@ -38,7 +41,7 @@ pub struct CompatibilityDeclarationV1 {
     pub fan_control: FanControlDeclaration,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HardwareIdentity {
     pub dmi_product_name: String,
@@ -46,7 +49,7 @@ pub struct HardwareIdentity {
     pub bios_version: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KernelIdentity {
     pub release: String,
@@ -56,7 +59,7 @@ pub struct KernelIdentity {
     pub image_signer_fingerprint: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleIdentity {
     pub name: String,
@@ -67,20 +70,20 @@ pub struct ModuleIdentity {
     pub provenance: ModuleProvenance,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ModuleProvenance {
     InTree,
     External,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecureBootRequirements {
     pub required: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FanControlDeclaration {
     pub backend: FanWriteBackend,
@@ -89,7 +92,7 @@ pub struct FanControlDeclaration {
     pub forbidden_capabilities: Vec<EscapeHatchCapability>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FanWriteBackend {
     AcerHwmon,
@@ -98,7 +101,7 @@ pub enum FanWriteBackend {
     ReplacementModule,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EscapeHatchCapability {
     ForceCaps,
@@ -462,7 +465,7 @@ pub(crate) fn validate_declaration(
             .module
             .vermagic
             .strip_prefix(&declaration.kernel.release)
-            .is_some_and(|suffix| suffix.starts_with(' ')),
+            .is_some_and(|suffix| suffix.starts_with(' ') && suffix.len() > 1),
         "module.vermagic",
         "must bind the module to the declared kernel release",
     )?;
@@ -547,20 +550,32 @@ fn supported_kernel_release(release: &str) -> bool {
         return false;
     }
 
-    let mut components = release.split(['.', '-']);
-    let Some(major) = components
-        .next()
-        .and_then(|value| value.parse::<u32>().ok())
-    else {
+    let Some((major_text, remainder)) = release.split_once('.') else {
         return false;
     };
-    let Some(minor) = components
-        .next()
-        .and_then(|value| value.parse::<u32>().ok())
-    else {
+    if !major_text.bytes().all(|byte| byte.is_ascii_digit())
+        || major_text.len() > 1 && major_text.starts_with('0')
+    {
         return false;
-    };
-    (major, minor) >= (6, 19)
+    }
+    let minor_length = remainder.bytes().take_while(u8::is_ascii_digit).count();
+    if minor_length == 0 || minor_length > 1 && remainder.starts_with('0') {
+        return false;
+    }
+    if !remainder[minor_length..]
+        .bytes()
+        .next()
+        .is_some_and(|byte| matches!(byte, b'.' | b'-' | b'_' | b'+'))
+    {
+        return false;
+    }
+    major_text.len() > 1
+        || major_text.as_bytes()[0] > b'6'
+        || major_text == "6" && decimal_at_least(&remainder[..minor_length], "19")
+}
+
+fn decimal_at_least(value: &str, minimum: &str) -> bool {
+    value.len() > minimum.len() || value.len() == minimum.len() && value >= minimum
 }
 
 fn is_lower_hex(value: &str, expected_len: usize) -> bool {
@@ -600,5 +615,16 @@ where
         Ok(1)
     } else {
         Err(de::Error::custom("schema_version must be 1"))
+    }
+}
+
+fn serialize_schema_version<S>(version: &u32, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if *version == 1 {
+        serializer.serialize_u32(1)
+    } else {
+        Err(ser::Error::custom("schema_version must be 1"))
     }
 }
