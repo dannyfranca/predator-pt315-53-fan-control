@@ -7,18 +7,22 @@ use crate::{
     AcerHwmonDevice, BoundedFileAccess, Clock, CompatibilityAdmissionError,
     CompatibilityDeclarationV1, CompatibilityObservation, ConfigV1, ConfigValidationError,
     ControllerOwnership, EnvelopeValidationError, FirmwareAutoRestorationError,
-    QualificationEnvelopeIdentityV1, RuntimeLockAccess, ValidatedConfig, admit_compatibility,
-    compatibility::validate_declaration, validate_against_protected_envelope, validate_config_v1,
+    QualificationEnvelopeIdentityV1, RuntimeLockAccess, TachometerCalibrationError,
+    ValidatedConfig, admit_compatibility,
+    compatibility::validate_declaration,
+    tachometer::{QualifiedTachometerCalibrations, TachometerCalibrationConfig},
+    validate_against_protected_envelope, validate_config_v1,
 };
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProtectedPolicyManifestV1 {
-    #[serde(deserialize_with = "deserialize_schema_version")]
+struct ProtectedPolicyManifestV2 {
+    #[serde(deserialize_with = "deserialize_policy_schema_version")]
     schema_version: u32,
     qualification_id: String,
     policy_version: String,
     compatibility: CompatibilityDeclarationV1,
+    calibration: TachometerCalibrationConfig,
     protected: ConfigV1,
 }
 
@@ -40,6 +44,7 @@ pub struct AdmittedPolicyAuthority {
     policy_version: String,
     protected_policy_sha256: String,
     compatibility: CompatibilityDeclarationV1,
+    calibration: QualifiedTachometerCalibrations,
     protected: ValidatedConfig,
 }
 
@@ -76,6 +81,10 @@ impl AdmittedPolicyAuthority {
         candidate: &ValidatedConfig,
     ) -> Result<(), EnvelopeValidationError> {
         validate_against_protected_envelope(candidate, &self.protected)
+    }
+
+    pub(crate) fn tachometer_calibrations(&self) -> QualifiedTachometerCalibrations {
+        self.calibration.clone()
     }
 }
 
@@ -133,6 +142,7 @@ pub enum PolicyAuthorityError {
         field: &'static str,
     },
     InvalidProtectedPolicy(ConfigValidationError),
+    InvalidTachometerCalibration(TachometerCalibrationError),
     CompatibilityAdmission(CompatibilityAdmissionError),
     Mismatch {
         field: &'static str,
@@ -158,6 +168,9 @@ impl fmt::Display for PolicyAuthorityError {
             Self::InvalidProtectedPolicy(error) => {
                 write!(formatter, "invalid protected policy: {error}")
             }
+            Self::InvalidTachometerCalibration(error) => {
+                write!(formatter, "invalid tachometer calibration: {error}")
+            }
             Self::CompatibilityAdmission(error) => {
                 write!(formatter, "current compatibility: {error}")
             }
@@ -172,6 +185,7 @@ impl Error for PolicyAuthorityError {
             Self::ProtectedPolicyParse(error) => Some(error),
             Self::QualificationRecordParse(error) => Some(error),
             Self::InvalidProtectedPolicy(error) => Some(error),
+            Self::InvalidTachometerCalibration(error) => Some(error),
             Self::CompatibilityAdmission(error) => Some(error),
             Self::FirmwareAutoUnconfirmed
             | Self::InvalidIdentity { .. }
@@ -181,9 +195,9 @@ impl Error for PolicyAuthorityError {
     }
 }
 
-fn parse_protected_policy_v1(
+fn parse_protected_policy_v2(
     source: &str,
-) -> Result<ProtectedPolicyManifestV1, PolicyAuthorityError> {
+) -> Result<ProtectedPolicyManifestV2, PolicyAuthorityError> {
     let manifest = toml::from_str(source).map_err(PolicyAuthorityError::ProtectedPolicyParse)?;
     validate_manifest_identity(&manifest)?;
     Ok(manifest)
@@ -236,7 +250,7 @@ fn validate_policy_authority(
     compatibility_observations: &[CompatibilityObservation],
     ownership_id: u64,
 ) -> Result<AdmittedPolicyAuthority, PolicyAuthorityError> {
-    let manifest = parse_protected_policy_v1(protected_policy_source)?;
+    let manifest = parse_protected_policy_v2(protected_policy_source)?;
     let record = parse_qualification_record_v1(qualification_record_source)?;
 
     require_equal(
@@ -266,6 +280,10 @@ fn validate_policy_authority(
 
     let protected = validate_config_v1(manifest.protected)
         .map_err(PolicyAuthorityError::InvalidProtectedPolicy)?;
+    let calibration = manifest
+        .calibration
+        .qualify(&protected)
+        .map_err(PolicyAuthorityError::InvalidTachometerCalibration)?;
 
     Ok(AdmittedPolicyAuthority {
         ownership_id,
@@ -273,14 +291,15 @@ fn validate_policy_authority(
         policy_version: manifest.policy_version,
         protected_policy_sha256,
         compatibility: manifest.compatibility,
+        calibration,
         protected,
     })
 }
 
 fn validate_manifest_identity(
-    manifest: &ProtectedPolicyManifestV1,
+    manifest: &ProtectedPolicyManifestV2,
 ) -> Result<(), PolicyAuthorityError> {
-    if manifest.schema_version != 1 {
+    if manifest.schema_version != 2 {
         return Err(PolicyAuthorityError::InvalidIdentity {
             artifact: "protected policy",
             field: "schema_version",
@@ -387,5 +406,19 @@ where
         Ok(1)
     } else {
         Err(de::Error::custom("schema_version must be 1"))
+    }
+}
+
+fn deserialize_policy_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let version = i64::deserialize(deserializer)?;
+    if version == 2 {
+        Ok(2)
+    } else {
+        Err(de::Error::custom(
+            "schema_version must be 2; V1 manifests require requalification with tachometer calibration",
+        ))
     }
 }

@@ -141,18 +141,21 @@ impl Error for TransientSensorControlError {
 #[derive(Debug)]
 enum ControlState<S> {
     Custom {
-        control: HealthyControl,
+        control: Box<HealthyControl>,
         sources: S,
     },
-    Recovering {
-        config: ValidatedConfig,
-        device: AcerHwmonDevice,
-        gate: FreshSampleGate,
-        sources: Option<S>,
-    },
+    Recovering(Box<RecoveryState<S>>),
     Faulted {
         retained_sources: Option<S>,
     },
+}
+
+#[derive(Debug)]
+struct RecoveryState<S> {
+    config: ValidatedConfig,
+    device: AcerHwmonDevice,
+    gate: FreshSampleGate,
+    sources: Option<S>,
 }
 
 /// Owns normal control and the sole permitted automatic recovery path.
@@ -184,7 +187,7 @@ where
             authority,
             discovery,
             state: Some(ControlState::Custom {
-                control: HealthyControl::from_armed(armed),
+                control: Box::new(HealthyControl::from_armed(armed)),
                 sources,
             }),
         }
@@ -197,7 +200,7 @@ where
             .expect("control state is always installed")
         {
             ControlState::Custom { .. } => SensorControlState::CustomControl,
-            ControlState::Recovering { .. } => SensorControlState::FirmwareAutoRecovery,
+            ControlState::Recovering(_) => SensorControlState::FirmwareAutoRecovery,
             ControlState::Faulted { .. } => SensorControlState::Faulted,
         }
     }
@@ -224,19 +227,20 @@ where
                 }
                 Err(error) => {
                     let Some(fault) = recoverable_sensor_cycle_fault(&error).cloned() else {
-                        let (_, device) = control.into_recovery_parts();
+                        let (_, device) = (*control).into_recovery_parts();
                         return self.latch_control_fault(ownership, device, error, sources);
                     };
-                    let (config, device) = control.into_recovery_parts();
+                    let (config, device) = (*control).into_recovery_parts();
                     self.restore_for_recovery(ownership, config, device, fault, sources)
                 }
             },
-            ControlState::Recovering {
-                config,
-                device,
-                mut gate,
-                mut sources,
-            } => {
+            ControlState::Recovering(recovery) => {
+                let RecoveryState {
+                    config,
+                    device,
+                    mut gate,
+                    mut sources,
+                } = *recovery;
                 if sources.is_none() && !ownership.refresh_firmware_auto_confirmation(&device) {
                     return self.latch_recovery_fault(
                         ownership,
@@ -252,12 +256,12 @@ where
                             sources = Some(rediscovered);
                         }
                         Err(source) => {
-                            self.state = Some(ControlState::Recovering {
+                            self.state = Some(ControlState::Recovering(Box::new(RecoveryState {
                                 config,
                                 device,
                                 gate,
                                 sources: None,
-                            });
+                            })));
                             return Ok(SensorControlStep::AwaitingRediscovery(source));
                         }
                     }
@@ -272,12 +276,12 @@ where
                 );
                 match readiness {
                     Ok(OwnershipSampleReadiness::AwaitingSecondSample) => {
-                        self.state = Some(ControlState::Recovering {
+                        self.state = Some(ControlState::Recovering(Box::new(RecoveryState {
                             config,
                             device,
                             gate,
                             sources,
-                        });
+                        })));
                         Ok(SensorControlStep::AwaitingSecondSample)
                     }
                     Ok(OwnershipSampleReadiness::Ready(sample)) => {
@@ -290,7 +294,7 @@ where
                         ) {
                             Ok(armed) => {
                                 self.state = Some(ControlState::Custom {
-                                    control: HealthyControl::from_armed(armed),
+                                    control: Box::new(HealthyControl::from_armed(armed)),
                                     sources: sources
                                         .expect("ready sample was captured from installed sources"),
                                 });
@@ -340,12 +344,12 @@ where
     {
         match ownership.restore_or_contain_firmware_auto(&device) {
             FirmwareAutoSafingOutcome::Restored => {
-                self.state = Some(ControlState::Recovering {
+                self.state = Some(ControlState::Recovering(Box::new(RecoveryState {
                     config,
                     device,
                     gate: FreshSampleGate::new(),
                     sources: None,
-                });
+                })));
                 drop(sources);
                 Ok(SensorControlStep::FirmwareAutoRestored { fault })
             }

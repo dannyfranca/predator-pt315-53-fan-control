@@ -23,7 +23,7 @@ const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
 
-const PROTECTED_POLICY: &str = r#"schema_version = 1
+const PROTECTED_POLICY: &str = r#"schema_version = 2
 qualification_id = "pt31553-v1"
 policy_version = "1.0.0"
 
@@ -65,6 +65,22 @@ forbidden_capabilities = [
   "raw-ec",
   "replacement-wmi-module",
   "alternate-fan-write-backend",
+]
+
+[calibration.cpu]
+floor_basis_points = 3000
+response_deadline_millis = 4000
+anchors = [
+  { duty_basis_points = 3000, median_rpm = 2500 },
+  { duty_basis_points = 10000, median_rpm = 3500 },
+]
+
+[calibration.gpu]
+floor_basis_points = 2500
+response_deadline_millis = 4000
+anchors = [
+  { duty_basis_points = 2500, median_rpm = 2500 },
+  { duty_basis_points = 10000, median_rpm = 3500 },
 ]
 
 [protected]
@@ -1507,7 +1523,7 @@ fn matching_observation_for_policy(policy: &str) -> CompatibilityObservation {
 
 fn compatibility_declaration(policy: &str) -> CompatibilityDeclarationV1 {
     let start = policy.find("[compatibility]\n").unwrap();
-    let end = policy.find("\n[protected]\n").unwrap();
+    let end = policy.find("\n[calibration.cpu]\n").unwrap();
     let source = policy[start..end]
         .replacen("[compatibility]\n", "", 1)
         .replace("[compatibility.", "[");

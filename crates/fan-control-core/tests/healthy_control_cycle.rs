@@ -27,7 +27,7 @@ const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
 
-const PROTECTED_POLICY: &str = r#"schema_version = 1
+const PROTECTED_POLICY: &str = r#"schema_version = 2
 qualification_id = "pt31553-v1"
 policy_version = "1.0.0"
 
@@ -69,6 +69,22 @@ forbidden_capabilities = [
   "raw-ec",
   "replacement-wmi-module",
   "alternate-fan-write-backend",
+]
+
+[calibration.cpu]
+floor_basis_points = 3000
+response_deadline_millis = 4000
+anchors = [
+  { duty_basis_points = 3000, median_rpm = 2500 },
+  { duty_basis_points = 10000, median_rpm = 3500 },
+]
+
+[calibration.gpu]
+floor_basis_points = 2500
+response_deadline_millis = 4000
+anchors = [
+  { duty_basis_points = 2500, median_rpm = 2500 },
+  { duty_basis_points = 10000, median_rpm = 3500 },
 ]
 
 [protected]
@@ -535,6 +551,98 @@ fn lower_demand_holds_then_ramps_down_on_fresh_cycle_time() {
 }
 
 #[test]
+fn delayed_interpolated_tachometer_response_inside_the_qualified_band_is_accepted() {
+    let (platform, device) = fixture();
+    let injection = Rc::new(Cell::new(RuntimeInterference::None));
+    let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (_, armed) = arm(&mut ownership, &device);
+    let mut control = HealthyControl::from_armed(armed);
+    injection.set(RuntimeInterference::CpuTachometerZeroOnce);
+    let frame = Frame {
+        cpu: 60.0,
+        gpu: 55.0,
+        power: ExternalPower::Connected,
+    };
+    let mut sources = CountingSources::new(vec![frame, frame, frame]);
+
+    for _ in 0..3 {
+        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
+    }
+
+    assert!(control.is_current_for(&ownership));
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
+fn response_windows_use_confirmed_commands_and_each_fans_own_read_time() {
+    let (platform, device) = fixture();
+    let injection = Rc::new(Cell::new(RuntimeInterference::None));
+    let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (_, armed) = arm(&mut ownership, &device);
+    let mut control = HealthyControl::from_armed(armed);
+    injection.set(RuntimeInterference::DelayCpuConfirmationThenCpuZeroAndDelayedGpuTachometer);
+    let frame = Frame {
+        cpu: 60.0,
+        gpu: 55.0,
+        power: ExternalPower::Connected,
+    };
+    let mut sources = CountingSources::new(vec![frame, frame, frame]);
+
+    for _ in 0..3 {
+        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
+    }
+
+    assert!(control.is_current_for(&ownership));
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
+fn each_fan_faults_independently_after_its_qualified_response_deadline() {
+    for (interference, expected_fan, expected_interpolated_rpm) in [
+        (RuntimeInterference::CpuTachometerZero, Fan::Cpu, 2929),
+        (RuntimeInterference::GpuTachometerOutOfBand, Fan::Gpu, 2967),
+    ] {
+        let (platform, device) = fixture();
+        let injection = Rc::new(Cell::new(RuntimeInterference::None));
+        let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
+        let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+        let (_, armed) = arm(&mut ownership, &device);
+        let mut control = HealthyControl::from_armed(armed);
+        injection.set(interference);
+        let frame = Frame {
+            cpu: 60.0,
+            gpu: 55.0,
+            power: ExternalPower::Connected,
+        };
+        let mut sources = CountingSources::new(vec![frame, frame, frame, frame]);
+
+        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
+        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
+        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
+        let error =
+            run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap_err();
+
+        assert!(matches!(
+            error,
+            HealthyControlCycleError::TachometerOutOfBand {
+                fan,
+                expected_rpm,
+                actual_rpm,
+            } if fan == expected_fan
+                && expected_rpm == expected_interpolated_rpm
+                && actual_rpm == if expected_fan == Fan::Cpu { 0 } else { 1000 }
+        ));
+        assert!(!control.is_current_for(&ownership));
+        ownership.restore_firmware_auto(&device).unwrap();
+        ownership.release().unwrap();
+    }
+}
+
+#[test]
 fn backing_device_rebind_is_rejected_before_normal_output() {
     let (platform, device) = fixture();
     let interference = Rc::new(Cell::new(RuntimeInterference::None));
@@ -682,6 +790,21 @@ fn each_changed_pwm_readback_mismatch_invalidates_the_cycle() {
     }
 }
 
+#[test]
+fn output_change_during_tachometer_io_invalidates_the_cycle() {
+    let (error, _) = run_interfered_cycle(RuntimeInterference::CpuDutyDuringGpuTachometerRead);
+
+    assert!(matches!(
+        error,
+        HealthyControlCycleError::UnexpectedReadback {
+            fan: Fan::Cpu,
+            field: ControlCycleReadback::Duty,
+            operation: ControlCycleOperation::ConfirmResult,
+            ..
+        }
+    ));
+}
+
 fn run_interfered_cycle(
     interference: RuntimeInterference,
 ) -> (HealthyControlCycleError, Vec<PlatformOperation>) {
@@ -732,6 +855,12 @@ enum RuntimeInterference {
     RebindGpuEndpointBeforeCpuWrite,
     CpuDutyAfterWrite,
     GpuDutyAfterWrite,
+    CpuTachometerZero,
+    CpuTachometerZeroOnce,
+    GpuTachometerOutOfBand,
+    CpuDutyDuringGpuTachometerRead,
+    DelayCpuConfirmationThenCpuZeroAndDelayedGpuTachometer,
+    CpuZeroAndDelayedGpuTachometer,
     FailCpuDutyReadback,
     GpuDutyReadbackFailureAndRestorationDeadlineCustom,
     RestorationUnavailable,
@@ -746,6 +875,7 @@ struct InterferingPlatform {
     inner: FakePlatform,
     interference: Rc<Cell<RuntimeInterference>>,
     last_normal_write: Option<String>,
+    gpu_tachometer_reads_during_interference: usize,
     firmware_auto_confirmed: Rc<Cell<bool>>,
 }
 
@@ -755,6 +885,7 @@ impl InterferingPlatform {
             inner,
             interference,
             last_normal_write: None,
+            gpu_tachometer_reads_during_interference: 0,
             firmware_auto_confirmed: Rc::new(Cell::new(false)),
         }
     }
@@ -946,6 +1077,86 @@ impl BoundedIdentityBoundFileAccess for InterferingPlatform {
         deadline: Duration,
     ) -> Result<String, PlatformError> {
         let interference = self.interference.get();
+        if interference
+            == RuntimeInterference::DelayCpuConfirmationThenCpuZeroAndDelayedGpuTachometer
+            && self.last_normal_write.as_deref() == Some("pwm1")
+            && child == "pwm1"
+        {
+            let result = self.inner.read_bound_before(
+                directory,
+                expected_directory,
+                child,
+                expected_child,
+                deadline,
+            );
+            self.inner.delay(Duration::from_secs(1));
+            self.interference
+                .set(RuntimeInterference::CpuZeroAndDelayedGpuTachometer);
+            return result;
+        }
+        if interference == RuntimeInterference::CpuTachometerZeroOnce && child == "fan1_input" {
+            self.interference.set(RuntimeInterference::None);
+            self.inner.insert_file_with_permissions(
+                directory.join(child),
+                "0\n",
+                FilePermissions::READ_ONLY,
+            );
+            let result = self.inner.read_bound_before(
+                directory,
+                expected_directory,
+                child,
+                expected_child,
+                deadline,
+            );
+            self.inner.insert_file_with_permissions(
+                directory.join(child),
+                "3000\n",
+                FilePermissions::READ_ONLY,
+            );
+            return result;
+        }
+        if matches!(
+            interference,
+            RuntimeInterference::CpuTachometerZero
+                | RuntimeInterference::CpuZeroAndDelayedGpuTachometer
+        ) && child == "fan1_input"
+        {
+            self.inner.insert_file_with_permissions(
+                directory.join(child),
+                "0\n",
+                FilePermissions::READ_ONLY,
+            );
+        }
+        if interference == RuntimeInterference::CpuZeroAndDelayedGpuTachometer
+            && child == "fan2_input"
+        {
+            self.gpu_tachometer_reads_during_interference += 1;
+            if self.gpu_tachometer_reads_during_interference == 3 {
+                self.inner.delay(Duration::from_millis(1_001));
+            }
+        }
+        if interference == RuntimeInterference::GpuTachometerOutOfBand && child == "fan2_input" {
+            self.inner.insert_file_with_permissions(
+                directory.join(child),
+                "1000\n",
+                FilePermissions::READ_ONLY,
+            );
+        }
+        if interference == RuntimeInterference::CpuDutyDuringGpuTachometerRead
+            && child == "fan2_input"
+        {
+            self.interference.set(RuntimeInterference::None);
+            let result = self.inner.read_bound_before(
+                directory,
+                expected_directory,
+                child,
+                expected_child,
+                deadline,
+            );
+            self.inner
+                .insert_file_with_permissions(cpu_pwm(), "0\n", FilePermissions::READ_WRITE);
+            return result;
+        }
         if (matches!(
             interference,
             RuntimeInterference::CpuModeBeforeRead
@@ -2125,7 +2336,7 @@ fn insert_acer_device(platform: &mut FakePlatform, root: impl AsRef<Path>) {
         );
         platform.insert_file_with_permissions(
             root.join(format!("fan{channel}_input")),
-            if channel == 1 { "2400\n" } else { "2600\n" },
+            "3000\n",
             FilePermissions::READ_ONLY,
         );
     }
@@ -2153,7 +2364,7 @@ fn matching_observation_for_policy(policy: &str) -> CompatibilityObservation {
 
 fn compatibility_declaration(policy: &str) -> CompatibilityDeclarationV1 {
     let start = policy.find("[compatibility]\n").unwrap();
-    let end = policy.find("\n[protected]\n").unwrap();
+    let end = policy.find("\n[calibration.cpu]\n").unwrap();
     let source = policy[start..end]
         .replacen("[compatibility]\n", "", 1)
         .replace("[compatibility.", "[");

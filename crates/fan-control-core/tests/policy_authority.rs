@@ -3,8 +3,8 @@ use std::path::Path;
 use fan_control_core::{
     CompatibilityAdmissionError, CompatibilityDeclarationV1, CompatibilityObservation,
     EvidenceCompleteness, FakePlatform, FanWriteBackend, FilePermissions, ObservedFanAbi,
-    PolicyAuthorityAdmissionError, PolicyAuthorityError, ValidatedConfig,
-    acquire_controller_ownership, admit_policy_authority, discover_acer_hwmon,
+    PolicyAuthorityAdmissionError, PolicyAuthorityError, TachometerCalibrationError,
+    ValidatedConfig, acquire_controller_ownership, admit_policy_authority, discover_acer_hwmon,
     parse_compatibility_v1, parse_config_v1, validate_config_v1,
 };
 use sha2::{Digest, Sha256};
@@ -16,7 +16,7 @@ const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
 
-const PROTECTED_POLICY: &str = r#"schema_version = 1
+const PROTECTED_POLICY: &str = r#"schema_version = 2
 qualification_id = "pt31553-v1"
 policy_version = "1.0.0"
 
@@ -58,6 +58,22 @@ forbidden_capabilities = [
   "raw-ec",
   "replacement-wmi-module",
   "alternate-fan-write-backend",
+]
+
+[calibration.cpu]
+floor_basis_points = 3000
+response_deadline_millis = 4000
+anchors = [
+  { duty_basis_points = 3000, median_rpm = 2500 },
+  { duty_basis_points = 10000, median_rpm = 3500 },
+]
+
+[calibration.gpu]
+floor_basis_points = 2500
+response_deadline_millis = 4000
+anchors = [
+  { duty_basis_points = 2500, median_rpm = 2500 },
+  { duty_basis_points = 10000, median_rpm = 3500 },
 ]
 
 [protected]
@@ -129,9 +145,77 @@ fn exact_policy_record_and_live_envelope_are_admitted_together() {
 }
 
 #[test]
+fn unsafe_or_incomplete_tachometer_calibration_never_becomes_authority() {
+    for (policy, expected_fan) in [
+        (
+            PROTECTED_POLICY.replacen("floor_basis_points = 3000", "floor_basis_points = 2999", 1),
+            fan_control_core::Fan::Cpu,
+        ),
+        (
+            PROTECTED_POLICY.replacen(
+                "[calibration.gpu]\nfloor_basis_points = 2500\nresponse_deadline_millis = 4000",
+                "[calibration.gpu]\nfloor_basis_points = 2500\nresponse_deadline_millis = 0",
+                1,
+            ),
+            fan_control_core::Fan::Gpu,
+        ),
+        (
+            PROTECTED_POLICY.replacen(
+                "[calibration.gpu]\nfloor_basis_points = 2500\nresponse_deadline_millis = 4000",
+                "[calibration.gpu]\nfloor_basis_points = 2500\nresponse_deadline_millis = 30001",
+                1,
+            ),
+            fan_control_core::Fan::Gpu,
+        ),
+        (
+            PROTECTED_POLICY.replacen(
+                "{ duty_basis_points = 10000, median_rpm = 3500 }",
+                "{ duty_basis_points = 3000, median_rpm = 3500 }",
+                1,
+            ),
+            fan_control_core::Fan::Cpu,
+        ),
+        (
+            PROTECTED_POLICY.replacen("median_rpm = 3500", "median_rpm = 2000", 1),
+            fan_control_core::Fan::Cpu,
+        ),
+        (
+            PROTECTED_POLICY.replacen("median_rpm = 2500", "median_rpm = 99", 1),
+            fan_control_core::Fan::Cpu,
+        ),
+        (
+            PROTECTED_POLICY.replacen("median_rpm = 3500", "median_rpm = 20001", 1),
+            fan_control_core::Fan::Cpu,
+        ),
+    ] {
+        let record = matching_record(&policy);
+        let observation = matching_observation_for_policy(&policy);
+        let (result, _) = admit(&policy, &record, &[observation]);
+
+        let error = result.unwrap_err();
+        assert!(
+            matches!(
+                error.reason(),
+                PolicyAuthorityError::InvalidTachometerCalibration(
+                    TachometerCalibrationError::FloorMismatch { fan, .. }
+                        | TachometerCalibrationError::ZeroResponseDeadline { fan }
+                        | TachometerCalibrationError::ResponseDeadlineTooLong { fan, .. }
+                        | TachometerCalibrationError::AnchorRangeMismatch { fan }
+                        | TachometerCalibrationError::AnchorsNotStrictlyIncreasing { fan }
+                        | TachometerCalibrationError::RpmZeroOrDecreasing { fan }
+                        | TachometerCalibrationError::RpmOutOfRange { fan, .. }
+                ) if *fan == expected_fan
+            ),
+            "expected {expected_fan:?}, got {:?}",
+            error.reason()
+        );
+    }
+}
+
+#[test]
 fn both_formats_reject_unsupported_missing_unknown_and_malformed_fields() {
     for policy in [
-        PROTECTED_POLICY.replacen("schema_version = 1", "schema_version = 2", 1),
+        PROTECTED_POLICY.replacen("schema_version = 2", "schema_version = 3", 1),
         PROTECTED_POLICY.replacen("qualification_id = \"pt31553-v1\"\n", "", 1),
         PROTECTED_POLICY.replacen(
             "policy_version = \"1.0.0\"",
@@ -162,6 +246,27 @@ fn both_formats_reject_unsupported_missing_unknown_and_malformed_fields() {
         assert!(result.is_err(), "{candidate}");
         assert_firmware_auto(&platform);
     }
+}
+
+#[test]
+fn pre_calibration_v1_manifest_requires_explicit_requalification() {
+    let calibration_start = PROTECTED_POLICY.find("[calibration.cpu]").unwrap();
+    let protected_start = PROTECTED_POLICY.find("[protected]\n").unwrap();
+    let policy = format!(
+        "{}{}",
+        &PROTECTED_POLICY[..calibration_start],
+        &PROTECTED_POLICY[protected_start..]
+    )
+    .replacen("schema_version = 2", "schema_version = 1", 1);
+    let observation = matching_observation_for_policy(PROTECTED_POLICY);
+    let (result, platform) = admit(&policy, &matching_record(&policy), &[observation]);
+
+    assert!(matches!(
+        result.unwrap_err().reason(),
+        PolicyAuthorityError::ProtectedPolicyParse(error)
+            if error.to_string().contains("V1 manifests require requalification")
+    ));
+    assert_firmware_auto(&platform);
 }
 
 #[test]
@@ -377,7 +482,7 @@ fn matching_observation_for_policy(policy: &str) -> CompatibilityObservation {
 
 fn compatibility_declaration(policy: &str) -> CompatibilityDeclarationV1 {
     let start = policy.find("[compatibility]\n").unwrap();
-    let end = policy.find("\n[protected]\n").unwrap();
+    let end = policy.find("\n[calibration.cpu]\n").unwrap();
     let source = policy[start..end]
         .replacen("[compatibility]\n", "", 1)
         .replace("[compatibility.", "[");
