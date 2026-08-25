@@ -21,6 +21,7 @@ mod platform;
 mod policy;
 mod restoration;
 mod sampling;
+mod sensor_recovery;
 mod validation;
 
 pub use acer_hwmon::{AcerHwmonDevice, AcerHwmonDiscoveryError, FanEndpoints, discover_acer_hwmon};
@@ -75,8 +76,9 @@ pub use ownership::{
 pub use platform::{
     BoundedFileAccess, BoundedIdentityBoundFileAccess, Clock, FakePlatform, FakeRuntimeLock,
     FakeRuntimeLockBackend, FakeStep, FileAccess, FileIdentity, FilePermissions,
-    IdentityBoundFileAccess, PlatformError, PlatformErrorKind, PlatformOperation,
-    RuntimeLockAccess, RuntimeLockError, ServiceAccess, SystemOwnershipPlatform, SystemRuntimeLock,
+    IdentityBoundFileAccess, IdentityBoundReadAccess, PlatformError, PlatformErrorKind,
+    PlatformOperation, RuntimeLockAccess, RuntimeLockError, ServiceAccess, SystemOwnershipPlatform,
+    SystemRuntimeLock,
 };
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
@@ -90,6 +92,10 @@ pub use sampling::{
     CompleteSampleSet, ControlCycleSampleGate, FreshSampleGate, MAX_SAMPLE_CADENCE_JITTER,
     NORMAL_SAMPLE_CADENCE, ObservedSample, RequiredInput, SampleCapture, SampleReadiness,
     SampleSetError, SampleSourceError, SampleSources,
+};
+pub use sensor_recovery::{
+    SensorControlState, SensorControlStep, SensorSourceDiscovery, TransientSensorControl,
+    TransientSensorControlError,
 };
 pub use validation::{
     Component, ConfigValidationError, Fan, Profile, ValidatedConfig, ValidatedControlConfig,

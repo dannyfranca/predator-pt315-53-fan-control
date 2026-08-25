@@ -49,6 +49,10 @@ impl HealthyControl {
     pub const fn last_outputs(&self) -> FanOutputs {
         self.last_outputs
     }
+
+    pub(crate) fn into_recovery_parts(self) -> (ValidatedConfig, AcerHwmonDevice) {
+        (self.config, self.device)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
