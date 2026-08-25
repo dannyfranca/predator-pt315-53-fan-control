@@ -161,6 +161,7 @@ pub enum SampleReadiness {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SampleSetError {
+    FirmwareAutoUnconfirmed,
     Input {
         input: RequiredInput,
         source: SampleSourceError,
@@ -182,6 +183,9 @@ pub enum SampleSetError {
 impl fmt::Display for SampleSetError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::FirmwareAutoUnconfirmed => {
+                formatter.write_str("Firmware Auto must be confirmed before sampling")
+            }
             Self::Input { input, source } => write!(formatter, "{input:?} sample failed: {source}"),
             Self::Stale { input } => write!(formatter, "{input:?} sample is stale"),
             Self::Future { input } => {

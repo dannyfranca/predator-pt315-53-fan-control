@@ -35,6 +35,7 @@ struct QualificationRecordV1 {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdmittedPolicyAuthority {
+    ownership_id: u64,
     qualification_id: String,
     policy_version: String,
     protected_policy_sha256: String,
@@ -42,6 +43,10 @@ pub struct AdmittedPolicyAuthority {
 }
 
 impl AdmittedPolicyAuthority {
+    pub(crate) const fn belongs_to_ownership(&self, ownership_id: u64) -> bool {
+        self.ownership_id == ownership_id
+    }
+
     pub fn qualification_id(&self) -> &str {
         &self.qualification_id
     }
@@ -104,6 +109,7 @@ impl Error for PolicyAuthorityAdmissionError {
 
 #[derive(Debug)]
 pub enum PolicyAuthorityError {
+    FirmwareAutoUnconfirmed,
     ProtectedPolicyParse(toml::de::Error),
     QualificationRecordParse(serde_json::Error),
     InvalidIdentity {
@@ -124,6 +130,9 @@ pub enum PolicyAuthorityError {
 impl fmt::Display for PolicyAuthorityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::FirmwareAutoUnconfirmed => {
+                formatter.write_str("Firmware Auto was not confirmed before policy admission")
+            }
             Self::ProtectedPolicyParse(error) => write!(formatter, "protected policy: {error}"),
             Self::QualificationRecordParse(error) => {
                 write!(formatter, "qualification record: {error}")
@@ -152,7 +161,8 @@ impl Error for PolicyAuthorityError {
             Self::QualificationRecordParse(error) => Some(error),
             Self::InvalidProtectedPolicy(error) => Some(error),
             Self::CompatibilityAdmission(error) => Some(error),
-            Self::InvalidIdentity { .. }
+            Self::FirmwareAutoUnconfirmed
+            | Self::InvalidIdentity { .. }
             | Self::InvalidCompatibility { .. }
             | Self::Mismatch { .. } => None,
         }
@@ -186,11 +196,17 @@ pub fn admit_policy_authority<P>(
 where
     P: BoundedFileAccess + Clock + RuntimeLockAccess + ?Sized,
 {
-    match validate_policy_authority(
-        protected_policy_source,
-        qualification_record_source,
-        compatibility_observations,
-    ) {
+    let result = if ownership.refresh_firmware_auto_confirmation(device) {
+        validate_policy_authority(
+            protected_policy_source,
+            qualification_record_source,
+            compatibility_observations,
+            ownership.ownership_id(),
+        )
+    } else {
+        Err(PolicyAuthorityError::FirmwareAutoUnconfirmed)
+    };
+    match result {
         Ok(authority) => Ok(authority),
         Err(reason) => match ownership.restore_firmware_auto(device) {
             Ok(()) => Err(PolicyAuthorityAdmissionError::Rejected(reason)),
@@ -206,6 +222,7 @@ fn validate_policy_authority(
     protected_policy_source: &str,
     qualification_record_source: &str,
     compatibility_observations: &[CompatibilityObservation],
+    ownership_id: u64,
 ) -> Result<AdmittedPolicyAuthority, PolicyAuthorityError> {
     let manifest = parse_protected_policy_v1(protected_policy_source)?;
     let record = parse_qualification_record_v1(qualification_record_source)?;
@@ -239,6 +256,7 @@ fn validate_policy_authority(
         .map_err(PolicyAuthorityError::InvalidProtectedPolicy)?;
 
     Ok(AdmittedPolicyAuthority {
+        ownership_id,
         qualification_id: manifest.qualification_id,
         policy_version: manifest.policy_version,
         protected_policy_sha256,

@@ -1,9 +1,15 @@
-use std::{error::Error, fmt, path::Path};
+use std::{
+    error::Error,
+    fmt,
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use crate::{
-    AcerHwmonDevice, BoundedFileAccess, Clock, EmergencyContainmentReport,
-    FirmwareAutoRestorationError, PlatformError, PlatformErrorKind, RuntimeLockAccess,
-    RuntimeLockError, ServiceAccess,
+    AcerHwmonDevice, BoundedFileAccess, Clock, CompleteSampleSet, EmergencyContainmentReport,
+    FirmwareAutoRestorationError, FreshSampleGate, PlatformError, PlatformErrorKind,
+    RuntimeLockAccess, RuntimeLockError, SampleReadiness, SampleSetError, SampleSources,
+    ServiceAccess,
     restoration::{contain_custom_fans_at_maximum, recover_firmware_auto, restore_firmware_auto},
 };
 
@@ -15,6 +21,28 @@ pub const COMPETING_FAN_CONTROL_SERVICES: [&str; 4] = [
     "coolercontrold.service",
 ];
 
+static NEXT_OWNERSHIP_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A second consecutive sample captured while one controller held ownership.
+#[derive(Debug, PartialEq)]
+pub struct ArmingReadySample {
+    sample: CompleteSampleSet,
+    ownership_id: u64,
+    sampling_epoch: u64,
+}
+
+impl ArmingReadySample {
+    pub(crate) fn into_parts(self) -> (CompleteSampleSet, u64, u64) {
+        (self.sample, self.ownership_id, self.sampling_epoch)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum OwnershipSampleReadiness {
+    AwaitingSecondSample,
+    Ready(ArmingReadySample),
+}
+
 /// Exclusive ownership bound to the only platform allowed to write fan state.
 #[derive(Debug)]
 #[must_use = "ownership must restore Firmware Auto and explicitly release its runtime lock"]
@@ -24,7 +52,10 @@ where
 {
     platform: &'a mut P,
     lock: Option<P::RuntimeLock>,
+    ownership_id: u64,
     restoration_confirmed: bool,
+    sampling_epoch_started: bool,
+    sampling_epoch: u64,
 }
 
 impl<'a, P> ControllerOwnership<'a, P>
@@ -35,6 +66,105 @@ where
         self.platform
     }
 
+    /// Collects a fresh sample only after re-confirming both fans remain in Firmware Auto.
+    pub fn collect_fresh_sample(
+        &mut self,
+        device: &AcerHwmonDevice,
+        gate: &mut FreshSampleGate,
+        sources: &mut dyn SampleSources,
+    ) -> Result<OwnershipSampleReadiness, SampleSetError>
+    where
+        P: BoundedFileAccess + Clock + Sized,
+    {
+        if !self.refresh_firmware_auto_confirmation(device) {
+            gate.reset();
+            return Err(SampleSetError::FirmwareAutoUnconfirmed);
+        }
+        if !self.sampling_epoch_started {
+            gate.reset();
+            self.sampling_epoch_started = true;
+        }
+        match gate.sample(sources, self.platform) {
+            Ok(readiness) => Ok(match readiness {
+                SampleReadiness::AwaitingSecondSample => {
+                    OwnershipSampleReadiness::AwaitingSecondSample
+                }
+                SampleReadiness::Ready(sample) => {
+                    OwnershipSampleReadiness::Ready(ArmingReadySample {
+                        sample,
+                        ownership_id: self.ownership_id,
+                        sampling_epoch: self.sampling_epoch,
+                    })
+                }
+            }),
+            Err(error) => {
+                self.invalidate_firmware_auto_epoch();
+                Err(error)
+            }
+        }
+    }
+
+    pub fn delay(&mut self, duration: std::time::Duration)
+    where
+        P: Clock,
+    {
+        self.platform.delay(duration);
+    }
+
+    pub(crate) fn begin_custom_transition(&mut self) -> (&mut P, u64) {
+        self.restoration_confirmed = false;
+        self.reset_sampling_epoch();
+        (self.platform, self.sampling_epoch)
+    }
+
+    pub(crate) const fn ownership_id(&self) -> u64 {
+        self.ownership_id
+    }
+
+    pub(crate) const fn sampling_epoch(&self) -> u64 {
+        self.sampling_epoch
+    }
+
+    pub(crate) const fn custom_epoch_is_current(&self, ownership_id: u64, epoch: u64) -> bool {
+        self.ownership_id == ownership_id
+            && self.sampling_epoch == epoch
+            && !self.restoration_confirmed
+    }
+
+    fn reset_sampling_epoch(&mut self) {
+        self.sampling_epoch_started = false;
+        self.sampling_epoch = self
+            .sampling_epoch
+            .checked_add(1)
+            .expect("controller sampling epoch space exhausted");
+    }
+
+    pub(crate) fn refresh_firmware_auto_confirmation(&mut self, device: &AcerHwmonDevice) -> bool
+    where
+        P: BoundedFileAccess + Clock,
+    {
+        if !self.restoration_confirmed {
+            return false;
+        }
+        let deadline = self
+            .platform
+            .monotonic_now()
+            .saturating_add(crate::NORMAL_SAMPLE_CADENCE);
+        let cpu = self.platform.read_before(device.cpu().enable(), deadline);
+        let gpu = self.platform.read_before(device.gpu().enable(), deadline);
+        let confirmed = matches!(cpu, Ok(ref value) if value.trim() == "2")
+            && matches!(gpu, Ok(ref value) if value.trim() == "2");
+        if !confirmed {
+            self.invalidate_firmware_auto_epoch();
+        }
+        confirmed
+    }
+
+    fn invalidate_firmware_auto_epoch(&mut self) {
+        self.restoration_confirmed = false;
+        self.reset_sampling_epoch();
+    }
+
     pub fn restore_firmware_auto(
         &mut self,
         device: &AcerHwmonDevice,
@@ -43,6 +173,7 @@ where
         P: BoundedFileAccess + Clock,
     {
         self.restoration_confirmed = false;
+        self.reset_sampling_epoch();
         restore_firmware_auto(self.platform, device)?;
         self.restoration_confirmed = true;
         Ok(())
@@ -56,6 +187,7 @@ where
         P: BoundedFileAccess + Clock,
     {
         self.restoration_confirmed = false;
+        self.reset_sampling_epoch();
         let report = contain_custom_fans_at_maximum(self.platform, device);
         self.restoration_confirmed = report.restoration_confirmed();
         report
@@ -66,6 +198,7 @@ where
         P: BoundedFileAccess + Clock,
     {
         self.restoration_confirmed = false;
+        self.reset_sampling_epoch();
         recover_firmware_auto(self.platform, device);
         self.restoration_confirmed = true;
     }
@@ -211,7 +344,12 @@ where
     Ok(ControllerOwnership {
         platform,
         lock: Some(lock),
+        ownership_id: NEXT_OWNERSHIP_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("controller ownership ID space exhausted"),
         restoration_confirmed: false,
+        sampling_epoch_started: false,
+        sampling_epoch: 0,
     })
 }
 

@@ -283,6 +283,30 @@ fn invalid_protected_content_never_becomes_authority() {
     assert_firmware_auto(&platform);
 }
 
+#[test]
+fn policy_admission_requires_confirmed_firmware_auto() {
+    let record = matching_record(PROTECTED_POLICY);
+    let observation = matching_observation_for_policy(PROTECTED_POLICY);
+    let (mut platform, device) = fan_fixture();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+
+    let error = admit_policy_authority(
+        &mut ownership,
+        &device,
+        PROTECTED_POLICY,
+        &record,
+        &[observation],
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        PolicyAuthorityAdmissionError::Rejected(PolicyAuthorityError::FirmwareAutoUnconfirmed)
+    ));
+    ownership.release().unwrap();
+    assert_firmware_auto(&platform);
+}
+
 fn admit(
     policy: &str,
     record: &str,
@@ -293,10 +317,8 @@ fn admit(
 ) {
     let (mut platform, device) = fan_fixture();
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    ownership.restore_firmware_auto(&device).unwrap();
     let result = admit_policy_authority(&mut ownership, &device, policy, record, observations);
-    if result.is_ok() {
-        ownership.restore_firmware_auto(&device).unwrap();
-    }
     ownership.release().unwrap();
     (result, platform)
 }
