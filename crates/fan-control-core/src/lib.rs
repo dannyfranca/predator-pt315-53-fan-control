@@ -3,6 +3,7 @@
 use std::fmt;
 
 mod acer_hwmon;
+mod arming;
 mod authority;
 mod compatibility;
 mod config;
@@ -21,6 +22,10 @@ mod sampling;
 mod validation;
 
 pub use acer_hwmon::{AcerHwmonDevice, AcerHwmonDiscoveryError, FanEndpoints, discover_acer_hwmon};
+pub use arming::{
+    ArmedFanControl, FanArmingError, FanArmingFailure, FanArmingOperation, FanArmingReadback,
+    arm_both_fans_safely,
+};
 pub use authority::{
     AdmittedPolicyAuthority, PolicyAuthorityAdmissionError, PolicyAuthorityError,
     admit_policy_authority,
@@ -47,8 +52,9 @@ pub use nvidia_gpu::{
 };
 pub use output::{ExternalPower, FanOutputs, calculate_fan_outputs};
 pub use ownership::{
-    COMPETING_FAN_CONTROL_SERVICES, ControllerOwnership, ControllerOwnershipError,
-    ControllerReleaseError, RUNTIME_LOCK_PATH, acquire_controller_ownership,
+    ArmingReadySample, COMPETING_FAN_CONTROL_SERVICES, ControllerOwnership,
+    ControllerOwnershipError, ControllerReleaseError, OwnershipSampleReadiness, RUNTIME_LOCK_PATH,
+    acquire_controller_ownership,
 };
 pub use platform::{
     BoundedFileAccess, Clock, FakePlatform, FakeRuntimeLock, FakeRuntimeLockBackend, FakeStep,
