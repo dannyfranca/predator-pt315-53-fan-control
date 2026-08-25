@@ -31,7 +31,9 @@ pub use policy::{
     HysteresisError, MonotonicTime, MonotonicTimeError,
 };
 pub use restoration::{
-    FanRestorationStatus, FirmwareAutoReadback, FirmwareAutoRestorationError, restore_firmware_auto,
+    EmergencyContainmentReport, EmergencyFanStatus, FanModeFailure, FanRestorationStatus,
+    FirmwareAutoReadback, FirmwareAutoRestorationError, MaximumPwmReadback,
+    contain_custom_fans_at_maximum, recover_firmware_auto, restore_firmware_auto,
 };
 pub use validation::{
     Component, ConfigValidationError, Fan, Profile, ValidatedConfig, ValidatedControlConfig,
