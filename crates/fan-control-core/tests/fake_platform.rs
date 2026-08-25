@@ -1,8 +1,8 @@
 use std::{path::Path, time::Duration};
 
 use fan_control_core::{
-    Clock, FakePlatform, FakeStep, FileAccess, PlatformError, PlatformErrorKind, PlatformOperation,
-    ServiceAccess,
+    Clock, FakePlatform, FakeStep, FileAccess, FilePermissions, PlatformError, PlatformErrorKind,
+    PlatformOperation, ServiceAccess,
 };
 
 #[test]
@@ -154,4 +154,53 @@ fn failure_steps_are_ordered_across_directory_service_and_file_access() {
             PlatformOperation::Read(endpoint),
         ]
     );
+}
+
+#[test]
+fn fake_preserves_exact_modes_and_enforces_read_write_capabilities() {
+    let read_only = Path::new("/sys/class/hwmon/hwmon7/fan1_input");
+    let write_only = Path::new("/sys/class/hwmon/hwmon7/pwm1");
+    let mut platform = FakePlatform::new();
+    platform.insert_file_with_permissions(read_only, "2400", FilePermissions::from_mode(0o400));
+    platform.insert_file_with_permissions(write_only, "128", FilePermissions::WRITE_ONLY);
+
+    assert_eq!(platform.permissions(read_only).unwrap().mode(), 0o400,);
+    assert!(matches!(
+        platform.write(read_only, "0"),
+        Err(error) if error.kind() == PlatformErrorKind::PermissionDenied
+    ));
+    assert!(matches!(
+        platform.read(write_only),
+        Err(error) if error.kind() == PlatformErrorKind::PermissionDenied
+    ));
+}
+
+#[test]
+fn permission_operations_record_and_consume_ordered_failure_steps() {
+    let endpoint = Path::new("/sys/class/hwmon/hwmon7/pwm1");
+    let mut platform = FakePlatform::new();
+    platform.insert_file(endpoint, "128");
+    platform.queue_steps([FakeStep::Fail(PlatformError::new(
+        PlatformErrorKind::Unavailable,
+        "metadata unavailable",
+    ))]);
+
+    assert!(matches!(
+        platform.permissions(endpoint),
+        Err(error) if error.kind() == PlatformErrorKind::Unavailable
+    ));
+    assert_eq!(platform.pending_steps(), 0);
+    assert_eq!(
+        platform.operations(),
+        &[PlatformOperation::Permissions(endpoint.into())]
+    );
+
+    let mut disappearing = FakePlatform::new();
+    disappearing.insert_file(endpoint, "128");
+    disappearing.queue_steps([FakeStep::Disappear(endpoint.into())]);
+    assert!(matches!(
+        disappearing.permissions(endpoint),
+        Err(error) if error.kind() == PlatformErrorKind::NotFound
+    ));
+    assert_eq!(disappearing.pending_steps(), 0);
 }
