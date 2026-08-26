@@ -587,9 +587,11 @@ where
         validate_observation(
             &mut observation,
             &workload,
-            started_at,
-            captured_at,
-            expected_millis,
+            ObservationSchedule {
+                run_started_at: started_at,
+                captured_at,
+                expected_millis,
+            },
             &mut control_evidence,
             plan.tachometer_calibrations,
             &mut tachometer_evidence,
@@ -1317,17 +1319,27 @@ impl ControlEvidenceState {
     }
 }
 
-fn validate_observation(
-    observation: &mut MatchedWorkloadObservation,
-    workload: &WorkloadEvidence,
+#[derive(Clone, Copy)]
+struct ObservationSchedule {
     run_started_at: EvidenceTimestamp,
     captured_at: EvidenceTimestamp,
     expected_millis: u64,
+}
+
+fn validate_observation(
+    observation: &mut MatchedWorkloadObservation,
+    workload: &WorkloadEvidence,
+    schedule: ObservationSchedule,
     control_evidence: &mut ControlEvidenceState,
     tachometer_calibrations: MatchedWorkloadTachometerCalibrations<'_>,
     tachometer_evidence: &mut TachometerEvidenceState,
     faults: &mut Vec<FaultEvidence>,
 ) {
+    let ObservationSchedule {
+        run_started_at,
+        captured_at,
+        expected_millis,
+    } = schedule;
     let source_timestamp = observation.sample.timestamp;
     if source_timestamp.monotonic_millis < run_started_at.monotonic_millis
         || source_timestamp.monotonic_millis > captured_at.monotonic_millis

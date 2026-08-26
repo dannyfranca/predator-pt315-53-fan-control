@@ -1324,13 +1324,16 @@ fn passing_baseline_with_cadence(cadence_millis: u64) -> fan_control_core::Evide
         sample.timestamp = timestamp((index as u64 + 1) * cadence_millis);
     }
     for fan in [EvidenceFan::Cpu, EvidenceFan::Gpu] {
-        let mut sample_index = 0;
-        for readback in record.readbacks.iter_mut().filter(|readback| {
-            readback.fan == fan
-                && readback.phase == Some(fan_control_core::FanReadbackPhase::Sample)
-        }) {
+        for (sample_index, readback) in record
+            .readbacks
+            .iter_mut()
+            .filter(|readback| {
+                readback.fan == fan
+                    && readback.phase == Some(fan_control_core::FanReadbackPhase::Sample)
+            })
+            .enumerate()
+        {
             readback.timestamp = timestamp((sample_index as u64 + 1) * cadence_millis);
-            sample_index += 1;
         }
     }
     record.completed_at = record.samples.last().unwrap().timestamp;
