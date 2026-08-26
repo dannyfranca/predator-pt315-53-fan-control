@@ -68,7 +68,7 @@
     },
     "calibration": {
       "type": "array",
-      "maxItems": 1,
+      "maxItems": 2,
       "items": { "$ref": "#/$defs/calibration" }
     },
     "thermal_summary": {
@@ -125,7 +125,25 @@
           }
         }
       },
-      "else": { "properties": { "calibration": { "maxItems": 0 } } }
+      "else": {
+        "if": {
+          "properties": { "stage": { "const": "matched-workload" } },
+          "required": ["stage"]
+        },
+        "then": {
+          "properties": {
+            "calibration": {
+              "minItems": 2,
+              "maxItems": 2,
+              "allOf": [
+                { "contains": { "properties": { "fan": { "const": "cpu" } }, "required": ["fan"] } },
+                { "contains": { "properties": { "fan": { "const": "gpu" } }, "required": ["fan"] } }
+              ]
+            }
+          }
+        },
+        "else": { "properties": { "calibration": { "maxItems": 0 } } }
+      }
     },
     {
       "if": {
@@ -616,13 +634,6 @@
               "enable_readback": { "const": 2 }
             }
           }
-        },
-        {
-          "if": {
-            "properties": { "outcome": { "const": "firmware-auto-unconfirmed" } },
-            "required": ["outcome"]
-          },
-          "then": { "properties": { "enable_readback": { "not": { "const": 2 } } } }
         }
       ]
     },

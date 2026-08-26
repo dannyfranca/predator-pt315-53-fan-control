@@ -698,9 +698,7 @@ impl EvidenceRecord {
             validate_timestamp(self, attempt.timestamp, "restoration_attempts", index)?;
             if attempt.enable_readback.is_some_and(|value| value > 2)
                 || matches!(attempt.outcome, RestorationOutcome::FirmwareAutoConfirmed)
-                    && attempt.enable_readback != Some(2)
-                || matches!(attempt.outcome, RestorationOutcome::FirmwareAutoUnconfirmed)
-                    && attempt.enable_readback == Some(2)
+                    && (attempt.enable_readback != Some(2) || !attempt.auto_write_succeeded)
             {
                 return Err(EvidenceValidationError::InvalidValue {
                     field: "restoration_attempts.enable_readback",
@@ -708,10 +706,23 @@ impl EvidenceRecord {
                 });
             }
         }
-        if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2
-            && ((self.stage == "fan-calibration" && self.calibration.len() != 1)
-                || (self.stage != "fan-calibration" && !self.calibration.is_empty()))
-        {
+        let calibration_count_is_valid = match self.stage.as_str() {
+            "fan-calibration" => self.calibration.len() == 1,
+            "matched-workload" => {
+                self.calibration.len() == 2
+                    && [crate::EvidenceFan::Cpu, crate::EvidenceFan::Gpu]
+                        .into_iter()
+                        .all(|fan| {
+                            self.calibration
+                                .iter()
+                                .filter(|calibration| calibration.fan == fan)
+                                .count()
+                                == 1
+                        })
+            }
+            _ => self.calibration.is_empty(),
+        };
+        if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2 && !calibration_count_is_valid {
             return Err(EvidenceValidationError::InvalidValue {
                 field: "calibration",
                 index: self.calibration.len(),
@@ -783,19 +794,21 @@ impl EvidenceRecord {
                         .and_then(|session| session.evidence().cloned())
                         .is_some_and(|derived| derived == *calibration);
                         replay_matches
-                            && calibration_checkpoint_is_bound_to_record(
-                                self,
-                                calibration.fan,
-                                checkpoint,
-                            )
+                            && (self.stage == "matched-workload"
+                                || calibration_checkpoint_is_bound_to_record(
+                                    self,
+                                    calibration.fan,
+                                    checkpoint,
+                                ))
                     });
             if !is_allowed_calibration_floor(calibration.floor_basis_points)
                 || !deadline_is_derived
                 || !checkpoint_matches
-                || !self
-                    .commands
-                    .iter()
-                    .any(|command| command.fan == calibration.fan)
+                || self.stage == "fan-calibration"
+                    && !self
+                        .commands
+                        .iter()
+                        .any(|command| command.fan == calibration.fan)
                 || !duties_match
                 || calibration
                     .anchors

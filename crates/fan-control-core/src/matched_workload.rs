@@ -22,6 +22,7 @@ pub const MINIMUM_MATCHED_WORKLOAD_SAMPLES: usize = 151;
 
 const SAMPLE_CADENCE_MILLIS: u64 = 2_000;
 const SAMPLE_CADENCE_JITTER_MILLIS: u64 = 100;
+const STARTING_CONDITIONS_TIMEOUT_MILLIS: u64 = 5_000;
 const CUSTOM_HANDOVER_TIMEOUT_MILLIS: u64 = 5_000;
 const WORKLOAD_START_TIMEOUT_MILLIS: u64 = 10_000;
 const WORKLOAD_STOP_TIMEOUT_MILLIS: u64 = 5_000;
@@ -95,6 +96,7 @@ pub trait MatchedWorkloadEnvironment {
 
     fn capture_starting_conditions(
         &mut self,
+        deadline_monotonic_millis: u64,
     ) -> Result<CapturedMatchedWorkloadStartingConditions, String>;
 
     /// Enters the already-admitted Custom-control path. An error is treated as an ambiguous
@@ -254,82 +256,98 @@ where
     let mut restoration_not_before = started_at;
     let mut lifecycle_not_before = started_at;
 
-    match environment.capture_starting_conditions() {
-        Ok(capture) => {
-            let callback_completed_at = environment.timestamp();
-            if callback_completed_at.monotonic_millis < started_at.monotonic_millis {
-                push_fault(
-                    &mut faults,
-                    started_at,
-                    "starting-conditions",
-                    "starting-condition capture completion time regressed",
-                );
-            } else if capture.captured_at.monotonic_millis < started_at.monotonic_millis
-                || capture.captured_at.monotonic_millis > callback_completed_at.monotonic_millis
-            {
-                push_fault(
-                    &mut faults,
-                    callback_completed_at,
-                    "starting-conditions",
-                    "starting-condition timestamp lies outside its capture window",
-                );
-            } else {
-                lifecycle_not_before = callback_completed_at;
-                starting_conditions_captured_at = Some(capture.captured_at);
-                workload.ambient_millicelsius = capture.conditions.ambient_millicelsius;
-                workload.starting_cpu_millicelsius = capture.conditions.cpu_millicelsius;
-                workload.starting_gpu_millicelsius = capture.conditions.gpu_millicelsius;
-                let safe_start = plausible_temperature(
-                    capture.conditions.ambient_millicelsius,
-                    MAX_PLAUSIBLE_AMBIENT_MILLICELSIUS,
-                ) && plausible_temperature(
-                    capture.conditions.cpu_millicelsius,
-                    MAX_PLAUSIBLE_COMPONENT_TEMPERATURE_MILLICELSIUS,
-                ) && plausible_temperature(
-                    capture.conditions.gpu_millicelsius,
-                    MAX_PLAUSIBLE_COMPONENT_TEMPERATURE_MILLICELSIUS,
-                ) && capture.conditions.cpu_millicelsius
-                    < CPU_ABSOLUTE_ABORT_MILLICELSIUS
-                    && capture.conditions.gpu_millicelsius < GPU_ABSOLUTE_ABORT_MILLICELSIUS;
-                if !safe_start {
+    let starting_conditions_deadline = checked_deadline(
+        started_at.monotonic_millis,
+        STARTING_CONDITIONS_TIMEOUT_MILLIS,
+        started_at,
+        "starting-conditions",
+        &mut faults,
+    );
+    if let Some(starting_conditions_deadline) = starting_conditions_deadline {
+        match environment.capture_starting_conditions(starting_conditions_deadline) {
+            Ok(capture) => {
+                let callback_completed_at = environment.timestamp();
+                if callback_completed_at.monotonic_millis < started_at.monotonic_millis {
                     push_fault(
                         &mut faults,
-                        capture.captured_at,
+                        started_at,
                         "starting-conditions",
-                        "measured temperatures are implausible or at an absolute abort limit",
+                        "starting-condition capture completion time regressed",
                     );
-                } else if capture.conditions.power_profile != baseline_workload.power_profile
-                    || capture
-                        .conditions
-                        .ambient_millicelsius
-                        .abs_diff(baseline_workload.ambient_millicelsius)
-                        > AMBIENT_COMPARABILITY_MILLICELSIUS as u32
-                    || capture
-                        .conditions
-                        .cpu_millicelsius
-                        .abs_diff(baseline_workload.starting_cpu_millicelsius)
-                        > STARTING_TEMPERATURE_COMPARABILITY_MILLICELSIUS as u32
-                    || capture
-                        .conditions
-                        .gpu_millicelsius
-                        .abs_diff(baseline_workload.starting_gpu_millicelsius)
-                        > STARTING_TEMPERATURE_COMPARABILITY_MILLICELSIUS as u32
+                } else if callback_completed_at.monotonic_millis > starting_conditions_deadline {
+                    push_fault(
+                        &mut faults,
+                        callback_completed_at,
+                        "starting-conditions",
+                        "starting-condition capture exceeded its deadline",
+                    );
+                } else if capture.captured_at.monotonic_millis < started_at.monotonic_millis
+                    || capture.captured_at.monotonic_millis > callback_completed_at.monotonic_millis
                 {
                     push_fault(
                         &mut faults,
-                        capture.captured_at,
-                        "starting-conditions-not-comparable",
-                        "ambient must be within 2 C and starting CPU/GPU within 3 C of baseline",
+                        callback_completed_at,
+                        "starting-conditions",
+                        "starting-condition timestamp lies outside its capture window",
                     );
+                } else {
+                    lifecycle_not_before = callback_completed_at;
+                    starting_conditions_captured_at = Some(capture.captured_at);
+                    workload.ambient_millicelsius = capture.conditions.ambient_millicelsius;
+                    workload.starting_cpu_millicelsius = capture.conditions.cpu_millicelsius;
+                    workload.starting_gpu_millicelsius = capture.conditions.gpu_millicelsius;
+                    let safe_start = plausible_temperature(
+                        capture.conditions.ambient_millicelsius,
+                        MAX_PLAUSIBLE_AMBIENT_MILLICELSIUS,
+                    ) && plausible_temperature(
+                        capture.conditions.cpu_millicelsius,
+                        MAX_PLAUSIBLE_COMPONENT_TEMPERATURE_MILLICELSIUS,
+                    ) && plausible_temperature(
+                        capture.conditions.gpu_millicelsius,
+                        MAX_PLAUSIBLE_COMPONENT_TEMPERATURE_MILLICELSIUS,
+                    ) && capture.conditions.cpu_millicelsius
+                        < CPU_ABSOLUTE_ABORT_MILLICELSIUS
+                        && capture.conditions.gpu_millicelsius < GPU_ABSOLUTE_ABORT_MILLICELSIUS;
+                    if !safe_start {
+                        push_fault(
+                            &mut faults,
+                            capture.captured_at,
+                            "starting-conditions",
+                            "measured temperatures are implausible or at an absolute abort limit",
+                        );
+                    } else if capture.conditions.power_profile != baseline_workload.power_profile
+                        || capture
+                            .conditions
+                            .ambient_millicelsius
+                            .abs_diff(baseline_workload.ambient_millicelsius)
+                            > AMBIENT_COMPARABILITY_MILLICELSIUS as u32
+                        || capture
+                            .conditions
+                            .cpu_millicelsius
+                            .abs_diff(baseline_workload.starting_cpu_millicelsius)
+                            > STARTING_TEMPERATURE_COMPARABILITY_MILLICELSIUS as u32
+                        || capture
+                            .conditions
+                            .gpu_millicelsius
+                            .abs_diff(baseline_workload.starting_gpu_millicelsius)
+                            > STARTING_TEMPERATURE_COMPARABILITY_MILLICELSIUS as u32
+                    {
+                        push_fault(
+                            &mut faults,
+                            capture.captured_at,
+                            "starting-conditions-not-comparable",
+                            "ambient must be within 2 C and starting CPU/GPU within 3 C of baseline",
+                        );
+                    }
                 }
             }
+            Err(error) => push_fault(
+                &mut faults,
+                environment.timestamp(),
+                "starting-conditions",
+                format!("cannot capture starting conditions: {error}"),
+            ),
         }
-        Err(error) => push_fault(
-            &mut faults,
-            environment.timestamp(),
-            "starting-conditions",
-            format!("cannot capture starting conditions: {error}"),
-        ),
     }
 
     if faults.is_empty() {
@@ -720,12 +738,20 @@ where
                 && restoration.enable_readback == Some(2)
                 && identity_matches
                 && timing_confirmed;
+            let normalized_outcome = if restoration.outcome
+                == RestorationOutcome::FirmwareAutoConfirmed
+                && (!restoration.auto_write_succeeded || restoration.enable_readback != Some(2))
+            {
+                RestorationOutcome::FirmwareAutoUnconfirmed
+            } else {
+                restoration.outcome
+            };
             restoration_attempts.push(RestorationAttemptEvidence {
                 timestamp,
                 fan,
                 auto_write_succeeded: restoration.auto_write_succeeded,
                 enable_readback: restoration.enable_readback,
-                outcome: restoration.outcome,
+                outcome: normalized_outcome,
             });
             readbacks.push(FanReadbackEvidence {
                 timestamp,
@@ -832,7 +858,10 @@ where
         state_transitions,
         faults,
         restoration_attempts,
-        calibration: vec![],
+        calibration: vec![
+            calibration_for_fan(plan.tachometer_calibrations, EvidenceFan::Cpu).clone(),
+            calibration_for_fan(plan.tachometer_calibrations, EvidenceFan::Gpu).clone(),
+        ],
         thermal_summary: Some(thermal_summary),
         outcome: RunOutcomeEvidence {
             status: if accepted {
@@ -1087,7 +1116,7 @@ pub(crate) fn matched_workload_is_complete(record: &EvidenceRecord) -> bool {
         && transitions_are_complete
         && summary_matches
         && record.faults.is_empty()
-        && record.calibration.is_empty()
+        && matched_workload_matches_embedded_calibrations(record)
 }
 
 fn matched_fan_evidence_is_complete(record: &EvidenceRecord, fan: EvidenceFan) -> bool {
@@ -1230,6 +1259,33 @@ fn matched_workload_matches_calibrations(
     record: &EvidenceRecord,
     calibrations: MatchedWorkloadTachometerCalibrations<'_>,
 ) -> bool {
+    let cpu = calibration_for_fan(calibrations, EvidenceFan::Cpu);
+    let gpu = calibration_for_fan(calibrations, EvidenceFan::Gpu);
+    record.calibration.iter().any(|candidate| candidate == cpu)
+        && record.calibration.iter().any(|candidate| candidate == gpu)
+        && matched_workload_matches_calibration_evidence(record, cpu, gpu)
+}
+
+fn matched_workload_matches_embedded_calibrations(record: &EvidenceRecord) -> bool {
+    let cpu = record
+        .calibration
+        .iter()
+        .find(|calibration| calibration.fan == EvidenceFan::Cpu);
+    let gpu = record
+        .calibration
+        .iter()
+        .find(|calibration| calibration.fan == EvidenceFan::Gpu);
+    cpu.zip(gpu).is_some_and(|(cpu, gpu)| {
+        record.calibration.len() == 2
+            && matched_workload_matches_calibration_evidence(record, cpu, gpu)
+    })
+}
+
+fn matched_workload_matches_calibration_evidence(
+    record: &EvidenceRecord,
+    cpu: &FanCalibrationEvidence,
+    gpu: &FanCalibrationEvidence,
+) -> bool {
     let mut state = TachometerEvidenceState::default();
     let samples_are_valid = record.samples.iter().all(|sample| {
         [EvidenceFan::Cpu, EvidenceFan::Gpu].into_iter().all(|fan| {
@@ -1238,7 +1294,10 @@ fn matched_workload_matches_calibrations(
                 &record.commands,
                 &record.readbacks,
                 fan,
-                calibration_for_fan(calibrations, fan),
+                match fan {
+                    EvidenceFan::Cpu => cpu,
+                    EvidenceFan::Gpu => gpu,
+                },
                 state_for_fan(&mut state, fan),
             )
             .is_ok()
@@ -1565,6 +1624,7 @@ fn evaluate_tachometer_sample(
         Some(command_state) if command_state.pwm == pwm => command_state,
         Some(command_state) if !command_state.settled => {
             command_state.pwm = pwm;
+            command_state.confirmed_at_millis = pwm_readback.timestamp.monotonic_millis;
             command_state
         }
         _ => state.insert(TachometerCommandState {
@@ -1630,10 +1690,8 @@ fn sanitize_control_evidence(
     observation.commands.retain(|command| {
         command.timestamp.monotonic_millis >= run_started_at.monotonic_millis
             && command.timestamp.monotonic_millis <= captured_at.monotonic_millis
-            && match command.field {
-                FanControlField::Pwm => command.value <= 255,
-                FanControlField::Enable => command.value <= 2,
-            }
+            && command.field == FanControlField::Pwm
+            && command.value <= 255
     });
     let readback_count = observation.readbacks.len();
     observation.readbacks.retain(|readback| {

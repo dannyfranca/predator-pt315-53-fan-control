@@ -296,6 +296,39 @@ fn transient_zero_rpm_is_allowed_within_a_reissued_commands_response_window() {
 }
 
 #[test]
+fn a_new_confirmed_pwm_gets_its_own_tachometer_response_window() {
+    let baseline = passing_baseline();
+    let mut observations = passing_custom_observations();
+    for observation in &mut observations[..5] {
+        for command in &mut observation.commands {
+            command.value = 200;
+        }
+        for readback in &mut observation.readbacks {
+            match readback.field {
+                FanReadbackField::Pwm => readback.value = Some(200),
+                FanReadbackField::Rpm => readback.value = Some(0),
+                FanReadbackField::Enable => {}
+            }
+        }
+    }
+    for observation in &mut observations[3..5] {
+        for command in &mut observation.commands {
+            command.value = 128;
+        }
+        for readback in &mut observation.readbacks {
+            if readback.field == FanReadbackField::Pwm {
+                readback.value = Some(128);
+            }
+        }
+    }
+    let mut environment = CustomEnvironment::new(observations);
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(report.accepted(), "{:#?}", report.record());
+}
+
+#[test]
 fn changing_pwm_cannot_extend_an_unsettled_response_forever() {
     let baseline = passing_baseline();
     let mut observations = passing_custom_observations();
@@ -324,7 +357,26 @@ fn changing_pwm_cannot_extend_an_unsettled_response_forever() {
             .iter()
             .any(|fault| fault.code == "fan-feedback-loss")
     );
-    assert!(report.record().samples.len() < baseline.samples.len());
+    assert_eq!(report.record().samples.len(), baseline.samples.len());
+}
+
+#[test]
+fn unexpected_enable_commands_produce_a_failed_record() {
+    let baseline = passing_baseline();
+    let mut observations = passing_custom_observations();
+    let mut enable = observations[0].commands[0].clone();
+    enable.field = FanControlField::Enable;
+    enable.value = 1;
+    observations[0].commands.push(enable);
+    let mut environment = CustomEnvironment::new(observations);
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(!report.accepted());
+    assert!(report.record().faults.iter().any(|fault| {
+        fault.code == "invalid-control-evidence" && fault.detail.contains("malformed")
+    }));
+    assert!(report.record().validate().is_ok());
 }
 
 #[test]
@@ -339,6 +391,17 @@ fn matched_workload_evidence_round_trips_and_requires_a_valid_baseline_binding()
 
     assert_eq!(parse_evidence_v2(&source).unwrap(), record);
     assert!(validator.is_valid(&value));
+    assert_eq!(record.calibration.len(), 2);
+
+    let mut invalid_rpm = value.clone();
+    let readbacks = invalid_rpm["readbacks"].as_array_mut().unwrap();
+    let settled_rpm = readbacks
+        .iter_mut()
+        .rev()
+        .find(|readback| readback["field"] == "rpm")
+        .unwrap();
+    settled_rpm["value"] = 0.into();
+    assert!(parse_evidence_v2(&invalid_rpm.to_string()).is_err());
 
     let mut missing = value.clone();
     missing
@@ -397,6 +460,24 @@ fn starting_conditions_must_match_ambient_cpu_gpu_and_profile_before_custom_cont
         );
         assert!(report.record().validate().is_ok());
     }
+}
+
+#[test]
+fn late_starting_condition_capture_never_enters_custom_control() {
+    let baseline = passing_baseline();
+    let mut environment = CustomEnvironment::new(passing_custom_observations());
+    environment.failure = Some(CallbackFailure::LateConditions);
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(!report.accepted());
+    assert_eq!(environment.events, ["conditions"]);
+    assert!(
+        report.record().faults.iter().any(|fault| {
+            fault.code == "starting-conditions" && fault.detail.contains("deadline")
+        })
+    );
+    assert!(report.record().validate().is_ok());
 }
 
 #[test]
@@ -783,7 +864,15 @@ fn unsuccessful_auto_write_cannot_be_reported_as_restored() {
         &environment.events[environment.events.len() - 3..],
         ["stop", "restore-cpu", "restore-gpu"]
     );
+    assert_eq!(
+        report.record().restoration_attempts[0].outcome,
+        RestorationOutcome::FirmwareAutoUnconfirmed
+    );
     assert!(report.record().validate().is_ok());
+    let value = serde_json::to_value(report.record()).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA_V2).unwrap();
+    assert!(jsonschema::validator_for(&schema).unwrap().is_valid(&value));
+    assert!(parse_evidence_v2(&value.to_string()).is_ok());
 }
 
 #[test]
@@ -1071,7 +1160,7 @@ fn prior_run_with_unsettled_final_tachometer_response_gets_no_repeat_credit() {
         })
         .unwrap()
         .value = Some(0);
-    assert!(prior.validate().is_ok());
+    assert!(prior.validate().is_err());
     let previous = [&prior];
     let mut environment = CustomEnvironment::new(passing_custom_observations());
 
@@ -1562,6 +1651,7 @@ struct CustomEnvironment {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallbackFailure {
+    LateConditions,
     Entry,
     LateEntry,
     RollbackEntry,
@@ -1616,8 +1706,12 @@ impl MatchedWorkloadEnvironment for CustomEnvironment {
 
     fn capture_starting_conditions(
         &mut self,
+        deadline_monotonic_millis: u64,
     ) -> Result<CapturedMatchedWorkloadStartingConditions, String> {
         self.events.push("conditions");
+        if self.failure == Some(CallbackFailure::LateConditions) {
+            self.now = deadline_monotonic_millis.saturating_add(1);
+        }
         Ok(CapturedMatchedWorkloadStartingConditions {
             conditions: self.conditions,
             captured_at: timestamp(self.now),
