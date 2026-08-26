@@ -12,6 +12,7 @@ use std::{
 use fan_control_core::{ServiceNotification, ServiceNotifier, SystemdNotifier};
 
 const UNIT: &str = include_str!("../../../systemd/pt31553-fan-sleep-guard.service");
+const DAEMON_UNIT: &str = include_str!("../../../systemd/pt31553-fand.service");
 const PROBE_LOG: &str = "PT31553_SLEEP_PROBE_LOG";
 const PROBE_READY_BLOCK: &str = "PT31553_SLEEP_PROBE_READY_BLOCK";
 const PROBE_READY_DELAY: &str = "PT31553_SLEEP_PROBE_READY_DELAY";
@@ -22,12 +23,17 @@ const SLEEP_HELPER: &str = "PT31553_SLEEP_HELPER";
 #[test]
 fn sleep_guard_is_a_required_gate_for_every_systemd_sleep_transaction() {
     let directives = parse_unit(UNIT);
+    let daemon_directives = parse_unit(DAEMON_UNIT);
 
     assert_eq!(directives["Unit"]["Before"], "sleep.target");
     assert_eq!(directives["Unit"]["StopWhenUnneeded"], "yes");
     assert!(!directives["Unit"].contains_key("After"));
     assert_eq!(directives["Install"]["RequiredBy"], "sleep.target");
     assert!(!directives["Install"].contains_key("WantedBy"));
+    assert_eq!(
+        daemon_directives["Unit"]["ConditionPathExists"],
+        "!/run/pt31553-fan-sleep-guard/resume-daemon-start-blocked"
+    );
 }
 
 #[test]
@@ -69,7 +75,6 @@ fn actual_systemd_manager_blocks_sleep_failure_and_restarts_fresh_after_resume()
     assert_actual_sleep_lifecycle(LifecycleCase::RestorationFailure);
     assert_actual_sleep_lifecycle(LifecycleCase::ReadinessFailure);
     assert_actual_sleep_lifecycle(LifecycleCase::TransitioningIntervention);
-    assert_actual_sleep_lifecycle(LifecycleCase::StoppedIntervention);
 }
 
 #[test]
@@ -107,7 +112,6 @@ enum LifecycleCase {
     RestorationFailure,
     ReadinessFailure,
     TransitioningIntervention,
-    StoppedIntervention,
 }
 
 fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
@@ -120,7 +124,6 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
             LifecycleCase::RestorationFailure => "restore-fail",
             LifecycleCase::ReadinessFailure => "ready-fail",
             LifecycleCase::TransitioningIntervention => "transitioning",
-            LifecycleCase::StoppedIntervention => "stopped-intervention",
         }
     );
     let daemon_name = format!("pt31553-sleep-test-daemon-{suffix}.service");
@@ -158,7 +161,11 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
     };
     let runtime_directory = format!("pt31553-sleep-test-{suffix}");
     let marker = format!("/run/{runtime_directory}/resume-daemon");
+    let prepared_marker = format!("/run/{runtime_directory}/resume-daemon-prepared");
+    let start_gate = format!("/run/{runtime_directory}/resume-daemon-start-blocked");
     installation.remove_after(Path::new(&marker));
+    installation.remove_after(Path::new(&prepared_marker));
+    installation.remove_after(Path::new(&start_gate));
     installation.remove_runtime_directory_after(Path::new("/run").join(&runtime_directory));
     let helper = |command: &str, recovery: Option<&str>, event: Option<&str>| {
         let recovery = recovery
@@ -178,7 +185,7 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
     installation.install(
         &daemon_name,
         &format!(
-            "[Unit]\nStartLimitIntervalSec=infinity\nStartLimitBurst=2\n\n[Service]\nType=notify\nNotifyAccess=main\nExecStart={}\nExecStopPost={}\nTimeoutStartSec=3s\nTimeoutStopSec=infinity\n",
+            "[Unit]\nStartLimitIntervalSec=infinity\nStartLimitBurst=2\nConditionPathExists=!{start_gate}\n\n[Service]\nType=notify\nNotifyAccess=main\nExecStart={}\nExecStopPost={}\nTimeoutStartSec=3s\nTimeoutStopSec=infinity\n",
             probe("daemon-ready"),
             helper("--restore", Some("auto-confirmed"), Some("daemon-cleanup"))
         ),
@@ -232,6 +239,27 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
     systemctl(["daemon-reload"]);
     assert!(systemctl_status(["start", &daemon_name]).success());
 
+    if case == LifecycleCase::TransitioningIntervention {
+        fs::write(&ready_delay, "delay readiness").unwrap();
+        let mut intervening_start = systemctl_command(["restart", &daemon_name])
+            .spawn()
+            .unwrap();
+        wait_for_state(&daemon_name, "activating");
+        let target_start = systemctl_status(["start", &target_name]);
+        assert!(target_start.success());
+        fs::remove_file(&ready_delay).unwrap();
+        let _ = intervening_start.wait();
+        assert_eq!(active_state(&guard_name), "active");
+        assert_eq!(active_state(&daemon_name), "inactive");
+        assert!(!Path::new(&marker).exists());
+        assert!(Path::new(&start_gate).is_file());
+        systemctl(["stop", &target_name]);
+        wait_for_state(&guard_name, "inactive");
+        assert_eq!(active_state(&daemon_name), "inactive");
+        assert!(!Path::new(&start_gate).exists());
+        return;
+    }
+
     if !restoration_succeeds {
         let mut target_start = systemctl_command(["start", &target_name]).spawn().unwrap();
         wait_for_log(&log, "guard-containment");
@@ -258,33 +286,7 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
             Path::new(&marker).is_file(),
             "failed daemon readiness must preserve resume authorization for retry"
         );
-        return;
-    }
-
-    if case == LifecycleCase::TransitioningIntervention {
-        fs::write(&ready_delay, "delay readiness").unwrap();
-        let mut intervening_start = systemctl_command(["start", &daemon_name]).spawn().unwrap();
-        wait_for_state(&daemon_name, "activating");
-        fs::remove_file(&ready_delay).unwrap();
-        let _ = systemctl_status(["stop", &target_name]);
-        let _ = intervening_start.wait();
-        wait_for_state(&guard_name, "failed");
-        wait_for_state(&daemon_name, "failed");
-        assert_eq!(unit_property(&daemon_name, "Result"), "start-limit-hit");
-        assert!(Path::new(&marker).is_file());
-        return;
-    }
-
-    if case == LifecycleCase::StoppedIntervention {
-        systemctl(["start", &daemon_name]);
-        systemctl(["stop", &daemon_name]);
-        let _ = systemctl_status(["stop", &target_name]);
-        wait_for_state(&guard_name, "failed");
-        assert_eq!(active_state(&daemon_name), "inactive");
-        assert!(Path::new(&marker).is_file());
-        assert!(!systemctl_status(["start", &daemon_name]).success());
-        wait_for_state(&daemon_name, "failed");
-        assert_eq!(unit_property(&daemon_name, "Result"), "start-limit-hit");
+        assert!(Path::new(&start_gate).is_file());
         return;
     }
 

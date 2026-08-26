@@ -7,6 +7,8 @@ use std::{
 const DAEMON_UNIT: &str = "pt31553-fand.service";
 const MARKER_PREFIX: &str = "resume:";
 const PREPARED_MARKER_CONTENT: &[u8] = b"firmware-auto-confirmed\n";
+const RESUME_COMPLETED_CONTENT: &[u8] = b"resume-completed\n";
+const START_GATE_CONTENT: &[u8] = b"sleep-transaction\n";
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 
 #[derive(Debug, Eq, PartialEq)]
@@ -26,8 +28,8 @@ pub(crate) enum PlannedStop {
 pub(crate) trait DaemonManager {
     fn active_state(&mut self) -> io::Result<DaemonActiveState>;
     fn invocation_id(&mut self) -> io::Result<String>;
+    fn reset_planned_state(&mut self, invocation: &str) -> io::Result<()>;
     fn stop(&mut self) -> io::Result<PlannedStop>;
-    fn reset_failed(&mut self) -> io::Result<()>;
     fn restart_ready(&mut self) -> io::Result<()>;
 }
 
@@ -65,8 +67,17 @@ impl DaemonManager for SystemdDaemonManager {
         }
     }
 
-    fn reset_failed(&mut self) -> io::Result<()> {
-        systemctl(&["reset-failed", &daemon_unit()])
+    fn reset_planned_state(&mut self, invocation: &str) -> io::Result<()> {
+        let unit = daemon_unit();
+        systemctl(&["reset-failed", &unit])?;
+        let state = self.active_state()?;
+        let observed = self.invocation_id()?;
+        if state == DaemonActiveState::Active && observed == invocation {
+            return Ok(());
+        }
+        Err(io::Error::other(format!(
+            "{unit} changed while resetting the planned invocation"
+        )))
     }
 
     fn restart_ready(&mut self) -> io::Result<()> {
@@ -82,10 +93,14 @@ pub(crate) fn prepare_sleep(
 ) -> io::Result<()> {
     clear_marker(marker)?;
     clear_marker(prepared_marker)?;
+    let start_gate = start_gate_marker(prepared_marker);
+    clear_marker(&start_gate)?;
+    fs::write(&start_gate, START_GATE_CONTENT)?;
     let planned_invocation = match manager.active_state()? {
         DaemonActiveState::Active => {
             let invocation = manager.invocation_id()?;
             validate_invocation_id(&invocation)?;
+            manager.reset_planned_state(&invocation)?;
             (manager.stop()? == PlannedStop::Clean).then_some(invocation)
         }
         DaemonActiveState::Transitioning => {
@@ -107,10 +122,22 @@ pub(crate) fn restore_after_failed_guard(
     prepared_marker: &Path,
     restore: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
+    let start_gate = start_gate_marker(prepared_marker);
     match fs::read(prepared_marker) {
-        Ok(content) if content == PREPARED_MARKER_CONTENT => fs::remove_file(prepared_marker),
-        Ok(_) => restore(),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => restore(),
+        Ok(content) if content == RESUME_COMPLETED_CONTENT => {
+            fs::remove_file(prepared_marker)?;
+            clear_marker(&start_gate)
+        }
+        Ok(content) if content == PREPARED_MARKER_CONTENT => restore(),
+        Ok(_) => {
+            restore()?;
+            clear_marker(prepared_marker)?;
+            clear_marker(&start_gate)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            restore()?;
+            clear_marker(&start_gate)
+        }
         Err(error) => {
             restore()?;
             Err(error)
@@ -122,17 +149,22 @@ pub(crate) fn resume_after_sleep(
     manager: &mut impl DaemonManager,
     marker: &Path,
 ) -> io::Result<()> {
+    let start_gate = start_gate_marker(marker);
+    let prepared_marker = prepared_marker(marker);
     let planned_invocation = match fs::read_to_string(marker) {
         Ok(content) => parse_resume_marker(&content)?.to_owned(),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            clear_marker(&start_gate)?;
+            return Ok(());
+        }
         Err(error) => return Err(error),
     };
 
-    let reset_planned_state = match manager.active_state()? {
+    match manager.active_state()? {
         DaemonActiveState::Inactive => {
             let observed = manager.invocation_id()?;
             if observed.is_empty() {
-                false
+                // Garbage collection already discarded the planned invocation's state.
             } else {
                 validate_invocation_id(&observed)?;
                 if observed != planned_invocation {
@@ -140,7 +172,6 @@ pub(crate) fn resume_after_sleep(
                         "daemon invocation changed after sleep preparation; preserving its state",
                     ));
                 }
-                true
             }
         }
         DaemonActiveState::Failed => {
@@ -154,16 +185,55 @@ pub(crate) fn resume_after_sleep(
                     "intervening daemon did not complete a clean stop",
                 ));
             }
-            false
         }
-    };
-    if reset_planned_state {
-        manager.reset_failed()?;
     }
     // Restart is deliberate: if another start races resume, systemd must still replace that
     // process rather than accepting it as the fresh post-sleep controller.
-    manager.restart_ready()?;
-    fs::remove_file(marker)
+    clear_marker(&start_gate)?;
+    if let Err(error) = manager.restart_ready() {
+        fs::write(&start_gate, START_GATE_CONTENT)?;
+        return Err(error);
+    }
+    if let Err(error) = fs::remove_file(marker) {
+        return contain_failed_resume(manager, &start_gate, &prepared_marker, error);
+    }
+    if let Err(error) = fs::write(&prepared_marker, RESUME_COMPLETED_CONTENT) {
+        return contain_failed_resume(manager, &start_gate, &prepared_marker, error);
+    }
+    Ok(())
+}
+
+fn contain_failed_resume(
+    manager: &mut impl DaemonManager,
+    start_gate: &Path,
+    prepared_marker: &Path,
+    error: io::Error,
+) -> io::Result<()> {
+    let stop = manager.stop();
+    let prepared = fs::write(prepared_marker, PREPARED_MARKER_CONTENT);
+    let gate = fs::write(start_gate, START_GATE_CONTENT);
+    stop?;
+    prepared?;
+    gate?;
+    Err(error)
+}
+
+fn prepared_marker(marker: &Path) -> std::path::PathBuf {
+    let name = marker
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("resume-daemon");
+    let base = name.strip_suffix("-prepared").unwrap_or(name);
+    marker.with_file_name(format!("{base}-prepared"))
+}
+
+fn start_gate_marker(marker: &Path) -> std::path::PathBuf {
+    let name = marker
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("resume-daemon");
+    let base = name.strip_suffix("-prepared").unwrap_or(name);
+    marker.with_file_name(format!("{base}-start-blocked"))
 }
 
 fn parse_resume_marker(content: &str) -> io::Result<&str> {
@@ -276,8 +346,8 @@ mod tests {
             self.stop_result.take().unwrap_or(Ok(PlannedStop::Clean))
         }
 
-        fn reset_failed(&mut self) -> io::Result<()> {
-            self.calls.borrow_mut().push("reset-failed");
+        fn reset_planned_state(&mut self, _invocation: &str) -> io::Result<()> {
+            self.calls.borrow_mut().push("reset-planned");
             Ok(())
         }
 
@@ -304,7 +374,7 @@ mod tests {
 
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "invocation-id", "stop", "restore"]
+            &["state", "invocation-id", "reset-planned", "stop", "restore"]
         );
         assert!(marker.is_file());
         assert!(prepared_marker.is_file());
@@ -315,11 +385,11 @@ mod tests {
             &[
                 "state",
                 "invocation-id",
+                "reset-planned",
                 "stop",
                 "restore",
                 "state",
                 "invocation-id",
-                "reset-failed",
                 "restart"
             ]
         );
@@ -384,10 +454,14 @@ mod tests {
         assert!(error.to_string().contains("both fans did not confirm Auto"));
         assert!(!marker.exists());
         assert!(!prepared_marker.exists());
+        assert!(super::start_gate_marker(&marker).is_file());
+        restore_after_failed_guard(&prepared_marker, || Ok(())).unwrap();
+        assert!(!prepared_marker.exists());
+        assert!(!super::start_gate_marker(&marker).exists());
         resume_after_sleep(&mut manager, &marker).unwrap();
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "invocation-id", "stop"]
+            &["state", "invocation-id", "reset-planned", "stop"]
         );
     }
 
@@ -411,24 +485,24 @@ mod tests {
             [
                 "state",
                 "invocation-id",
+                "reset-planned",
                 "stop",
                 "state",
                 "invocation-id",
-                "reset-failed",
                 "restart",
                 "state",
                 "invocation-id",
+                "reset-planned",
                 "stop",
                 "state",
                 "invocation-id",
-                "reset-failed",
                 "restart",
                 "state",
                 "invocation-id",
+                "reset-planned",
                 "stop",
                 "state",
                 "invocation-id",
-                "reset-failed",
                 "restart",
             ]
         );
@@ -446,6 +520,29 @@ mod tests {
 
         assert!(resume_after_sleep(&mut manager, &marker).is_err());
         assert!(marker.is_file());
+        assert!(super::start_gate_marker(&marker).is_file());
+        assert_eq!(
+            &*manager.calls.borrow(),
+            &[
+                "state",
+                "invocation-id",
+                "reset-planned",
+                "stop",
+                "state",
+                "invocation-id",
+                "restart"
+            ]
+        );
+        let recovery_calls = Rc::new(RefCell::new(Vec::new()));
+        let stop_post_calls = Rc::clone(&recovery_calls);
+        restore_after_failed_guard(&prepared_marker, move || {
+            stop_post_calls.borrow_mut().push("restore");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(&*recovery_calls.borrow(), &["restore"]);
+        assert!(prepared_marker.is_file());
+        assert!(super::start_gate_marker(&marker).is_file());
     }
 
     #[test]
@@ -462,7 +559,7 @@ mod tests {
 
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "invocation-id", "stop"]
+            &["state", "invocation-id", "reset-planned", "stop"]
         );
         assert!(!marker.exists());
     }
@@ -481,7 +578,15 @@ mod tests {
 
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "invocation-id", "stop", "state", "stop", "restart"]
+            &[
+                "state",
+                "invocation-id",
+                "reset-planned",
+                "stop",
+                "state",
+                "stop",
+                "restart"
+            ]
         );
         assert!(!marker.exists());
     }
@@ -500,7 +605,7 @@ mod tests {
 
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "invocation-id", "stop", "state"]
+            &["state", "invocation-id", "reset-planned", "stop", "state"]
         );
         assert!(marker.is_file());
     }
@@ -521,10 +626,10 @@ mod tests {
     }
 
     #[test]
-    fn completed_guard_does_not_repeat_recovery_during_normal_resume() {
+    fn completed_resume_does_not_repeat_recovery_during_stop_post() {
         let prepared_marker = marker_path("completed-prepared");
         let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
-        fs::write(&prepared_marker, super::PREPARED_MARKER_CONTENT).unwrap();
+        fs::write(&prepared_marker, super::RESUME_COMPLETED_CONTENT).unwrap();
         let calls = Rc::new(RefCell::new(Vec::new()));
         let successful_calls = Rc::clone(&calls);
         restore_after_failed_guard(&prepared_marker, move || {
@@ -551,7 +656,15 @@ mod tests {
 
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "invocation-id", "stop", "state", "stop", "restart"]
+            &[
+                "state",
+                "invocation-id",
+                "reset-planned",
+                "stop",
+                "state",
+                "stop",
+                "restart"
+            ]
         );
     }
 
@@ -570,7 +683,14 @@ mod tests {
 
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "invocation-id", "stop", "state", "invocation-id"]
+            &[
+                "state",
+                "invocation-id",
+                "reset-planned",
+                "stop",
+                "state",
+                "invocation-id"
+            ]
         );
         assert!(marker.is_file());
     }
@@ -593,6 +713,7 @@ mod tests {
             &[
                 "state",
                 "invocation-id",
+                "reset-planned",
                 "stop",
                 "state",
                 "invocation-id",
@@ -641,6 +762,7 @@ mod tests {
     impl Drop for MarkerCleanup {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
+            let _ = fs::remove_file(super::start_gate_marker(&self.0));
         }
     }
 }

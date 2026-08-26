@@ -122,7 +122,7 @@ fn sleep_resume_marker() -> PathBuf {
 }
 
 fn sleep_prepared_marker(resume_marker: &Path) -> PathBuf {
-    resume_marker.with_file_name("prepared")
+    resume_marker.with_file_name("resume-daemon-prepared")
 }
 
 #[cfg(feature = "systemd-test-probes")]

@@ -4,6 +4,8 @@ Description=PT315-53 automatic fan controller
 # failed until an operator explicitly resets it.
 StartLimitIntervalSec=infinity
 StartLimitBurst=2
+# The sleep guard owns this gate from preparation through the authorized resume start.
+ConditionPathExists=!/run/pt31553-fan-sleep-guard/resume-daemon-start-blocked
 
 [Service]
 Type=notify
