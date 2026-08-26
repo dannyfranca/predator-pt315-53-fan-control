@@ -6,6 +6,7 @@ mod acer_hwmon;
 mod arming;
 mod authority;
 mod baseline;
+mod calibration;
 mod compatibility;
 mod config;
 mod control_cycle;
@@ -43,6 +44,12 @@ pub use baseline::{
     FirmwareAutoBaselineAccess, FirmwareAutoBaselineEnvironment, FirmwareAutoBaselinePlan,
     FirmwareAutoBaselinePlanError, FirmwareAutoBaselineReport, GPU_ABSOLUTE_ABORT_MILLICELSIUS,
     run_firmware_auto_baseline,
+};
+pub use calibration::{
+    CalibrationCheckpoint, CalibrationEvidenceWriteError, CalibrationLevelObservation,
+    CalibrationObservationError, CalibrationReadbackSample, CalibrationStep,
+    ConservativeFanCalibration, FanHoldObservation, MAXIMUM_CALIBRATION_RESPONSE_MILLIS,
+    REQUIRED_FLOOR_HOLD_MILLIS, REQUIRED_MAXIMUM_TO_FLOOR_TRANSITIONS,
 };
 pub use compatibility::{
     AdmittedCompatibility, CompatibilityAdmissionError, CompatibilityDeclarationError,

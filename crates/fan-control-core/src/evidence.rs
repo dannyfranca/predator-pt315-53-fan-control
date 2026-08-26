@@ -13,7 +13,14 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser, ser::SerializeStruct};
 
-use crate::{CompatibilityDeclarationV1, compatibility::validate_declaration};
+use crate::{
+    CompatibilityDeclarationV1,
+    calibration::{
+        calibration_response_deadline, canonical_calibration_anchor_duties,
+        is_allowed_calibration_floor,
+    },
+    compatibility::validate_declaration,
+};
 
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 pub const EVIDENCE_SCHEMA_VERSION_V2: u32 = 2;
@@ -333,6 +340,10 @@ pub enum RestorationOutcome {
 pub struct FanCalibrationEvidence {
     pub fan: EvidenceFan,
     pub floor_basis_points: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slowest_response_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_checkpoint: Option<crate::CalibrationCheckpoint>,
     pub response_deadline_millis: u64,
     pub anchors: Vec<RpmAnchorEvidence>,
 }
@@ -669,6 +680,24 @@ impl EvidenceRecord {
                 });
             }
         }
+        if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2
+            && ((self.stage == "fan-calibration" && self.calibration.len() != 1)
+                || (self.stage != "fan-calibration" && !self.calibration.is_empty()))
+        {
+            return Err(EvidenceValidationError::InvalidValue {
+                field: "calibration",
+                index: self.calibration.len(),
+            });
+        }
+        if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2
+            && self.stage == "fan-calibration"
+            && self.outcome.status != RunOutcomeStatus::Passed
+        {
+            return Err(EvidenceValidationError::InvalidValue {
+                field: "outcome.status",
+                index: 0,
+            });
+        }
         for (index, calibration) in self.calibration.iter().enumerate() {
             if calibration.floor_basis_points > 10_000
                 || calibration.anchors.is_empty()
@@ -676,6 +705,85 @@ impl EvidenceRecord {
                     .anchors
                     .iter()
                     .any(|anchor| anchor.duty_basis_points > 10_000)
+            {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "calibration",
+                    index,
+                });
+            }
+            if self.schema_version != EVIDENCE_SCHEMA_VERSION_V2 {
+                if calibration.slowest_response_millis.is_some()
+                    || calibration.protocol_checkpoint.is_some()
+                {
+                    return Err(EvidenceValidationError::InvalidValue {
+                        field: "calibration",
+                        index,
+                    });
+                }
+                continue;
+            }
+            let anchors_are_ordered = calibration.anchors.windows(2).all(|anchors| {
+                anchors[0].duty_basis_points < anchors[1].duty_basis_points
+                    && anchors[0].median_rpm <= anchors[1].median_rpm
+            });
+            let canonical_anchor_duties =
+                canonical_calibration_anchor_duties(calibration.floor_basis_points);
+            let duties_match = calibration
+                .anchors
+                .iter()
+                .map(|anchor| anchor.duty_basis_points)
+                .eq(canonical_anchor_duties.iter().copied());
+            let deadline_is_derived = calibration.slowest_response_millis.is_some_and(|slowest| {
+                (1_000..=crate::MAXIMUM_CALIBRATION_RESPONSE_MILLIS).contains(&slowest)
+                    && calibration.response_deadline_millis
+                        == calibration_response_deadline(slowest)
+            });
+            let checkpoint_matches =
+                calibration
+                    .protocol_checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| {
+                        let expected_fan = match calibration.fan {
+                            EvidenceFan::Cpu => crate::Fan::Cpu,
+                            EvidenceFan::Gpu => crate::Fan::Gpu,
+                        };
+                        let replay_matches = crate::ConservativeFanCalibration::resume(
+                            expected_fan,
+                            checkpoint.clone(),
+                        )
+                        .ok()
+                        .and_then(|session| session.evidence().cloned())
+                        .is_some_and(|derived| derived == *calibration);
+                        replay_matches
+                            && calibration_checkpoint_is_bound_to_record(
+                                self,
+                                calibration.fan,
+                                checkpoint,
+                            )
+                    });
+            if !is_allowed_calibration_floor(calibration.floor_basis_points)
+                || !deadline_is_derived
+                || !checkpoint_matches
+                || !self
+                    .commands
+                    .iter()
+                    .any(|command| command.fan == calibration.fan)
+                || !duties_match
+                || calibration
+                    .anchors
+                    .first()
+                    .is_none_or(|anchor| anchor.duty_basis_points != calibration.floor_basis_points)
+                || calibration
+                    .anchors
+                    .last()
+                    .is_none_or(|anchor| anchor.duty_basis_points != 10_000)
+                || calibration.anchors.iter().any(|anchor| {
+                    anchor.duty_basis_points > 10_000
+                        || !(crate::tachometer::MINIMUM_PLAUSIBLE_RPM
+                            ..=crate::tachometer::MAXIMUM_PLAUSIBLE_RPM)
+                            .contains(&anchor.median_rpm)
+                })
+                || !anchors_are_ordered
             {
                 return Err(EvidenceValidationError::InvalidValue {
                     field: "calibration",
@@ -762,6 +870,66 @@ impl EvidenceRecord {
         Ok(())
     }
 }
+
+fn calibration_checkpoint_is_bound_to_record(
+    record: &EvidenceRecord,
+    selected_fan: EvidenceFan,
+    checkpoint: &crate::CalibrationCheckpoint,
+) -> bool {
+    let Some((first_observation, last_observation)) = checkpoint.observed_time_bounds() else {
+        return false;
+    };
+    if first_observation < record.started_at.monotonic_millis
+        || last_observation > record.completed_at.monotonic_millis
+    {
+        return false;
+    }
+
+    let expected = checkpoint.command_expectations();
+    let recorded: Vec<_> = record
+        .commands
+        .iter()
+        .filter(|command| {
+            command.fan == selected_fan
+                && command.field == FanControlField::Pwm
+                && (first_observation..=last_observation)
+                    .contains(&command.timestamp.monotonic_millis)
+        })
+        .map(|command| (command.timestamp.monotonic_millis, command.value))
+        .collect();
+    let expected: Vec<_> = expected
+        .iter()
+        .map(|command| (command.monotonic_millis, u32::from(command.pwm_value)))
+        .collect();
+    if recorded != expected {
+        return false;
+    }
+
+    record.commands.iter().all(|command| {
+        let timestamp = command.timestamp.monotonic_millis;
+        if timestamp < first_observation {
+            return match command.field {
+                FanControlField::Pwm => command.value == u32::from(u8::MAX),
+                FanControlField::Enable => command.value == u32::from(CUSTOM_CONTROL_VALUE),
+            };
+        }
+        if timestamp > last_observation {
+            return match command.field {
+                FanControlField::Pwm => command.value == u32::from(u8::MAX),
+                FanControlField::Enable => command.value == u32::from(FIRMWARE_AUTO_VALUE),
+            };
+        }
+        match (command.fan == selected_fan, command.field) {
+            (true, FanControlField::Pwm) => true,
+            (true, FanControlField::Enable) => command.value == u32::from(CUSTOM_CONTROL_VALUE),
+            (false, FanControlField::Pwm) => command.value == u32::from(u8::MAX),
+            (false, FanControlField::Enable) => command.value == u32::from(CUSTOM_CONTROL_VALUE),
+        }
+    })
+}
+
+const CUSTOM_CONTROL_VALUE: u8 = 1;
+const FIRMWARE_AUTO_VALUE: u8 = 2;
 
 fn firmware_auto_baseline_is_complete(record: &EvidenceRecord) -> bool {
     let Some(workload) = &record.workload else {

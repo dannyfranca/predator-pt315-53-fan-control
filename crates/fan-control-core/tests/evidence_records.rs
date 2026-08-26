@@ -5,10 +5,13 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+mod support;
+
 use fan_control_core::{
-    EvidenceFan, EvidenceParseError, EvidenceValidationError, EvidenceWriteError, FanControlField,
-    FanReadbackField, ObservationOutcome, RunOutcomeStatus, SampleFreshness, parse_evidence_v1,
-    write_evidence_atomically,
+    CalibrationLevelObservation, CalibrationReadbackSample, ConservativeFanCalibration,
+    EvidenceFan, EvidenceValidationError, EvidenceWriteError, Fan, FanControlField,
+    FanHoldObservation, FanReadbackField, ObservationOutcome, RunOutcomeStatus, SampleFreshness,
+    parse_evidence_v1, parse_evidence_v2, write_evidence_atomically,
 };
 
 const FIXTURE: &str = include_str!(concat!(
@@ -18,6 +21,10 @@ const FIXTURE: &str = include_str!(concat!(
 const JSON_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../schemas/evidence.json"
+));
+const JSON_SCHEMA_V2: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../schemas/evidence-v2.json"
 ));
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -482,6 +489,334 @@ fn passing_records_require_observations_and_confirmed_safe_restoration() {
 }
 
 #[test]
+fn calibration_evidence_enforces_protected_runtime_invariants() {
+    let record = passing_v2_calibration_record();
+    let mut invalid = Vec::new();
+
+    let mut zero_deadline = record.clone();
+    zero_deadline.calibration[0].response_deadline_millis = 0;
+    invalid.push(zero_deadline);
+
+    let mut excessive_deadline = record.clone();
+    excessive_deadline.calibration[0].response_deadline_millis = 10_001;
+    invalid.push(excessive_deadline);
+
+    let mut missing_span = record.clone();
+    missing_span.calibration[0].anchors.pop();
+    invalid.push(missing_span);
+
+    let mut wrong_floor_anchor = record.clone();
+    wrong_floor_anchor.calibration[0].anchors[0].duty_basis_points += 1;
+    invalid.push(wrong_floor_anchor);
+
+    let mut decreasing_rpm = record.clone();
+    decreasing_rpm.calibration[0].anchors[1].median_rpm = 3_000;
+    invalid.push(decreasing_rpm);
+
+    let mut implausible_rpm = record.clone();
+    implausible_rpm.calibration[0].anchors[0].median_rpm = 0;
+    invalid.push(implausible_rpm);
+
+    let mut duplicate_fan = record;
+    duplicate_fan
+        .calibration
+        .push(duplicate_fan.calibration[0].clone());
+    invalid.push(duplicate_fan);
+
+    for candidate in invalid {
+        assert!(candidate.validate().is_err());
+    }
+
+    let record = passing_v2_calibration_record();
+    let mut serialized = serde_json::to_value(record).unwrap();
+    serialized["calibration"][0]["protocol_checkpoint"]["events"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    assert!(parse_evidence_v2(&serde_json::to_string(&serialized).unwrap()).is_err());
+
+    let record = passing_v2_calibration_record();
+    let mut fan_swapped = serde_json::to_value(record).unwrap();
+    fan_swapped["calibration"][0]["fan"] = "gpu".into();
+    fan_swapped["calibration"][0]["protocol_checkpoint"]["fan"] = "gpu".into();
+    assert!(parse_evidence_v2(&serde_json::to_string(&fan_swapped).unwrap()).is_err());
+}
+
+#[test]
+fn calibration_checkpoint_is_bound_to_the_run_envelope_and_command_trace() {
+    let record = passing_v2_calibration_record();
+    assert!(record.validate().is_ok(), "{:?}", record.validate());
+
+    let mut outside_run = record.clone();
+    outside_run.started_at.monotonic_millis =
+        outside_run.commands[0].timestamp.monotonic_millis + 1;
+    assert!(outside_run.validate().is_err());
+
+    let mut wrong_selected_command = record.clone();
+    wrong_selected_command.commands[0].value ^= 1;
+    assert!(wrong_selected_command.validate().is_err());
+
+    let mut unrecorded_selected_command = record.clone();
+    unrecorded_selected_command
+        .commands
+        .push(unrecorded_selected_command.commands[0].clone());
+    assert!(unrecorded_selected_command.validate().is_err());
+
+    let mut other_fan_not_at_maximum = record;
+    let mut contradictory = other_fan_not_at_maximum.commands[0].clone();
+    contradictory.fan = EvidenceFan::Gpu;
+    contradictory.value = 254;
+    other_fan_not_at_maximum.commands.push(contradictory);
+    assert!(other_fan_not_at_maximum.validate().is_err());
+
+    let mut safe_post_protocol_containment = passing_v2_calibration_record();
+    let last_observation = safe_post_protocol_containment.completed_at.monotonic_millis - 3;
+    let mut containment = safe_post_protocol_containment
+        .commands
+        .last()
+        .unwrap()
+        .clone();
+    containment.timestamp.monotonic_millis = last_observation + 1;
+    containment.value = 255;
+    safe_post_protocol_containment.commands.push(containment);
+    for attempt in &mut safe_post_protocol_containment.restoration_attempts {
+        attempt.timestamp.monotonic_millis = last_observation + 2;
+    }
+    safe_post_protocol_containment
+        .state_transitions
+        .last_mut()
+        .unwrap()
+        .timestamp
+        .monotonic_millis = last_observation + 3;
+    safe_post_protocol_containment.completed_at.monotonic_millis = last_observation + 4;
+    assert!(safe_post_protocol_containment.validate().is_ok());
+
+    let mut unsafe_post_protocol_command = safe_post_protocol_containment;
+    unsafe_post_protocol_command
+        .commands
+        .last_mut()
+        .unwrap()
+        .value = 254;
+    assert!(unsafe_post_protocol_command.validate().is_err());
+}
+
+#[test]
+fn legacy_v1_calibration_contract_remains_compatible() {
+    let mut record = parse_evidence_v1(FIXTURE).unwrap();
+    record.calibration[0].response_deadline_millis = 0;
+    record.calibration[0].anchors.truncate(1);
+    let mut gpu = record.calibration[0].clone();
+    gpu.fan = EvidenceFan::Gpu;
+    record.calibration.push(gpu);
+
+    assert!(record.validate().is_ok());
+    assert!(serde_json::to_string(&record).is_ok());
+}
+
+#[test]
+fn legacy_v1_rejects_v2_only_calibration_provenance() {
+    let mut fixture: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    fixture["calibration"][0]["slowest_response_millis"] = 5_000.into();
+    assert!(parse_evidence_v1(&serde_json::to_string(&fixture).unwrap()).is_err());
+
+    fixture["calibration"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("slowest_response_millis");
+    fixture["calibration"][0]["protocol_checkpoint"] = serde_json::json!({
+        "schema_version": 1,
+        "fan": "cpu",
+        "failed": false,
+        "events": []
+    });
+    assert!(parse_evidence_v1(&serde_json::to_string(&fixture).unwrap()).is_err());
+}
+
+#[test]
+fn legacy_v1_still_rejects_out_of_range_or_empty_calibration() {
+    let mut empty = parse_evidence_v1(FIXTURE).unwrap();
+    empty.calibration[0].anchors.clear();
+    assert!(empty.validate().is_err());
+
+    let mut floor = parse_evidence_v1(FIXTURE).unwrap();
+    floor.calibration[0].floor_basis_points = 10_001;
+    assert!(floor.validate().is_err());
+
+    let mut duty = parse_evidence_v1(FIXTURE).unwrap();
+    duty.calibration[0].anchors[0].duty_basis_points = 10_001;
+    assert!(duty.validate().is_err());
+}
+
+#[test]
+fn v2_calibration_requires_one_fan_and_the_exact_canonical_anchor_schedule() {
+    let record = passing_v2_calibration_record();
+    assert!(record.validate().is_ok(), "{:?}", record.validate());
+
+    let mut stripped = record.clone();
+    stripped.calibration.clear();
+    assert!(stripped.validate().is_err());
+
+    for removed in [1, 2] {
+        let mut missing = record.clone();
+        missing.calibration[0].anchors.remove(removed);
+        assert!(missing.validate().is_err());
+    }
+
+    let mut substituted = record.clone();
+    substituted.calibration[0].anchors[1].duty_basis_points = 6_000;
+    assert!(substituted.validate().is_err());
+
+    for invalid_floor in [0, 4_001, 7_500] {
+        let mut invalid = record.clone();
+        invalid.calibration[0].floor_basis_points = invalid_floor;
+        invalid.calibration[0].anchors[0].duty_basis_points = invalid_floor;
+        assert!(invalid.validate().is_err());
+    }
+
+    let mut both_fans = record;
+    let mut gpu = both_fans.calibration[0].clone();
+    gpu.fan = EvidenceFan::Gpu;
+    both_fans.calibration.push(gpu);
+    assert!(both_fans.validate().is_err());
+}
+
+fn passing_v2_calibration_record() -> fan_control_core::EvidenceRecord {
+    let mut record = parse_evidence_v1(FIXTURE).unwrap();
+    record.schema_version = 2;
+    record.stage = "fan-calibration".into();
+    record.faults.clear();
+    record
+        .thermal_summary
+        .as_mut()
+        .unwrap()
+        .nvidia_faults
+        .clear();
+    let mut gpu_restoration = record.restoration_attempts[0].clone();
+    gpu_restoration.fan = EvidenceFan::Gpu;
+    record.restoration_attempts.push(gpu_restoration);
+    record.outcome.status = RunOutcomeStatus::Passed;
+    record.outcome.reason = "fan calibration passed".into();
+    record.outcome.another_passing_run_required = false;
+    record.calibration[0] = completed_calibration_evidence();
+    let calibration = record.calibration[0].clone();
+    support::bind_record_to_calibration_protocol(&mut record, &calibration);
+    record
+}
+
+fn completed_calibration_evidence() -> fan_control_core::FanCalibrationEvidence {
+    let mut session = ConservativeFanCalibration::start(Fan::Cpu);
+    let mut clock = 1;
+    for rpm in [5_000, 3_800, 3_300, 2_800] {
+        record_stable_level(&mut session, rpm, 3_000, &mut clock);
+    }
+    let step = session.next_step();
+    let mut unstable = level_observation(step, 900, 2_000, &mut clock);
+    for (index, sample) in unstable.samples.iter_mut().enumerate() {
+        sample.selected_rpm = Some(if index % 2 == 0 { 900 } else { 1_300 });
+    }
+    session.record_level(unstable).unwrap();
+    for _ in 0..5 {
+        record_stable_level(&mut session, 5_000, 4_000, &mut clock);
+        record_stable_level(&mut session, 3_300, 5_000, &mut clock);
+    }
+    let hold_step = session.next_step();
+    let hold_samples = (0..451)
+        .map(|index| CalibrationReadbackSample {
+            monotonic_millis: clock + index * 2_000,
+            selected_enable_readback: 1,
+            selected_pwm_readback: hold_step.pwm_value().unwrap(),
+            other_enable_readback: 1,
+            other_pwm_readback: u8::MAX,
+            selected_rpm: Some(3_300),
+        })
+        .collect();
+    clock += 451 * 2_000;
+    session
+        .record_hold(FanHoldObservation {
+            samples: hold_samples,
+            stall_observed: false,
+            unexplained_rpm_collapse_observed: false,
+        })
+        .unwrap();
+    for (rpm, response) in [
+        (3_300, 3_000),
+        (3_800, 4_000),
+        (4_500, 5_000),
+        (6_200, 6_000),
+    ] {
+        record_stable_level(&mut session, rpm, response, &mut clock);
+    }
+    session.evidence().unwrap().clone()
+}
+
+fn record_stable_level(
+    session: &mut ConservativeFanCalibration,
+    rpm: u32,
+    response_millis: u64,
+    clock: &mut u64,
+) {
+    let observation = level_observation(session.next_step(), rpm, response_millis, clock);
+    session.record_level(observation).unwrap();
+}
+
+fn level_observation(
+    step: fan_control_core::CalibrationStep,
+    rpm: u32,
+    response_millis: u64,
+    clock: &mut u64,
+) -> CalibrationLevelObservation {
+    let started_at = *clock;
+    let intervals = response_millis.div_ceil(2_000).max(3);
+    *clock += response_millis + 1;
+    CalibrationLevelObservation {
+        commanded_at_monotonic_millis: started_at,
+        samples: (0..=intervals)
+            .map(|index| CalibrationReadbackSample {
+                monotonic_millis: started_at + response_millis * index / intervals,
+                selected_enable_readback: 1,
+                selected_pwm_readback: step.pwm_value().unwrap(),
+                other_enable_readback: 1,
+                other_pwm_readback: u8::MAX,
+                selected_rpm: (index + 3 > intervals).then_some(rpm),
+            })
+            .collect(),
+        stall_observed: false,
+        unexplained_rpm_collapse_observed: false,
+    }
+}
+
+#[test]
+fn v2_schema_rejects_noncanonical_calibration_anchor_duties() {
+    let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA_V2).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let mut fixture = serde_json::to_value(passing_v2_calibration_record()).unwrap();
+    assert!(validator.is_valid(&fixture));
+
+    fixture["calibration"][0]["anchors"][1]["duty_basis_points"] = 6_000.into();
+    assert!(!validator.is_valid(&fixture));
+
+    fixture["calibration"][0]["anchors"][1]["duty_basis_points"] = 6_250.into();
+    fixture["calibration"][0]["anchors"][1]["median_rpm"] = 3_000.into();
+    assert!(validator.is_valid(&fixture));
+    assert!(parse_evidence_v2(&serde_json::to_string(&fixture).unwrap()).is_err());
+
+    fixture["calibration"][0]["anchors"][1]["median_rpm"] = 3_800.into();
+    fixture["calibration"][0]["response_deadline_millis"] = 1.into();
+    assert!(parse_evidence_v2(&serde_json::to_string(&fixture).unwrap()).is_err());
+}
+
+#[test]
+fn v2_schema_and_parser_reject_unknown_checkpoint_fields() {
+    let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA_V2).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let mut fixture = serde_json::to_value(passing_v2_calibration_record()).unwrap();
+    fixture["calibration"][0]["protocol_checkpoint"]["events"][0]["unexpected"] = true.into();
+
+    assert!(!validator.is_valid(&fixture));
+    assert!(parse_evidence_v2(&serde_json::to_string(&fixture).unwrap()).is_err());
+}
+
+#[test]
 fn unsupported_incomplete_and_ambiguous_records_are_rejected() {
     for candidate in [
         FIXTURE.replacen("\"schema_version\": 1", "\"schema_version\": 2", 1),
@@ -523,12 +858,10 @@ fn unsupported_incomplete_and_ambiguous_records_are_rejected() {
         assert!(parse_evidence_v1(&candidate).is_err(), "{candidate}");
     }
 
-    assert!(matches!(
-        parse_evidence_v1(&FIXTURE.replacen("\"schema_version\": 1", "\"schema_version\": 2", 1)),
-        Err(EvidenceParseError::Invalid(
-            EvidenceValidationError::UnsupportedSchemaVersion
-        ))
-    ));
+    assert!(
+        parse_evidence_v1(&FIXTURE.replacen("\"schema_version\": 1", "\"schema_version\": 2", 1))
+            .is_err()
+    );
 
     assert!(
         serde_json::from_str::<fan_control_core::EvidenceRecord>(&FIXTURE.replacen(
@@ -536,7 +869,7 @@ fn unsupported_incomplete_and_ambiguous_records_are_rejected() {
             "\"schema_version\": 2",
             1
         ))
-        .is_ok()
+        .is_err()
     );
     assert!(
         serde_json::from_str::<fan_control_core::EvidenceRecord>(&FIXTURE.replacen(
