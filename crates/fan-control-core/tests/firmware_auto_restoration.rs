@@ -1,8 +1,9 @@
 use std::{path::Path, time::Duration};
 
 use fan_control_core::{
-    Clock, FakePlatform, FakeStep, FilePermissions, FirmwareAutoRestorationError, PlatformError,
-    PlatformErrorKind, PlatformOperation, acquire_controller_ownership, discover_acer_hwmon,
+    Clock, FakePlatform, FakeStep, Fan, FilePermissions, FirmwareAutoRestorationError,
+    PlatformError, PlatformErrorKind, PlatformOperation, acquire_controller_ownership,
+    discover_acer_hwmon,
 };
 
 mod support;
@@ -56,6 +57,44 @@ fn attempts_both_enable_writes_when_each_other_write_fails() {
     assert_eq!(writes.len(), 6);
     assert_eq!(writes[4], write(cpu_enable()));
     assert_eq!(writes[5], write(gpu_enable()));
+}
+
+#[test]
+fn a_single_fan_write_failure_never_skips_the_other_fan_or_the_next_attempt() {
+    for failed_fan in [Fan::Cpu, Fan::Gpu] {
+        let (mut platform, device, marker) = fixture("1\n", "1\n");
+        platform.queue_file_steps([
+            if failed_fan == Fan::Cpu {
+                fail("cpu attempt 1")
+            } else {
+                FakeStep::Pass
+            },
+            if failed_fan == Fan::Gpu {
+                fail("gpu attempt 1")
+            } else {
+                FakeStep::Pass
+            },
+            FakeStep::Pass,
+            FakeStep::Pass,
+        ]);
+
+        restore_firmware_auto(&mut platform, &device).unwrap();
+
+        let writes = restore_operations(&platform, marker)
+            .into_iter()
+            .filter(|operation| matches!(operation, PlatformOperation::Write { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            writes,
+            vec![
+                write(cpu_enable()),
+                write(gpu_enable()),
+                write(cpu_enable()),
+                write(gpu_enable()),
+            ],
+            "{failed_fan:?} failure must not couple the two restoration attempts"
+        );
+    }
 }
 
 #[test]
