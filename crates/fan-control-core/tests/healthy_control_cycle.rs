@@ -28,6 +28,41 @@ use support::{
     record_diagnostics, runtime_protected_policy,
 };
 
+fn state_and_fault_diagnostic_sequence(
+    events: &[std::collections::BTreeMap<String, String>],
+) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match diagnostic_field(event, "event_id") {
+            "pt31553.runtime-fault.v1" => Some(format!(
+                "fault:{}:{}",
+                diagnostic_field(event, "fault_id"),
+                diagnostic_field(event, "endpoint")
+            )),
+            "pt31553.state-transition.v1" => Some(format!(
+                "state:{}:{}:{}",
+                diagnostic_field(event, "from_state"),
+                diagnostic_field(event, "to_state"),
+                diagnostic_field(event, "reason")
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn assert_state_and_fault_diagnostic_sequence(
+    events: &[std::collections::BTreeMap<String, String>],
+    expected: &[&str],
+) {
+    assert_eq!(
+        state_and_fault_diagnostic_sequence(events),
+        expected
+            .iter()
+            .map(|entry| (*entry).to_owned())
+            .collect::<Vec<_>>()
+    );
+}
+
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
 static PROTECTED_POLICY: LazyLock<String> = LazyLock::new(runtime_protected_policy);
@@ -1900,11 +1935,20 @@ fn auto_confirmed_containment_reports_latch_and_drops_obsolete_bindings() {
     auto_confirmed.set(false);
     injection.set(RuntimeInterference::CpuModeBeforeReadAndRestorationDeadlineAuto);
 
-    let Err(TransientSensorControlError::ControlLatchContained { containment, .. }) =
-        control.step(&mut ownership)
-    else {
+    let (result, diagnostic_events) = record_diagnostics(|| control.step(&mut ownership));
+    let Err(TransientSensorControlError::ControlLatchContained { containment, .. }) = result else {
         panic!("Auto-confirmed containment must report a permanent latch")
     };
+    assert_state_and_fault_diagnostic_sequence(
+        &diagnostic_events,
+        &[
+            "fault:unexpected-readback:acer:cpu:pwm1_enable",
+            "state:custom-control:restoring:control-fault",
+            "fault:restoration-unconfirmed:none",
+            "state:restoring:firmware-auto:restoration-confirmed",
+            "state:firmware-auto:fault-latched:control-fault",
+        ],
+    );
     assert!(containment.restoration_confirmed());
     assert_eq!(*drop_observations.borrow(), vec![true]);
     assert_eq!(control.state(), SensorControlState::Faulted);
@@ -1957,6 +2001,14 @@ fn transient_cpu_failure_restores_auto_then_rediscovers_and_fully_rearms() {
             event.get("fault_id").map(|value| value.trim_matches('"')) == Some("sensor-unavailable")
         })
         .collect::<Vec<_>>();
+    assert_state_and_fault_diagnostic_sequence(
+        &diagnostic_events,
+        &[
+            "fault:sensor-unavailable:sensor:cpu:temperature",
+            "state:custom-control:restoring:sensor-fault",
+            "state:restoring:firmware-auto:restoration-confirmed",
+        ],
+    );
     assert!(!sample_faults.is_empty());
     assert!(
         sample_faults
@@ -2134,8 +2186,18 @@ fn unexpected_mode_during_rediscovery_restores_auto_and_permanently_latches() {
     ));
 
     interference.set(RuntimeInterference::CpuModeBeforeRecoveryAutoCheck);
+    let (result, diagnostic_events) = record_diagnostics(|| control.step(&mut ownership));
+    assert_state_and_fault_diagnostic_sequence(
+        &diagnostic_events,
+        &[
+            "fault:firmware-auto-unconfirmed:none",
+            "state:firmware-auto:restoring:control-fault",
+            "state:restoring:firmware-auto:restoration-confirmed",
+            "state:firmware-auto:fault-latched:control-fault",
+        ],
+    );
     assert!(matches!(
-        control.step(&mut ownership),
+        result,
         Err(TransientSensorControlError::RecoveryLatched {
             fault: SampleSetError::FirmwareAutoUnconfirmed
         })
@@ -2187,14 +2249,25 @@ fn failed_restoration_after_mode_drift_contains_and_retains_sensor_bindings() {
     interference
         .set(RuntimeInterference::CpuModeBeforeRecoveryAutoCheckAndRestorationDeadlineCustom);
 
+    let (result, diagnostic_events) = record_diagnostics(|| control.step(&mut ownership));
     let Err(TransientSensorControlError::RecoveryLatchCritical {
         fault: SampleSetError::FirmwareAutoUnconfirmed,
         restoration,
         containment,
-    }) = control.step(&mut ownership)
+    }) = result
     else {
         panic!("failed restoration after mode drift must remain critical")
     };
+    assert_state_and_fault_diagnostic_sequence(
+        &diagnostic_events,
+        &[
+            "fault:firmware-auto-unconfirmed:none",
+            "state:firmware-auto:restoring:control-fault",
+            "fault:restoration-unconfirmed:none",
+            "fault:containment-unconfirmed:none",
+            "state:restoring:fault-latched:restoration-failed",
+        ],
+    );
     assert!(!containment.restoration_confirmed());
     let fan_control_core::FirmwareAutoRestorationError::DeadlineExceeded { attempts, cpu, gpu } =
         restoration
@@ -2436,6 +2509,7 @@ fn failed_sensor_restoration_contains_at_maximum_without_rediscovery() {
     auto_confirmed.set(false);
     interference.set(RuntimeInterference::RestorationDeadlineCustom);
 
+    let (result, diagnostic_events) = record_diagnostics(|| control.step(&mut ownership));
     let Err(TransientSensorControlError::RecoveryLatchCritical {
         fault:
             SampleSetError::Input {
@@ -2444,10 +2518,20 @@ fn failed_sensor_restoration_contains_at_maximum_without_rediscovery() {
             },
         restoration,
         containment,
-    }) = control.step(&mut ownership)
+    }) = result
     else {
         panic!("failed sensor restoration must invoke critical containment")
     };
+    assert_state_and_fault_diagnostic_sequence(
+        &diagnostic_events,
+        &[
+            "fault:sensor-unavailable:sensor:cpu:temperature",
+            "state:custom-control:restoring:sensor-fault",
+            "fault:restoration-unconfirmed:none",
+            "fault:containment-unconfirmed:none",
+            "state:restoring:fault-latched:restoration-failed",
+        ],
+    );
     assert!(!containment.restoration_confirmed());
     let fan_control_core::FirmwareAutoRestorationError::DeadlineExceeded { attempts, cpu, gpu } =
         restoration

@@ -16,7 +16,6 @@ const RECOVERY_RETRY: Duration = Duration::from_secs(2);
 const SLEEP_RESUME_MARKER: &str = "/run/pt31553-fan-sleep-guard/resume-daemon";
 
 fn main() {
-    fan_control_core::init_journald_diagnostics();
     match std::env::args_os().nth(1).as_deref() {
         None => {
             println!("fan-control-restore: independent Firmware Auto recovery command");
@@ -25,12 +24,14 @@ fn main() {
             println!("fan-control-restore: independent Firmware Auto recovery command");
         }
         Some(value) if value == std::ffi::OsStr::new("--restore") => {
+            fan_control_core::init_journald_diagnostics();
             if restore_firmware_auto().is_err() {
                 emit_generic_failure("independent recovery failed");
                 std::process::exit(1);
             }
         }
         Some(value) if value == std::ffi::OsStr::new("--prepare-sleep") => {
+            fan_control_core::init_journald_diagnostics();
             let mut manager = sleep_guard::SystemdDaemonManager::default();
             let marker = sleep_resume_marker();
             let prepared_marker = sleep_prepared_marker(&marker);
@@ -47,6 +48,7 @@ fn main() {
             }
         }
         Some(value) if value == std::ffi::OsStr::new("--resume-after-sleep") => {
+            fan_control_core::init_journald_diagnostics();
             let mut manager = sleep_guard::SystemdDaemonManager::default();
             let marker = sleep_resume_marker();
             if sleep_guard::resume_after_sleep(&mut manager, &marker).is_err() {
@@ -55,6 +57,7 @@ fn main() {
             }
         }
         Some(value) if value == std::ffi::OsStr::new("--restore-after-failed-sleep-guard") => {
+            fan_control_core::init_journald_diagnostics();
             let marker = sleep_resume_marker();
             if sleep_guard::restore_after_failed_guard(
                 &sleep_prepared_marker(&marker),
@@ -67,6 +70,7 @@ fn main() {
             }
         }
         _ => {
+            fan_control_core::init_journald_diagnostics();
             fan_control_core::emit_fault(
                 fan_control_core::RuntimeFault::ConfigurationRejected,
                 None,

@@ -430,13 +430,10 @@ where
     where
         P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
     {
-        match ownership.restore_or_contain_firmware_auto(&device) {
+        let outcome = ownership.restore_or_contain_firmware_auto(&device);
+        emit_safing_outcome_diagnostics(&outcome);
+        match outcome {
             FirmwareAutoSafingOutcome::Restored => {
-                emit_state_transition(
-                    RuntimeState::Restoring,
-                    RuntimeState::FirmwareAuto,
-                    RuntimeTransition::RestorationConfirmed,
-                );
                 self.state = Some(ControlState::Recovering(Box::new(RecoveryState {
                     config,
                     device,
@@ -450,11 +447,6 @@ where
                 restoration,
                 containment,
             } => {
-                emit_state_transition(
-                    RuntimeState::Restoring,
-                    RuntimeState::FirmwareAuto,
-                    RuntimeTransition::RestorationConfirmed,
-                );
                 emit_state_transition(
                     RuntimeState::FirmwareAuto,
                     RuntimeState::FaultLatched,
@@ -474,12 +466,6 @@ where
                 restoration,
                 containment,
             } => {
-                emit_fault(RuntimeFault::ContainmentUnconfirmed, None);
-                emit_state_transition(
-                    RuntimeState::Restoring,
-                    RuntimeState::FaultLatched,
-                    RuntimeTransition::RestorationFailed,
-                );
                 self.state = Some(ControlState::Faulted {
                     retained_sources: Some(sources),
                 });
@@ -502,13 +488,10 @@ where
     where
         P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
     {
-        match ownership.restore_or_contain_firmware_auto(&device) {
+        let outcome = ownership.restore_or_contain_firmware_auto(&device);
+        emit_safing_outcome_diagnostics(&outcome);
+        match outcome {
             FirmwareAutoSafingOutcome::Restored => {
-                emit_state_transition(
-                    RuntimeState::Restoring,
-                    RuntimeState::FirmwareAuto,
-                    RuntimeTransition::RestorationConfirmed,
-                );
                 emit_state_transition(
                     RuntimeState::FirmwareAuto,
                     RuntimeState::FaultLatched,
@@ -524,11 +507,6 @@ where
                 restoration,
                 containment,
             } => {
-                emit_state_transition(
-                    RuntimeState::Restoring,
-                    RuntimeState::FirmwareAuto,
-                    RuntimeTransition::RestorationConfirmed,
-                );
                 emit_state_transition(
                     RuntimeState::FirmwareAuto,
                     RuntimeState::FaultLatched,
@@ -548,12 +526,6 @@ where
                 restoration,
                 containment,
             } => {
-                emit_fault(RuntimeFault::ContainmentUnconfirmed, None);
-                emit_state_transition(
-                    RuntimeState::Restoring,
-                    RuntimeState::FaultLatched,
-                    RuntimeTransition::RestorationFailed,
-                );
                 self.state = Some(ControlState::Faulted {
                     retained_sources: Some(sources),
                 });
@@ -576,13 +548,10 @@ where
     where
         P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
     {
-        match ownership.restore_or_contain_firmware_auto(&device) {
+        let outcome = ownership.restore_or_contain_firmware_auto(&device);
+        emit_safing_outcome_diagnostics(&outcome);
+        match outcome {
             FirmwareAutoSafingOutcome::Restored => {
-                emit_state_transition(
-                    RuntimeState::Restoring,
-                    RuntimeState::FirmwareAuto,
-                    RuntimeTransition::RestorationConfirmed,
-                );
                 emit_state_transition(
                     RuntimeState::FirmwareAuto,
                     RuntimeState::FaultLatched,
@@ -598,11 +567,6 @@ where
                 restoration,
                 containment,
             } => {
-                emit_state_transition(
-                    RuntimeState::Restoring,
-                    RuntimeState::FirmwareAuto,
-                    RuntimeTransition::RestorationConfirmed,
-                );
                 emit_state_transition(
                     RuntimeState::FirmwareAuto,
                     RuntimeState::FaultLatched,
@@ -622,12 +586,6 @@ where
                 restoration,
                 containment,
             } => {
-                emit_fault(RuntimeFault::ContainmentUnconfirmed, None);
-                emit_state_transition(
-                    RuntimeState::Restoring,
-                    RuntimeState::FaultLatched,
-                    RuntimeTransition::RestorationFailed,
-                );
                 self.state = Some(ControlState::Faulted {
                     retained_sources: sources,
                 });
@@ -637,6 +595,26 @@ where
                     containment: Box::new(containment),
                 })
             }
+        }
+    }
+}
+
+fn emit_safing_outcome_diagnostics(outcome: &FirmwareAutoSafingOutcome) {
+    match outcome {
+        FirmwareAutoSafingOutcome::Restored | FirmwareAutoSafingOutcome::Contained { .. } => {
+            emit_state_transition(
+                RuntimeState::Restoring,
+                RuntimeState::FirmwareAuto,
+                RuntimeTransition::RestorationConfirmed,
+            );
+        }
+        FirmwareAutoSafingOutcome::Critical { .. } => {
+            emit_fault(RuntimeFault::ContainmentUnconfirmed, None);
+            emit_state_transition(
+                RuntimeState::Restoring,
+                RuntimeState::FaultLatched,
+                RuntimeTransition::RestorationFailed,
+            );
         }
     }
 }

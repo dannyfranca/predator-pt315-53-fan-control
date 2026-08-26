@@ -1,10 +1,14 @@
-use std::{
-    collections::BTreeMap, fs, os::unix::net::UnixDatagram, process::Command, time::Duration,
-};
+use std::{fs, process::Command};
+
+#[path = "../../../tests/support/native_journal.rs"]
+mod native_journal;
+use native_journal::{assert_no_native_event, journal_receiver, receive_native_event};
 
 #[test]
 fn daemon_reports_that_custom_control_is_unavailable() {
+    let (receiver, socket_path) = journal_receiver("daemon-status");
     let output = Command::new(env!("CARGO_BIN_EXE_fan-control-daemon"))
+        .env("PT31553_TEST_JOURNALD_SOCKET", &socket_path)
         .output()
         .expect("daemon executable should start");
 
@@ -14,6 +18,8 @@ fn daemon_reports_that_custom_control_is_unavailable() {
         "fan-control-daemon: unqualified/not configured; Custom fan control is disabled\n"
     );
     assert!(output.stderr.is_empty());
+    assert_no_native_event(&receiver);
+    fs::remove_file(socket_path).unwrap();
 }
 
 #[test]
@@ -40,34 +46,4 @@ fn daemon_entrypoint_delivers_faults_to_native_journald() {
         Some("none")
     );
     fs::remove_file(socket_path).unwrap();
-}
-
-fn journal_receiver(label: &str) -> (UnixDatagram, std::path::PathBuf) {
-    let socket_path = std::env::temp_dir().join(format!(
-        "pt31553-{label}-journal-{}.socket",
-        std::process::id()
-    ));
-    let receiver = UnixDatagram::bind(&socket_path).unwrap();
-    receiver
-        .set_read_timeout(Some(Duration::from_secs(1)))
-        .unwrap();
-    (receiver, socket_path)
-}
-
-fn receive_native_event(receiver: &UnixDatagram) -> BTreeMap<String, String> {
-    let mut payload = [0_u8; 2048];
-    let length = receiver.recv(&mut payload).unwrap();
-    let mut payload = &payload[..length];
-    let mut fields = BTreeMap::new();
-    while !payload.is_empty() {
-        let name_end = payload.iter().position(|byte| *byte == b'\n').unwrap();
-        let name = std::str::from_utf8(&payload[..name_end]).unwrap();
-        payload = &payload[name_end + 1..];
-        let length = u64::from_le_bytes(payload[..8].try_into().unwrap()) as usize;
-        payload = &payload[8..];
-        let value = std::str::from_utf8(&payload[..length]).unwrap();
-        payload = &payload[length + 1..];
-        fields.insert(name.to_owned(), value.to_owned());
-    }
-    fields
 }
