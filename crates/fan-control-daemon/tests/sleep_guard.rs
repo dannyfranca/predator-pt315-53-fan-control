@@ -271,6 +271,9 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
             systemctl(["stop", &target_name]);
             let _ = intervening_start.wait();
         } else {
+            if cycle == 1 {
+                wait_for_unit_unloaded(&daemon_name);
+            }
             systemctl(["stop", &target_name]);
         }
         wait_for_state(&guard_name, "inactive");
@@ -477,6 +480,23 @@ fn wait_for_state(name: &str, expected: &str) {
                 String::from_utf8_lossy(&status.stderr)
             );
         }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn wait_for_unit_unloaded(name: &str) {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let reset = systemctl_output(["reset-failed", name]);
+        let stderr = String::from_utf8_lossy(&reset.stderr);
+        if !reset.status.success() && stderr.contains("not loaded") {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{name} was not garbage-collected before resume: status={} stderr={stderr:?}",
+            reset.status
+        );
         thread::sleep(Duration::from_millis(25));
     }
 }

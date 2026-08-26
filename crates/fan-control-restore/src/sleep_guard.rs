@@ -86,8 +86,14 @@ pub(crate) fn prepare_sleep(
 ) -> io::Result<()> {
     clear_marker(marker)?;
     clear_marker(prepared_marker)?;
-    let resume_authorized = manager.active_state()? == DaemonActiveState::Active
-        && manager.stop()? == PlannedStop::Clean;
+    let resume_authorized = match manager.active_state()? {
+        DaemonActiveState::Active => manager.stop()? == PlannedStop::Clean,
+        DaemonActiveState::Transitioning => {
+            let _ = manager.stop()?;
+            false
+        }
+        DaemonActiveState::Inactive | DaemonActiveState::Failed => false,
+    };
 
     restore()?;
     fs::write(prepared_marker, PREPARED_MARKER_CONTENT)?;
@@ -290,6 +296,29 @@ mod tests {
         resume_after_sleep(&mut manager, &marker).unwrap();
 
         assert_eq!(&*manager.calls.borrow(), &["state", "restore"]);
+    }
+
+    #[test]
+    fn transitioning_daemon_is_stopped_before_sleep_without_resume_authorization() {
+        let marker = marker_path("prepare-transitioning");
+        let prepared_marker = marker_path("prepare-transitioning-prepared");
+        let _cleanup = MarkerCleanup(marker.clone());
+        let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
+        let mut manager = FakeDaemonManager {
+            state: Some(Ok(DaemonActiveState::Transitioning)),
+            ..FakeDaemonManager::default()
+        };
+        let calls = Rc::clone(&manager.calls);
+
+        prepare_sleep(&mut manager, &marker, &prepared_marker, move || {
+            calls.borrow_mut().push("restore");
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(&*manager.calls.borrow(), &["state", "stop", "restore"]);
+        assert!(!marker.exists());
+        assert!(prepared_marker.is_file());
     }
 
     #[test]
