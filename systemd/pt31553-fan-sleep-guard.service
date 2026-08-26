@@ -19,8 +19,30 @@ ExecStop=/usr/bin/pt31553-fan-restore --resume-after-sleep
 # written only after Auto confirmation, and keeps independent recovery alive if it is absent.
 ExecStopPost=/usr/bin/pt31553-fan-restore --restore-after-failed-sleep-guard
 TimeoutStopSec=infinity
-# Marker files live under /run, but are owned by the recovery helper rather than this unit. This
-# keeps the daemon start gate intact if systemd tears down a failed guard transaction.
+# Create both private runtime roots before the strict mount namespace is assembled. Preserve them
+# across stop/failure so systemd cannot erase the daemon start gate after a failed transaction.
+RuntimeDirectory=pt31553-fan-control pt31553-fan-sleep-guard
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+ReadWritePaths=/sys/class/hwmon /run/pt31553-fan-control /run/pt31553-fan-sleep-guard
 
 [Install]
 RequiredBy=sleep.target

@@ -1,0 +1,2 @@
+disable pt31553-fand.service
+disable pt31553-fan-sleep-guard.service
