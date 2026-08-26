@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    BoundedIdentityBoundFileAccess, FileIdentity, FilePermissions, IdentityBoundFileAccess,
+    BoundedIdentityBoundFileAccess, FileIdentity, FilePermissions, IdentityBoundReadAccess,
     PlatformError,
 };
 
@@ -206,7 +206,7 @@ impl From<PlatformError> for AcerHwmonDiscoveryError {
 }
 
 pub fn discover_acer_hwmon(
-    files: &mut dyn IdentityBoundFileAccess,
+    files: &mut dyn IdentityBoundReadAccess,
     hwmon_root: &Path,
 ) -> Result<AcerHwmonDevice, AcerHwmonDiscoveryError> {
     let mut matches = find_acer_devices(files, hwmon_root)?;
@@ -253,7 +253,7 @@ pub fn discover_acer_hwmon(
 }
 
 fn find_acer_devices(
-    files: &mut dyn IdentityBoundFileAccess,
+    files: &mut dyn IdentityBoundReadAccess,
     hwmon_root: &Path,
 ) -> Result<Vec<(PathBuf, FileIdentity)>, AcerHwmonDiscoveryError> {
     let mut matches = Vec::new();
@@ -308,7 +308,7 @@ fn validate_hwmon_entry(hwmon_root: &Path, path: &Path) -> Result<(), AcerHwmonD
 }
 
 fn validate_exact_two_fan_abi(
-    files: &mut dyn IdentityBoundFileAccess,
+    files: &mut dyn IdentityBoundReadAccess,
     root: &Path,
     backing_identity: FileIdentity,
 ) -> Result<(), AcerHwmonDiscoveryError> {
@@ -447,7 +447,7 @@ fn entry_count(entries: &[PathBuf], expected: &Path) -> usize {
 }
 
 fn require_endpoint_permissions(
-    files: &mut dyn IdentityBoundFileAccess,
+    files: &mut dyn IdentityBoundReadAccess,
     root: &Path,
     channel: usize,
 ) -> Result<(), AcerHwmonDiscoveryError> {
@@ -474,7 +474,7 @@ fn endpoints(root: &Path, channel: usize) -> FanEndpoints {
 }
 
 fn bind_endpoints(
-    files: &mut dyn IdentityBoundFileAccess,
+    files: &mut dyn IdentityBoundReadAccess,
     root: &Path,
     channel: usize,
 ) -> Result<FanEndpoints, AcerHwmonDiscoveryError> {
@@ -486,7 +486,7 @@ fn bind_endpoints(
 }
 
 fn require_permissions(
-    files: &mut dyn IdentityBoundFileAccess,
+    files: &mut dyn IdentityBoundReadAccess,
     path: &Path,
     expected: FilePermissions,
 ) -> Result<(), AcerHwmonDiscoveryError> {

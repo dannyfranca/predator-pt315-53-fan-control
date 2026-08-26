@@ -48,6 +48,30 @@ pub struct AdmittedPolicyAuthority {
     protected: ValidatedConfig,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ValidatedPolicyAuthority {
+    qualification_id: String,
+    policy_version: String,
+    protected_policy_sha256: String,
+    compatibility: CompatibilityDeclarationV1,
+    calibration: QualifiedTachometerCalibrations,
+    protected: ValidatedConfig,
+}
+
+impl ValidatedPolicyAuthority {
+    fn bind_to_ownership(self, ownership_id: u64) -> AdmittedPolicyAuthority {
+        AdmittedPolicyAuthority {
+            ownership_id,
+            qualification_id: self.qualification_id,
+            policy_version: self.policy_version,
+            protected_policy_sha256: self.protected_policy_sha256,
+            compatibility: self.compatibility,
+            calibration: self.calibration,
+            protected: self.protected,
+        }
+    }
+}
+
 impl AdmittedPolicyAuthority {
     pub(crate) const fn belongs_to_ownership(&self, ownership_id: u64) -> bool {
         self.ownership_id == ownership_id
@@ -227,8 +251,8 @@ where
             protected_policy_source,
             qualification_record_source,
             compatibility_observations,
-            ownership.ownership_id(),
         )
+        .map(|authority| authority.bind_to_ownership(ownership.ownership_id()))
     } else {
         Err(PolicyAuthorityError::FirmwareAutoUnconfirmed)
     };
@@ -244,12 +268,26 @@ where
     }
 }
 
+/// Validates the protected policy and qualification record without acquiring ownership or
+/// changing fan state.
+pub(crate) fn validate_policy_authority_sources(
+    protected_policy_source: &str,
+    qualification_record_source: &str,
+    compatibility_observations: &[CompatibilityObservation],
+) -> Result<(), PolicyAuthorityError> {
+    validate_policy_authority(
+        protected_policy_source,
+        qualification_record_source,
+        compatibility_observations,
+    )
+    .map(|_| ())
+}
+
 fn validate_policy_authority(
     protected_policy_source: &str,
     qualification_record_source: &str,
     compatibility_observations: &[CompatibilityObservation],
-    ownership_id: u64,
-) -> Result<AdmittedPolicyAuthority, PolicyAuthorityError> {
+) -> Result<ValidatedPolicyAuthority, PolicyAuthorityError> {
     let manifest = parse_protected_policy_v2(protected_policy_source)?;
     let record = parse_qualification_record_v1(qualification_record_source)?;
 
@@ -285,8 +323,7 @@ fn validate_policy_authority(
         .qualify(&protected)
         .map_err(PolicyAuthorityError::InvalidTachometerCalibration)?;
 
-    Ok(AdmittedPolicyAuthority {
-        ownership_id,
+    Ok(ValidatedPolicyAuthority {
         qualification_id: manifest.qualification_id,
         policy_version: manifest.policy_version,
         protected_policy_sha256,
