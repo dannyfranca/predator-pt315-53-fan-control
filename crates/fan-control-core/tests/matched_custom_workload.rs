@@ -73,6 +73,32 @@ fn custom_run_must_cover_the_exact_baseline_sample_count() {
 }
 
 #[test]
+fn custom_run_preserves_an_accepted_baseline_cadence_and_duration() {
+    let baseline = passing_baseline_with_cadence(2_100);
+    let observations = (1..=MINIMUM_MATCHED_WORKLOAD_SAMPLES)
+        .map(|n| custom_observation(10_000 + n as u64 * 2_100, 65_000, 54_000))
+        .collect();
+    let mut environment = CustomEnvironment::new(observations);
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(report.accepted(), "{:#?}", report.record());
+    let workload_started_at = report.record().workload_started_at.unwrap();
+    assert_eq!(
+        report
+            .record()
+            .samples
+            .last()
+            .unwrap()
+            .timestamp
+            .monotonic_millis
+            - workload_started_at.monotonic_millis,
+        baseline.samples.last().unwrap().timestamp.monotonic_millis
+            - baseline.workload_started_at.unwrap().monotonic_millis
+    );
+}
+
+#[test]
 fn baseline_below_the_matched_sample_minimum_is_rejected_before_custom_control() {
     let baseline = valid_five_minute_baseline_below_matched_minimum();
     assert!(baseline.validate().is_ok());
@@ -240,6 +266,20 @@ fn transient_zero_rpm_is_allowed_within_a_reissued_commands_response_window() {
     let baseline = passing_baseline();
     let mut observations = passing_custom_observations();
     observations[10]
+        .commands
+        .iter_mut()
+        .find(|command| command.fan == EvidenceFan::Cpu)
+        .unwrap()
+        .value = 200;
+    observations[10]
+        .readbacks
+        .iter_mut()
+        .find(|readback| {
+            readback.fan == EvidenceFan::Cpu && readback.field == FanReadbackField::Pwm
+        })
+        .unwrap()
+        .value = Some(200);
+    observations[10]
         .readbacks
         .iter_mut()
         .find(|readback| {
@@ -307,6 +347,10 @@ fn matched_workload_evidence_round_trips_and_requires_a_valid_baseline_binding()
         .remove("baseline_binding_sha256");
     assert!(!validator.is_valid(&missing));
     assert!(parse_evidence_v2(&missing.to_string()).is_err());
+
+    let mut unsuccessful_auto_write = value.clone();
+    unsuccessful_auto_write["restoration_attempts"][0]["auto_write_succeeded"] = false.into();
+    assert!(!validator.is_valid(&unsuccessful_auto_write));
 
     let mut malformed = value;
     malformed["baseline_binding_sha256"] = "not-a-sha256".into();
@@ -588,6 +632,65 @@ fn capture_callback_clock_rollback_fails_closed() {
         &environment.events[environment.events.len() - 3..],
         ["stop", "restore-cpu", "restore-gpu"]
     );
+}
+
+#[test]
+fn regressed_callback_requests_fail_closed_before_invocation() {
+    let baseline = passing_baseline();
+    for (failure, expected_events) in [
+        (CallbackFailure::RollbackEntryRequest, &["conditions"][..]),
+        (
+            CallbackFailure::RollbackStartRequest,
+            &["conditions", "enter-custom", "restore-cpu", "restore-gpu"][..],
+        ),
+        (
+            CallbackFailure::RollbackWaitRequest,
+            &[
+                "conditions",
+                "enter-custom",
+                "start",
+                "stop",
+                "restore-cpu",
+                "restore-gpu",
+            ][..],
+        ),
+    ] {
+        let mut environment = CustomEnvironment::new(passing_custom_observations());
+        environment.failure = Some(failure);
+
+        let report = run_custom(&baseline, &mut environment, &[]);
+
+        assert!(!report.accepted(), "{failure:?}");
+        assert_eq!(environment.events, expected_events, "{failure:?}");
+        assert!(
+            report
+                .record()
+                .faults
+                .iter()
+                .any(|fault| fault.detail.contains("request time regressed")),
+            "{failure:?}"
+        );
+        assert!(report.record().validate().is_ok(), "{failure:?}");
+    }
+}
+
+#[test]
+fn workload_launch_completion_rollback_returns_a_valid_failed_record() {
+    let baseline = passing_baseline();
+    let mut environment = CustomEnvironment::new(passing_custom_observations());
+    environment.failure = Some(CallbackFailure::RollbackStart);
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(!report.accepted());
+    assert!(report.record().faults.iter().any(|fault| {
+        fault.code == "workload-start" && fault.detail.contains("completion time regressed")
+    }));
+    assert_eq!(
+        &environment.events[environment.events.len() - 3..],
+        ["stop", "restore-cpu", "restore-gpu"]
+    );
+    assert!(report.record().validate().is_ok());
 }
 
 #[test]
@@ -925,6 +1028,70 @@ fn cosmetic_prior_run_changes_do_not_create_repeat_credit() {
 }
 
 #[test]
+fn mutable_completion_metadata_does_not_create_repeat_credit() {
+    let baseline = passing_baseline();
+    let mut first_environment = CustomEnvironment::new(passing_custom_observations());
+    let first = run_custom(&baseline, &mut first_environment, &[]).into_record();
+    let mut alias = first.clone();
+    alias.completed_at.monotonic_millis += 1;
+    alias.completed_at.wall_unix_millis += 1;
+    assert!(alias.validate().is_ok());
+    let previous = [&first, &alias];
+    let mut environment = CustomEnvironment::new(passing_custom_observations());
+
+    let result = run_matched_custom_workload(
+        &mut environment,
+        &MatchedWorkloadPlan {
+            baseline: &baseline,
+            previous_passing_runs: &previous,
+            tachometer_calibrations: tachometer_calibrations(),
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(fan_control_core::MatchedWorkloadPlanError::InvalidPriorRun { .. })
+    ));
+    assert!(environment.events.is_empty());
+}
+
+#[test]
+fn prior_run_with_unsettled_final_tachometer_response_gets_no_repeat_credit() {
+    let baseline = passing_baseline();
+    let mut first_environment = CustomEnvironment::new(passing_custom_observations());
+    let mut prior = run_custom(&baseline, &mut first_environment, &[]).into_record();
+    prior
+        .readbacks
+        .iter_mut()
+        .rev()
+        .find(|readback| {
+            readback.fan == EvidenceFan::Cpu
+                && readback.field == FanReadbackField::Rpm
+                && readback.phase == Some(fan_control_core::FanReadbackPhase::Sample)
+        })
+        .unwrap()
+        .value = Some(0);
+    assert!(prior.validate().is_ok());
+    let previous = [&prior];
+    let mut environment = CustomEnvironment::new(passing_custom_observations());
+
+    let result = run_matched_custom_workload(
+        &mut environment,
+        &MatchedWorkloadPlan {
+            baseline: &baseline,
+            previous_passing_runs: &previous,
+            tachometer_calibrations: tachometer_calibrations(),
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(fan_control_core::MatchedWorkloadPlanError::InvalidPriorRun { .. })
+    ));
+    assert!(environment.events.is_empty());
+}
+
+#[test]
 fn repeat_credit_is_bound_to_the_exact_baseline_record() {
     let current_baseline = passing_baseline();
     let other_baseline = baseline_for(
@@ -1060,6 +1227,31 @@ fn tachometer_calibrations() -> MatchedWorkloadTachometerCalibrations<'static> {
 
 fn passing_baseline() -> fan_control_core::EvidenceRecord {
     passing_baseline_for("cpu-ac-v1")
+}
+
+fn passing_baseline_with_cadence(cadence_millis: u64) -> fan_control_core::EvidenceRecord {
+    let mut record = passing_baseline();
+    for (index, sample) in record.samples.iter_mut().enumerate() {
+        sample.timestamp = timestamp((index as u64 + 1) * cadence_millis);
+    }
+    for fan in [EvidenceFan::Cpu, EvidenceFan::Gpu] {
+        let mut sample_index = 0;
+        for readback in record.readbacks.iter_mut().filter(|readback| {
+            readback.fan == fan
+                && readback.phase == Some(fan_control_core::FanReadbackPhase::Sample)
+        }) {
+            readback.timestamp = timestamp((sample_index as u64 + 1) * cadence_millis);
+            sample_index += 1;
+        }
+    }
+    record.completed_at = record.samples.last().unwrap().timestamp;
+    for readback in &mut record.readbacks {
+        if readback.phase == Some(fan_control_core::FanReadbackPhase::Final) {
+            readback.timestamp = record.completed_at;
+        }
+    }
+    assert!(record.validate().is_ok());
+    record
 }
 
 fn valid_five_minute_baseline_below_matched_minimum() -> fan_control_core::EvidenceRecord {
@@ -1365,6 +1557,7 @@ struct CustomEnvironment {
     cpu_restoration: MatchedWorkloadFanRestoration,
     gpu_restoration: MatchedWorkloadFanRestoration,
     failure: Option<CallbackFailure>,
+    timestamp_calls: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1372,10 +1565,14 @@ enum CallbackFailure {
     Entry,
     LateEntry,
     RollbackEntry,
+    RollbackEntryRequest,
     Start,
     LateStart,
+    RollbackStart,
+    RollbackStartRequest,
     Wait,
     LateWait,
+    RollbackWaitRequest,
     Capture,
     LateCapture,
     RollbackCapture,
@@ -1396,13 +1593,25 @@ impl CustomEnvironment {
             cpu_restoration: successful_restoration(EvidenceFan::Cpu),
             gpu_restoration: successful_restoration(EvidenceFan::Gpu),
             failure: None,
+            timestamp_calls: 0,
         }
     }
 }
 
 impl MatchedWorkloadEnvironment for CustomEnvironment {
     fn timestamp(&mut self) -> EvidenceTimestamp {
-        timestamp(self.now)
+        self.timestamp_calls += 1;
+        let regressed_request = matches!(
+            (self.failure, self.timestamp_calls),
+            (Some(CallbackFailure::RollbackEntryRequest), 3)
+                | (Some(CallbackFailure::RollbackStartRequest), 5)
+                | (Some(CallbackFailure::RollbackWaitRequest), 7)
+        );
+        timestamp(if regressed_request {
+            self.now.saturating_sub(1)
+        } else {
+            self.now
+        })
     }
 
     fn capture_starting_conditions(
@@ -1439,6 +1648,9 @@ impl MatchedWorkloadEnvironment for CustomEnvironment {
         let started_at = timestamp(self.now);
         if self.failure == Some(CallbackFailure::LateStart) {
             self.now = self.now.saturating_add(10_001);
+        }
+        if self.failure == Some(CallbackFailure::RollbackStart) {
+            self.now = self.now.saturating_sub(1);
         }
         if self.failure == Some(CallbackFailure::OverdueBeforeWait) {
             self.now = self.now.saturating_add(2_200);

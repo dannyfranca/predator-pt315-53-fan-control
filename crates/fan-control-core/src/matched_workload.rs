@@ -235,7 +235,9 @@ where
     let mut workload = baseline_workload.clone();
     let mut starting_conditions_captured_at = None;
     let mut workload_started_at = None;
-    let samples_required = plan.baseline.samples.len();
+    let baseline_sample_offsets = matched_sample_offsets(plan.baseline)
+        .expect("validated baseline has a monotonic sample schedule");
+    let samples_required = baseline_sample_offsets.len();
     let mut samples = Vec::with_capacity(samples_required);
     let mut commands = Vec::new();
     let mut readbacks = Vec::new();
@@ -250,11 +252,19 @@ where
     let mut control_evidence = ControlEvidenceState::default();
     let mut tachometer_evidence = TachometerEvidenceState::default();
     let mut restoration_not_before = started_at;
+    let mut lifecycle_not_before = started_at;
 
     match environment.capture_starting_conditions() {
         Ok(capture) => {
             let callback_completed_at = environment.timestamp();
-            if capture.captured_at.monotonic_millis < started_at.monotonic_millis
+            if callback_completed_at.monotonic_millis < started_at.monotonic_millis {
+                push_fault(
+                    &mut faults,
+                    started_at,
+                    "starting-conditions",
+                    "starting-condition capture completion time regressed",
+                );
+            } else if capture.captured_at.monotonic_millis < started_at.monotonic_millis
                 || capture.captured_at.monotonic_millis > callback_completed_at.monotonic_millis
             {
                 push_fault(
@@ -264,6 +274,7 @@ where
                     "starting-condition timestamp lies outside its capture window",
                 );
             } else {
+                lifecycle_not_before = callback_completed_at;
                 starting_conditions_captured_at = Some(capture.captured_at);
                 workload.ambient_millicelsius = capture.conditions.ambient_millicelsius;
                 workload.starting_cpu_millicelsius = capture.conditions.cpu_millicelsius;
@@ -322,15 +333,22 @@ where
     }
 
     if faults.is_empty() {
-        custom_attempted = true;
         let requested_at = environment.timestamp();
-        if let Some(deadline) = checked_deadline(
+        if requested_at.monotonic_millis < lifecycle_not_before.monotonic_millis {
+            push_fault(
+                &mut faults,
+                lifecycle_not_before,
+                "custom-control-entry",
+                "Custom control handover request time regressed",
+            );
+        } else if let Some(deadline) = checked_deadline(
             requested_at.monotonic_millis,
             CUSTOM_HANDOVER_TIMEOUT_MILLIS,
             requested_at,
             "custom-control-entry",
             &mut faults,
         ) {
+            custom_attempted = true;
             let result = environment.enter_custom_control(deadline);
             let completed_at = environment.timestamp();
             if completed_at.monotonic_millis < requested_at.monotonic_millis {
@@ -354,6 +372,7 @@ where
                 } else {
                     completed_at
                 };
+            lifecycle_not_before = restoration_not_before;
             match result {
                 Ok(()) if faults.is_empty() => state_transitions.push(StateTransitionEvidence {
                     timestamp: completed_at,
@@ -373,7 +392,14 @@ where
 
     if faults.is_empty() {
         let requested_at = environment.timestamp();
-        if let Some(deadline) = checked_deadline(
+        if requested_at.monotonic_millis < lifecycle_not_before.monotonic_millis {
+            push_fault(
+                &mut faults,
+                lifecycle_not_before,
+                "workload-start",
+                "workload launch request time regressed",
+            );
+        } else if let Some(deadline) = checked_deadline(
             requested_at.monotonic_millis,
             WORKLOAD_START_TIMEOUT_MILLIS,
             requested_at,
@@ -383,9 +409,18 @@ where
             workload_attempted = true;
             let result = environment.start_workload(&workload, deadline);
             let completed_at = environment.timestamp();
-            if completed_at.monotonic_millis >= requested_at.monotonic_millis {
+            if completed_at.monotonic_millis < requested_at.monotonic_millis {
+                push_fault(
+                    &mut faults,
+                    requested_at,
+                    "workload-start",
+                    "workload launch completion time regressed",
+                );
+                restoration_not_before = requested_at;
+            } else {
                 restoration_not_before = completed_at;
             }
+            lifecycle_not_before = restoration_not_before;
             if completed_at.monotonic_millis > deadline {
                 push_fault(
                     &mut faults,
@@ -406,7 +441,7 @@ where
                     if faults.is_empty() {
                         push_fault(
                             &mut faults,
-                            completed_at,
+                            restoration_not_before,
                             "workload-start",
                             "workload timestamp lies outside its launch window",
                         );
@@ -414,7 +449,7 @@ where
                 }
                 Err(error) => push_fault(
                     &mut faults,
-                    completed_at,
+                    restoration_not_before,
                     "workload-start",
                     format!("cannot start fixed workload: {error}"),
                 ),
@@ -423,16 +458,7 @@ where
     }
 
     while faults.is_empty() && samples.len() < samples_required {
-        let sample_number = samples.len() as u64 + 1;
-        let Some(offset) = sample_number.checked_mul(SAMPLE_CADENCE_MILLIS) else {
-            push_fault(
-                &mut faults,
-                environment.timestamp(),
-                "sample-cadence",
-                "telemetry schedule overflowed",
-            );
-            break;
-        };
+        let offset = baseline_sample_offsets[samples.len()];
         let Some(expected_millis) = workload_started_at
             .expect("sampling follows a confirmed workload start")
             .monotonic_millis
@@ -456,6 +482,15 @@ where
             break;
         };
         let wait_started_at = environment.timestamp();
+        if wait_started_at.monotonic_millis < lifecycle_not_before.monotonic_millis {
+            push_fault(
+                &mut faults,
+                lifecycle_not_before,
+                "sample-cadence",
+                "telemetry wait request time regressed",
+            );
+            break;
+        }
         if wait_started_at.monotonic_millis > deadline {
             push_fault(
                 &mut faults,
@@ -486,6 +521,7 @@ where
             );
             break;
         }
+        lifecycle_not_before = wait_completed_at;
         if wait_completed_at.monotonic_millis > deadline {
             push_fault(
                 &mut faults,
@@ -515,6 +551,9 @@ where
                 "invalid-telemetry",
                 "telemetry capture completion time regressed",
             );
+        }
+        if captured_at.monotonic_millis >= lifecycle_not_before.monotonic_millis {
+            lifecycle_not_before = captured_at;
         }
         if captured_at.monotonic_millis >= restoration_not_before.monotonic_millis {
             restoration_not_before = captured_at;
@@ -822,6 +861,7 @@ fn validate_plan(plan: &MatchedWorkloadPlan<'_>) -> Result<(), MatchedWorkloadPl
         || plan.baseline.thermal_summary.is_none()
         || plan.baseline.samples.len() < MINIMUM_MATCHED_WORKLOAD_SAMPLES
         || !covers_final_five_minutes(plan.baseline)
+        || matched_sample_offsets(plan.baseline).is_none()
     {
         return Err(MatchedWorkloadPlanError::BaselineNotAccepted);
     }
@@ -878,10 +918,13 @@ fn baseline_fingerprint(baseline: &EvidenceRecord) -> String {
 }
 
 fn matched_run_fingerprint(record: &EvidenceRecord) -> String {
-    let mut transcript = record.clone();
-    transcript.outcome.reason = "canonical-run-transcript".into();
-    transcript.outcome.another_passing_run_required = false;
-    baseline_fingerprint(&transcript)
+    let mut transcript =
+        serde_json::to_value(record).expect("validated evidence always serializes");
+    transcript["completed_at"] = transcript["started_at"].clone();
+    transcript["outcome"]["reason"] = "canonical-run-transcript".into();
+    transcript["outcome"]["another_passing_run_required"] = false.into();
+    let canonical = serde_json::to_vec(&transcript).expect("JSON evidence always serializes");
+    format!("{:x}", Sha256::digest(canonical))
 }
 
 fn calibration_record_is_qualified(
@@ -930,6 +973,28 @@ fn covers_final_five_minutes(record: &EvidenceRecord) -> bool {
                 .checked_sub(first.timestamp.monotonic_millis)
                 .is_some_and(|span| span >= 5 * 60 * 1_000)
         })
+}
+
+fn matched_sample_offsets(record: &EvidenceRecord) -> Option<Vec<u64>> {
+    let workload_started_at = record.workload_started_at?;
+    let offsets = record
+        .samples
+        .iter()
+        .map(|sample| {
+            sample
+                .timestamp
+                .monotonic_millis
+                .checked_sub(workload_started_at.monotonic_millis)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let cadence_is_valid = offsets.first().is_some_and(|offset| {
+        offset.abs_diff(SAMPLE_CADENCE_MILLIS) <= SAMPLE_CADENCE_JITTER_MILLIS
+    }) && offsets.windows(2).all(|pair| {
+        pair[1].checked_sub(pair[0]).is_some_and(|elapsed| {
+            elapsed.abs_diff(SAMPLE_CADENCE_MILLIS) <= SAMPLE_CADENCE_JITTER_MILLIS
+        })
+    });
+    cadence_is_valid.then_some(offsets)
 }
 
 pub(crate) fn matched_workload_is_complete(record: &EvidenceRecord) -> bool {
@@ -1127,6 +1192,16 @@ fn matched_workload_matches_baseline(custom: &EvidenceRecord, baseline: &Evidenc
         return false;
     };
     let comparison = evaluate_thermal_comparison(baseline_summary, custom_summary, &custom.samples);
+    let timing_matches = matched_sample_offsets(custom)
+        .zip(matched_sample_offsets(baseline))
+        .is_some_and(|(custom_offsets, baseline_offsets)| {
+            custom_offsets.len() == baseline_offsets.len()
+                && custom_offsets.iter().zip(baseline_offsets).all(
+                    |(custom_offset, baseline_offset)| {
+                        custom_offset.abs_diff(baseline_offset) <= SAMPLE_CADENCE_JITTER_MILLIS
+                    },
+                )
+        });
     custom_workload.workload_id == baseline_workload.workload_id
         && custom_workload.command == baseline_workload.command
         && custom_workload.version == baseline_workload.version
@@ -1144,6 +1219,7 @@ fn matched_workload_matches_baseline(custom: &EvidenceRecord, baseline: &Evidenc
             .abs_diff(baseline_workload.starting_gpu_millicelsius)
             <= STARTING_TEMPERATURE_COMPARABILITY_MILLICELSIUS as u32
         && custom.samples.len() == baseline.samples.len()
+        && timing_matches
         && comparison.accepted()
         && custom_summary.system_stable == Some(true)
         && custom_summary.kernel_faults.is_empty()
@@ -1155,7 +1231,7 @@ fn matched_workload_matches_calibrations(
     calibrations: MatchedWorkloadTachometerCalibrations<'_>,
 ) -> bool {
     let mut state = TachometerEvidenceState::default();
-    record.samples.iter().all(|sample| {
+    let samples_are_valid = record.samples.iter().all(|sample| {
         [EvidenceFan::Cpu, EvidenceFan::Gpu].into_iter().all(|fan| {
             evaluate_tachometer_sample(
                 sample.timestamp,
@@ -1167,7 +1243,8 @@ fn matched_workload_matches_calibrations(
             )
             .is_ok()
         })
-    })
+    });
+    samples_are_valid && state.pending_fans().next().is_none()
 }
 
 #[derive(Default)]
@@ -1355,14 +1432,20 @@ struct TachometerEvidenceState {
 
 #[derive(Debug, Clone, Copy)]
 struct TachometerCommandState {
+    pwm: u8,
     confirmed_at_millis: u64,
+    settled: bool,
 }
 
 impl TachometerEvidenceState {
     fn pending_fans(self) -> impl Iterator<Item = EvidenceFan> {
         [
-            self.cpu.map(|_| EvidenceFan::Cpu),
-            self.gpu.map(|_| EvidenceFan::Gpu),
+            self.cpu
+                .filter(|state| !state.settled)
+                .map(|_| EvidenceFan::Cpu),
+            self.gpu
+                .filter(|state| !state.settled)
+                .map(|_| EvidenceFan::Gpu),
         ]
         .into_iter()
         .flatten()
@@ -1478,16 +1561,30 @@ fn evaluate_tachometer_sample(
     }
     let expected_rpm = expected_rpm_from_evidence(calibration, pwm)
         .ok_or(TachometerEvidenceError::InvalidEvidence)?;
+    let command_state = match state {
+        Some(command_state) if command_state.pwm == pwm => command_state,
+        Some(command_state) if !command_state.settled => {
+            command_state.pwm = pwm;
+            command_state
+        }
+        _ => state.insert(TachometerCommandState {
+            pwm,
+            confirmed_at_millis: pwm_readback.timestamp.monotonic_millis,
+            settled: false,
+        }),
+    };
     if rpm_in_band(rpm, expected_rpm) {
-        *state = None;
+        command_state.settled = true;
         return Ok(());
     }
-    let response_started_at = state
-        .get_or_insert(TachometerCommandState {
-            confirmed_at_millis: pwm_readback.timestamp.monotonic_millis,
-        })
-        .confirmed_at_millis;
-    let deadline = response_started_at
+    if command_state.settled {
+        return Err(TachometerEvidenceError::OutOfBand {
+            expected_rpm,
+            actual_rpm: rpm,
+        });
+    }
+    let deadline = command_state
+        .confirmed_at_millis
         .checked_add(calibration.response_deadline_millis)
         .ok_or(TachometerEvidenceError::DeadlineOverflow)?;
     if rpm_readback.timestamp.monotonic_millis <= deadline {

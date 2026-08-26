@@ -610,7 +610,12 @@
             "properties": { "outcome": { "const": "firmware-auto-confirmed" } },
             "required": ["outcome"]
           },
-          "then": { "properties": { "enable_readback": { "const": 2 } } }
+          "then": {
+            "properties": {
+              "auto_write_succeeded": { "const": true },
+              "enable_readback": { "const": 2 }
+            }
+          }
         },
         {
           "if": {
