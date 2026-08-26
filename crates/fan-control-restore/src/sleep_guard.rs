@@ -113,7 +113,6 @@ pub(crate) fn prepare_sleep(
     clear_marker(marker)?;
     clear_marker(prepared_marker)?;
     let start_gate = start_gate_marker(prepared_marker);
-    clear_marker(&start_gate)?;
     fs::write(&start_gate, START_GATE_CONTENT)?;
     let state = match manager.active_state() {
         Ok(state) => state,
@@ -337,7 +336,7 @@ fn unit_property(unit: &str, property: &str) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, fs, io, path::PathBuf, rc::Rc};
+    use std::{cell::RefCell, fs, io, os::unix::fs::MetadataExt, path::PathBuf, rc::Rc};
 
     use super::{
         DaemonActiveState, DaemonManager, PlannedStop, prepare_sleep, restore_after_failed_guard,
@@ -475,6 +474,23 @@ mod tests {
             ]
         );
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn repeated_preparation_never_unlinks_the_existing_start_gate() {
+        let marker = marker_path("existing-gate");
+        let prepared_marker = marker_path("existing-gate-prepared");
+        let start_gate = super::start_gate_marker(&marker);
+        let _cleanup = MarkerCleanup(marker.clone());
+        let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
+        fs::write(&start_gate, b"existing gate").unwrap();
+        let original_inode = fs::metadata(&start_gate).unwrap().ino();
+        let mut manager = FakeDaemonManager::inactive();
+
+        prepare_sleep(&mut manager, &marker, &prepared_marker, || Ok(())).unwrap();
+
+        assert_eq!(fs::metadata(&start_gate).unwrap().ino(), original_inode);
+        assert_eq!(fs::read(&start_gate).unwrap(), super::START_GATE_CONTENT);
     }
 
     #[test]
