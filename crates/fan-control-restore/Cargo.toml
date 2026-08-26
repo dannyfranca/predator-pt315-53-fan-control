@@ -6,5 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+systemd-test-probes = []
+
 [dependencies]
 fan-control-core = { path = "../fan-control-core" }
