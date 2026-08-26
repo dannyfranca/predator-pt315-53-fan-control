@@ -98,10 +98,19 @@ pub(crate) fn prepare_sleep(
     let start_gate = start_gate_marker(prepared_marker);
     clear_marker(&start_gate)?;
     fs::write(&start_gate, START_GATE_CONTENT)?;
-    let planned_invocation = match manager.active_state()? {
+    let state = match manager.active_state() {
+        Ok(state) => state,
+        Err(error) => return stop_after_inspection_error(manager, error),
+    };
+    let planned_invocation = match state {
         DaemonActiveState::Active => {
-            let invocation = manager.invocation_id()?;
-            validate_invocation_id(&invocation)?;
+            let invocation = match manager.invocation_id() {
+                Ok(invocation) => invocation,
+                Err(error) => return stop_after_inspection_error(manager, error),
+            };
+            if let Err(error) = validate_invocation_id(&invocation) {
+                return stop_after_inspection_error(manager, error);
+            }
             if manager.stop()? == PlannedStop::Clean {
                 manager.reset_planned_state(&invocation)?;
                 Some(invocation)
@@ -165,6 +174,14 @@ pub(crate) fn resume_after_sleep(
         }
         Err(error) => return Err(error),
     };
+    match fs::read(&prepared_marker) {
+        Ok(content) if content == PREPARED_MARKER_CONTENT => {}
+        Ok(_) => return Err(io::Error::other("invalid sleep preparation marker")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(io::Error::other("missing sleep preparation marker"));
+        }
+        Err(error) => return Err(error),
+    }
 
     match manager.active_state()? {
         DaemonActiveState::Inactive => {
@@ -207,6 +224,18 @@ pub(crate) fn resume_after_sleep(
         return contain_failed_resume(manager, &start_gate, &prepared_marker, error);
     }
     Ok(())
+}
+
+fn stop_after_inspection_error(
+    manager: &mut impl DaemonManager,
+    inspection_error: io::Error,
+) -> io::Result<()> {
+    match manager.stop() {
+        Ok(_) => Err(inspection_error),
+        Err(stop_error) => Err(io::Error::other(format!(
+            "{inspection_error}; synchronous containment stop also failed: {stop_error}"
+        ))),
+    }
 }
 
 fn contain_failed_resume(
@@ -442,6 +471,24 @@ mod tests {
         assert_eq!(&*manager.calls.borrow(), &["state", "stop", "restore"]);
         assert!(!marker.exists());
         assert!(prepared_marker.is_file());
+    }
+
+    #[test]
+    fn failed_daemon_inspection_still_requests_synchronous_containment() {
+        let marker = marker_path("inspection-failed");
+        let prepared_marker = marker_path("inspection-failed-prepared");
+        let _cleanup = MarkerCleanup(marker.clone());
+        let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
+        let mut manager = FakeDaemonManager {
+            state: Some(Err(io::Error::other("system manager unavailable"))),
+            ..FakeDaemonManager::default()
+        };
+
+        assert!(prepare_sleep(&mut manager, &marker, &prepared_marker, || Ok(())).is_err());
+
+        assert_eq!(&*manager.calls.borrow(), &["state", "stop"]);
+        assert!(super::start_gate_marker(&marker).is_file());
+        assert!(!marker.exists());
     }
 
     #[test]
@@ -699,6 +746,35 @@ mod tests {
             ]
         );
         assert!(marker.is_file());
+    }
+
+    #[test]
+    fn missing_corrupt_or_stale_preparation_evidence_never_authorizes_resume() {
+        let cases: [(&str, Option<&[u8]>); 3] = [
+            ("missing-preparation", None),
+            ("corrupt-preparation", Some(b"firmware-auto-conf")),
+            ("stale-preparation", Some(super::RESUME_COMPLETED_CONTENT)),
+        ];
+
+        for (case, replacement) in cases {
+            let marker = marker_path(case);
+            let prepared_marker = marker_path(&format!("{case}-prepared"));
+            let _cleanup = MarkerCleanup(marker.clone());
+            let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
+            let mut manager = FakeDaemonManager::active();
+            prepare_sleep(&mut manager, &marker, &prepared_marker, || Ok(())).unwrap();
+            match replacement {
+                Some(content) => fs::write(&prepared_marker, content).unwrap(),
+                None => fs::remove_file(&prepared_marker).unwrap(),
+            }
+            let calls_before_resume = manager.calls.borrow().clone();
+
+            assert!(resume_after_sleep(&mut manager, &marker).is_err());
+
+            assert_eq!(&*manager.calls.borrow(), &calls_before_resume);
+            assert!(marker.is_file());
+            assert!(super::start_gate_marker(&marker).is_file());
+        }
     }
 
     #[test]
