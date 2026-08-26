@@ -262,13 +262,17 @@ fn contain_failed_resume(
     error: io::Error,
 ) -> io::Result<()> {
     let directory = ensure_marker_directory(prepared_marker);
-    let gate = fs::write(start_gate, START_GATE_CONTENT);
+    let gate = directory
+        .is_ok()
+        .then(|| fs::write(start_gate, START_GATE_CONTENT));
     let stop = manager.stop();
-    let prepared = fs::write(prepared_marker, PREPARED_MARKER_CONTENT);
+    let prepared = directory
+        .is_ok()
+        .then(|| fs::write(prepared_marker, PREPARED_MARKER_CONTENT));
     directory?;
-    gate?;
+    gate.expect("validated directory must attempt the start gate")?;
     stop?;
-    prepared?;
+    prepared.expect("validated directory must attempt the prepared marker")?;
     Err(error)
 }
 
@@ -801,6 +805,38 @@ mod tests {
         assert!(manager.stop_called);
         assert!(!start_gate.exists());
         assert!(prepared_marker.is_file());
+    }
+
+    #[test]
+    fn failed_resume_never_writes_through_an_untrusted_marker_directory() {
+        let directory = std::env::temp_dir().join(format!(
+            "pt31553-sleep-guard-untrusted-containment-{}",
+            std::process::id()
+        ));
+        let _directory_cleanup = DirectoryCleanup(directory.clone());
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o750)).unwrap();
+        let start_gate = directory.join("resume-daemon-start-blocked");
+        let prepared_marker = directory.join("resume-daemon-prepared");
+        let mut manager = GateObservingManager {
+            gate: start_gate.clone(),
+            gate_must_exist: false,
+            stop_called: false,
+        };
+
+        assert!(
+            super::contain_failed_resume(
+                &mut manager,
+                &start_gate,
+                &prepared_marker,
+                io::Error::other("restart failed"),
+            )
+            .is_err()
+        );
+
+        assert!(manager.stop_called);
+        assert!(!start_gate.exists());
+        assert!(!prepared_marker.exists());
     }
 
     #[test]
