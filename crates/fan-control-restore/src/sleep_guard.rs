@@ -33,42 +33,58 @@ pub(crate) trait DaemonManager {
     fn restart_ready(&mut self) -> io::Result<()>;
 }
 
-pub(crate) struct SystemdDaemonManager;
+pub(crate) struct SystemdDaemonManager {
+    unit: String,
+}
+
+impl Default for SystemdDaemonManager {
+    fn default() -> Self {
+        Self {
+            unit: DAEMON_UNIT.to_owned(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl SystemdDaemonManager {
+    pub(crate) fn for_unit(unit: impl Into<String>) -> Self {
+        Self { unit: unit.into() }
+    }
+}
 
 impl DaemonManager for SystemdDaemonManager {
     fn active_state(&mut self) -> io::Result<DaemonActiveState> {
-        let unit = daemon_unit();
-        match unit_property(&unit, "ActiveState")?.as_str() {
+        match unit_property(&self.unit, "ActiveState")?.as_str() {
             "active" => Ok(DaemonActiveState::Active),
             "inactive" => Ok(DaemonActiveState::Inactive),
             "failed" => Ok(DaemonActiveState::Failed),
             "activating" | "deactivating" => Ok(DaemonActiveState::Transitioning),
             state => Err(io::Error::other(format!(
-                "{unit} has transitional or unsupported state {state:?}"
+                "{} has transitional or unsupported state {state:?}",
+                self.unit
             ))),
         }
     }
 
     fn invocation_id(&mut self) -> io::Result<String> {
-        unit_property(&daemon_unit(), "InvocationID")
+        unit_property(&self.unit, "InvocationID")
     }
 
     fn stop(&mut self) -> io::Result<PlannedStop> {
-        let unit = daemon_unit();
-        systemctl(&["stop", &unit])?;
-        let active_state = unit_property(&unit, "ActiveState")?;
-        let result = unit_property(&unit, "Result")?;
+        systemctl(&["stop", &self.unit])?;
+        let active_state = unit_property(&self.unit, "ActiveState")?;
+        let result = unit_property(&self.unit, "Result")?;
         match (active_state.as_str(), result.as_str()) {
             ("inactive", "success") => Ok(PlannedStop::Clean),
             ("inactive" | "failed", _) => Ok(PlannedStop::Faulted),
             _ => Err(io::Error::other(format!(
-                "{unit} did not complete a clean planned stop: state={active_state:?} result={result:?}"
+                "{} did not complete a clean planned stop: state={active_state:?} result={result:?}",
+                self.unit
             ))),
         }
     }
 
     fn reset_planned_state(&mut self, invocation: &str) -> io::Result<()> {
-        let unit = daemon_unit();
         let state = self.active_state()?;
         let observed = self.invocation_id()?;
         if state == DaemonActiveState::Inactive && observed.is_empty() {
@@ -76,14 +92,15 @@ impl DaemonManager for SystemdDaemonManager {
         }
         if state != DaemonActiveState::Inactive || observed != invocation {
             return Err(io::Error::other(format!(
-                "{unit} changed before resetting the cleanly stopped invocation"
+                "{} changed before resetting the cleanly stopped invocation",
+                self.unit
             )));
         }
-        systemctl(&["reset-failed", &unit])
+        systemctl(&["reset-failed", &self.unit])
     }
 
     fn restart_ready(&mut self) -> io::Result<()> {
-        systemctl(&["restart", &daemon_unit()])
+        systemctl(&["restart", &self.unit])
     }
 }
 
@@ -244,12 +261,12 @@ fn contain_failed_resume(
     prepared_marker: &Path,
     error: io::Error,
 ) -> io::Result<()> {
+    let gate = fs::write(start_gate, START_GATE_CONTENT);
     let stop = manager.stop();
     let prepared = fs::write(prepared_marker, PREPARED_MARKER_CONTENT);
-    let gate = fs::write(start_gate, START_GATE_CONTENT);
+    gate?;
     stop?;
     prepared?;
-    gate?;
     Err(error)
 }
 
@@ -318,14 +335,6 @@ fn unit_property(unit: &str, property: &str) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn daemon_unit() -> String {
-    #[cfg(feature = "systemd-test-probes")]
-    if let Ok(unit) = std::env::var("PT31553_TEST_DAEMON_UNIT") {
-        return unit;
-    }
-    DAEMON_UNIT.to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, fs, io, path::PathBuf, rc::Rc};
@@ -390,6 +399,43 @@ mod tests {
             self.calls.borrow_mut().push("restart");
             self.start_result.take().unwrap_or(Ok(()))
         }
+    }
+
+    struct GateObservingManager {
+        gate: PathBuf,
+        gate_must_exist: bool,
+        stop_called: bool,
+    }
+
+    impl DaemonManager for GateObservingManager {
+        fn active_state(&mut self) -> io::Result<DaemonActiveState> {
+            unreachable!()
+        }
+
+        fn invocation_id(&mut self) -> io::Result<String> {
+            unreachable!()
+        }
+
+        fn reset_planned_state(&mut self, _invocation: &str) -> io::Result<()> {
+            unreachable!()
+        }
+
+        fn stop(&mut self) -> io::Result<PlannedStop> {
+            self.stop_called = true;
+            assert_eq!(self.gate.is_file(), self.gate_must_exist);
+            Ok(PlannedStop::Clean)
+        }
+
+        fn restart_ready(&mut self) -> io::Result<()> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn system_manager_can_target_an_isolated_test_unit() {
+        let manager = super::SystemdDaemonManager::for_unit("isolated.service");
+
+        assert_eq!(manager.unit, "isolated.service");
     }
 
     #[test]
@@ -596,6 +642,59 @@ mod tests {
         assert_eq!(&*recovery_calls.borrow(), &["restore"]);
         assert!(prepared_marker.is_file());
         assert!(super::start_gate_marker(&marker).is_file());
+    }
+
+    #[test]
+    fn failed_resume_closes_start_gate_before_stopping_daemon() {
+        let start_gate = marker_path("containment-gate");
+        let prepared_marker = marker_path("containment-prepared");
+        let _gate_cleanup = MarkerCleanup(start_gate.clone());
+        let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
+        let mut manager = GateObservingManager {
+            gate: start_gate.clone(),
+            gate_must_exist: true,
+            stop_called: false,
+        };
+
+        let error = super::contain_failed_resume(
+            &mut manager,
+            &start_gate,
+            &prepared_marker,
+            io::Error::other("marker finalization failed"),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("marker finalization failed"));
+        assert!(manager.stop_called);
+        assert!(start_gate.is_file());
+        assert!(prepared_marker.is_file());
+    }
+
+    #[test]
+    fn failed_resume_still_stops_daemon_when_gate_cannot_be_created() {
+        let missing_parent = marker_path("missing-containment-parent");
+        let start_gate = missing_parent.join("start-blocked");
+        let prepared_marker = marker_path("containment-stop-prepared");
+        let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
+        let mut manager = GateObservingManager {
+            gate: start_gate.clone(),
+            gate_must_exist: false,
+            stop_called: false,
+        };
+
+        assert!(
+            super::contain_failed_resume(
+                &mut manager,
+                &start_gate,
+                &prepared_marker,
+                io::Error::other("marker finalization failed"),
+            )
+            .is_err()
+        );
+
+        assert!(manager.stop_called);
+        assert!(!start_gate.exists());
+        assert!(prepared_marker.is_file());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{self, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
@@ -11,6 +11,9 @@ use std::{
 
 use fan_control_core::{ServiceNotification, ServiceNotifier, SystemdNotifier};
 
+#[path = "../../fan-control-restore/src/sleep_guard.rs"]
+mod restore_sleep_guard;
+
 const UNIT: &str = include_str!("../../../systemd/pt31553-fan-sleep-guard.service");
 const DAEMON_UNIT: &str = include_str!("../../../systemd/pt31553-fand.service");
 const PROBE_LOG: &str = "PT31553_SLEEP_PROBE_LOG";
@@ -18,7 +21,10 @@ const PROBE_READY_BLOCK: &str = "PT31553_SLEEP_PROBE_READY_BLOCK";
 const PROBE_READY_DELAY: &str = "PT31553_SLEEP_PROBE_READY_DELAY";
 const PROBE_ROLE: &str = "PT31553_SLEEP_PROBE_ROLE";
 const RUN_SYSTEMD_LIFECYCLE: &str = "PT31553_RUN_SYSTEMD_LIFECYCLE";
-const SLEEP_HELPER: &str = "PT31553_SLEEP_HELPER";
+const TEST_DAEMON_UNIT: &str = "PT31553_SLEEP_TEST_DAEMON_UNIT";
+const TEST_RECOVERY: &str = "PT31553_SLEEP_TEST_RECOVERY";
+const TEST_RECOVERY_EVENT: &str = "PT31553_SLEEP_TEST_RECOVERY_EVENT";
+const TEST_RESUME_MARKER: &str = "PT31553_SLEEP_TEST_RESUME_MARKER";
 
 #[test]
 fn sleep_guard_is_a_required_gate_for_every_systemd_sleep_transaction() {
@@ -98,8 +104,71 @@ fn sleep_guard_command_probe() {
             notifier.notify(ServiceNotification::Ready).unwrap();
             thread::sleep(Duration::from_secs(60));
         }
+        "daemon-restore" => run_test_recovery().unwrap(),
+        "guard-prepare" => {
+            let marker = test_resume_marker();
+            restore_sleep_guard::prepare_sleep(
+                &mut test_daemon_manager(),
+                &marker,
+                &prepared_marker(&marker),
+                run_test_recovery,
+            )
+            .unwrap();
+        }
+        "guard-resume" => {
+            restore_sleep_guard::resume_after_sleep(
+                &mut test_daemon_manager(),
+                &test_resume_marker(),
+            )
+            .unwrap();
+        }
+        "guard-failed" => {
+            restore_sleep_guard::restore_after_failed_guard(
+                &prepared_marker(&test_resume_marker()),
+                run_test_recovery,
+            )
+            .unwrap();
+        }
         _ => panic!("unknown sleep probe role {role}"),
     }
+}
+
+fn test_daemon_manager() -> restore_sleep_guard::SystemdDaemonManager {
+    restore_sleep_guard::SystemdDaemonManager::for_unit(
+        std::env::var(TEST_DAEMON_UNIT).expect("test daemon unit is required"),
+    )
+}
+
+fn test_resume_marker() -> PathBuf {
+    std::env::var_os(TEST_RESUME_MARKER)
+        .expect("test resume marker is required")
+        .into()
+}
+
+fn prepared_marker(marker: &Path) -> PathBuf {
+    marker.with_file_name("resume-daemon-prepared")
+}
+
+fn run_test_recovery() -> io::Result<()> {
+    let log = std::env::var_os(PROBE_LOG)
+        .ok_or_else(|| io::Error::other("probe log path is required"))?;
+    let behavior = std::env::var(TEST_RECOVERY)
+        .map_err(|_| io::Error::other("test recovery behavior is required"))?;
+    let event = std::env::var(TEST_RECOVERY_EVENT).unwrap_or_else(|_| behavior.clone());
+    match behavior.as_str() {
+        "auto-confirmed" => append_test_recovery_log(&log, &event),
+        "containment-retry" => loop {
+            append_test_recovery_log(&log, &event)?;
+            thread::sleep(Duration::from_millis(100));
+        },
+        value => Err(io::Error::other(format!(
+            "unknown test recovery behavior {value:?}"
+        ))),
+    }
+}
+
+fn append_test_recovery_log(path: &std::ffi::OsStr, event: &str) -> io::Result<()> {
+    writeln!(OpenOptions::new().append(true).open(path)?, "{event}")
 }
 
 fn probe_flag_exists(variable: &str) -> bool {
@@ -134,14 +203,6 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
 
     let probe_path = PathBuf::from("/run").join(format!("pt31553-sleep-test-{suffix}-probe"));
     installation.install_executable(&probe_path, &std::env::current_exe().unwrap());
-    let helper_path = PathBuf::from("/run").join(format!("pt31553-sleep-test-{suffix}-helper"));
-    installation.install_executable(
-        &helper_path,
-        Path::new(
-            &std::env::var_os(SLEEP_HELPER)
-                .expect("PT31553_SLEEP_HELPER must name the feature-built recovery helper"),
-        ),
-    );
     let log = PathBuf::from("/tmp").join(format!("pt31553-sleep-test-{suffix}.log"));
     fs::write(&log, "").unwrap();
     fs::set_permissions(&log, fs::Permissions::from_mode(0o666)).unwrap();
@@ -167,19 +228,19 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
     installation.remove_after(Path::new(&prepared_marker));
     installation.remove_after(Path::new(&start_gate));
     installation.remove_runtime_directory_after(Path::new("/run").join(&runtime_directory));
-    let helper = |command: &str, recovery: Option<&str>, event: Option<&str>| {
+    let helper = |role: &str, recovery: Option<&str>, event: Option<&str>| {
         let recovery = recovery
-            .map(|value| format!(" PT31553_TEST_RECOVERY={value}"))
+            .map(|value| format!(" {TEST_RECOVERY}={value}"))
             .unwrap_or_default();
         let event = event
-            .map(|value| format!(" PT31553_TEST_RECOVERY_EVENT={value}"))
+            .map(|value| format!(" {TEST_RECOVERY_EVENT}={value}"))
             .unwrap_or_default();
         format!(
-            "/usr/bin/env PT31553_TEST_DAEMON_UNIT={daemon_name} PT31553_TEST_RESUME_MARKER={marker} PT31553_TEST_RECOVERY_LOG={}{}{} {} {command}",
+            "/usr/bin/env {PROBE_ROLE}={role} {TEST_DAEMON_UNIT}={daemon_name} {TEST_RESUME_MARKER}={marker} {PROBE_LOG}={}{}{} {} --exact sleep_guard_command_probe --nocapture",
             log.display(),
             recovery,
             event,
-            helper_path.display()
+            probe_path.display()
         )
     };
     installation.install(
@@ -187,7 +248,11 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
         &format!(
             "[Unit]\nStartLimitIntervalSec=infinity\nStartLimitBurst=2\nConditionPathExists=!{start_gate}\n\n[Service]\nType=notify\nNotifyAccess=main\nExecStart={}\nExecStopPost={}\nTimeoutStartSec=3s\nTimeoutStopSec=infinity\n",
             probe("daemon-ready"),
-            helper("--restore", Some("auto-confirmed"), Some("daemon-cleanup"))
+            helper(
+                "daemon-restore",
+                Some("auto-confirmed"),
+                Some("daemon-cleanup")
+            )
         ),
     );
     let prepare_recovery = if restoration_succeeds {
@@ -202,7 +267,7 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
             &format!(
                 "ExecStart={}",
                 helper(
-                    "--prepare-sleep",
+                    "guard-prepare",
                     Some(prepare_recovery),
                     Some(if restoration_succeeds {
                         "guard-prepare"
@@ -214,14 +279,14 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
         )
         .replace(
             "ExecStop=/usr/bin/pt31553-fan-restore --resume-after-sleep",
-            &format!("ExecStop={}", helper("--resume-after-sleep", None, None)),
+            &format!("ExecStop={}", helper("guard-resume", None, None)),
         )
         .replace(
             "ExecStopPost=/usr/bin/pt31553-fan-restore --restore-after-failed-sleep-guard",
             &format!(
                 "ExecStopPost={}",
                 helper(
-                    "--restore-after-failed-sleep-guard",
+                    "guard-failed",
                     Some("auto-confirmed"),
                     Some("guard-cancel-recovery")
                 )

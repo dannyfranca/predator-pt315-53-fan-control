@@ -31,9 +31,7 @@ jobs:
           PT31553_RUN_SYSTEMD_LIFECYCLE: "1"
         run: |
           cargo test -p fan-control-restore --bin fan-control-restore
-          cargo build -p fan-control-restore --features systemd-test-probes
           cargo test -p fan-control-daemon --test sleep_guard
-          PT31553_SLEEP_HELPER="$PWD/target/debug/fan-control-restore" \
-            cargo test -p fan-control-daemon --test sleep_guard \
+          cargo test -p fan-control-daemon --test sleep_guard \
             actual_systemd_manager_blocks_sleep_failure_and_restarts_fresh_after_resume \
             -- --ignored --exact --nocapture

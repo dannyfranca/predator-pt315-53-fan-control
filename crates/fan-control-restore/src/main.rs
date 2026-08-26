@@ -5,9 +5,6 @@ use std::{
     time::Duration,
 };
 
-#[cfg(feature = "systemd-test-probes")]
-use std::{fs::OpenOptions, io::Write};
-
 use fan_control_core::{
     SystemFirmwareAutoRecovery, SystemOwnershipPlatform, acquire_controller_ownership,
 };
@@ -33,7 +30,7 @@ fn main() {
             }
         }
         Some(value) if value == std::ffi::OsStr::new("--prepare-sleep") => {
-            let mut manager = sleep_guard::SystemdDaemonManager;
+            let mut manager = sleep_guard::SystemdDaemonManager::default();
             let marker = sleep_resume_marker();
             let prepared_marker = sleep_prepared_marker(&marker);
             if let Err(error) = sleep_guard::prepare_sleep(
@@ -47,7 +44,7 @@ fn main() {
             }
         }
         Some(value) if value == std::ffi::OsStr::new("--resume-after-sleep") => {
-            let mut manager = sleep_guard::SystemdDaemonManager;
+            let mut manager = sleep_guard::SystemdDaemonManager::default();
             let marker = sleep_resume_marker();
             if let Err(error) = sleep_guard::resume_after_sleep(&mut manager, &marker) {
                 eprintln!("fan-control-restore: resume failed: {error}");
@@ -74,11 +71,6 @@ fn main() {
 }
 
 fn restore_firmware_auto() -> Result<(), io::Error> {
-    #[cfg(feature = "systemd-test-probes")]
-    if let Some(behavior) = std::env::var_os("PT31553_TEST_RECOVERY") {
-        return run_test_recovery(behavior.to_string_lossy().as_ref());
-    }
-
     let mut platform = SystemOwnershipPlatform::new();
     let mut ownership = loop {
         match acquire_controller_ownership(&mut platform) {
@@ -114,36 +106,9 @@ fn restore_firmware_auto() -> Result<(), io::Error> {
 }
 
 fn sleep_resume_marker() -> PathBuf {
-    #[cfg(feature = "systemd-test-probes")]
-    if let Some(path) = std::env::var_os("PT31553_TEST_RESUME_MARKER") {
-        return path.into();
-    }
     PathBuf::from(SLEEP_RESUME_MARKER)
 }
 
 fn sleep_prepared_marker(resume_marker: &Path) -> PathBuf {
     resume_marker.with_file_name("resume-daemon-prepared")
-}
-
-#[cfg(feature = "systemd-test-probes")]
-fn run_test_recovery(behavior: &str) -> Result<(), io::Error> {
-    let log = std::env::var_os("PT31553_TEST_RECOVERY_LOG")
-        .ok_or_else(|| io::Error::other("PT31553_TEST_RECOVERY_LOG is required"))?;
-    let event =
-        std::env::var("PT31553_TEST_RECOVERY_EVENT").unwrap_or_else(|_| behavior.to_owned());
-    match behavior {
-        "auto-confirmed" => append_test_recovery_log(&log, &event),
-        "containment-retry" => loop {
-            append_test_recovery_log(&log, &event)?;
-            thread::sleep(Duration::from_millis(100));
-        },
-        value => Err(io::Error::other(format!(
-            "unknown test recovery behavior {value:?}"
-        ))),
-    }
-}
-
-#[cfg(feature = "systemd-test-probes")]
-fn append_test_recovery_log(path: &std::ffi::OsStr, event: &str) -> Result<(), io::Error> {
-    writeln!(OpenOptions::new().append(true).open(path)?, "{event}")
 }
