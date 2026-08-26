@@ -19,11 +19,8 @@ ExecStop=/usr/bin/pt31553-fan-restore --resume-after-sleep
 # written only after Auto confirmation, and keeps independent recovery alive if it is absent.
 ExecStopPost=/usr/bin/pt31553-fan-restore --restore-after-failed-sleep-guard
 TimeoutStopSec=infinity
-RuntimeDirectory=pt31553-fan-sleep-guard
-RuntimeDirectoryMode=0700
-# A failed resume retains its authorization marker for explicit retry. Successful StopPost removes
-# the prepared marker; the empty root-only directory is cleared at boot or the next preparation.
-RuntimeDirectoryPreserve=yes
+# Marker files live under /run, but are owned by the recovery helper rather than this unit. This
+# keeps the daemon start gate intact if systemd tears down a failed guard transaction.
 
 [Install]
 RequiredBy=sleep.target

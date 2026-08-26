@@ -62,12 +62,7 @@ fn sleep_guard_confirms_auto_before_sleep_and_uses_a_fresh_process_after_resume(
         "/usr/bin/pt31553-fan-restore --restore-after-failed-sleep-guard"
     );
     assert_eq!(directives["Service"]["TimeoutStopSec"], "infinity");
-    assert_eq!(
-        directives["Service"]["RuntimeDirectory"],
-        "pt31553-fan-sleep-guard"
-    );
-    assert_eq!(directives["Service"]["RuntimeDirectoryMode"], "0700");
-    assert_eq!(directives["Service"]["RuntimeDirectoryPreserve"], "yes");
+    assert!(!directives["Service"].contains_key("RuntimeDirectory"));
 }
 
 #[test]
@@ -302,10 +297,6 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
                     Some("guard-cancel-recovery")
                 )
             ),
-        )
-        .replace(
-            "RuntimeDirectory=pt31553-fan-sleep-guard",
-            &format!("RuntimeDirectory={runtime_directory}"),
         );
     installation.install(&guard_name, &guard);
     installation.install(

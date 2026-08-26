@@ -1,5 +1,6 @@
 use std::{
     fs, io,
+    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, Output},
 };
@@ -110,6 +111,7 @@ pub(crate) fn prepare_sleep(
     prepared_marker: &Path,
     restore: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
+    ensure_marker_directory(marker)?;
     clear_marker(marker)?;
     clear_marker(prepared_marker)?;
     let start_gate = start_gate_marker(prepared_marker);
@@ -259,13 +261,34 @@ fn contain_failed_resume(
     prepared_marker: &Path,
     error: io::Error,
 ) -> io::Result<()> {
+    let directory = ensure_marker_directory(prepared_marker);
     let gate = fs::write(start_gate, START_GATE_CONTENT);
     let stop = manager.stop();
     let prepared = fs::write(prepared_marker, PREPARED_MARKER_CONTENT);
+    directory?;
     gate?;
     stop?;
     prepared?;
     Err(error)
+}
+
+fn ensure_marker_directory(marker: &Path) -> io::Result<()> {
+    let directory = marker
+        .parent()
+        .ok_or_else(|| io::Error::other("sleep marker has no parent directory"))?;
+    match fs::create_dir(directory) {
+        Ok(()) => fs::set_permissions(directory, fs::Permissions::from_mode(0o700)),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::metadata(directory)?;
+            if !metadata.is_dir() || metadata.permissions().mode() & 0o777 != 0o700 {
+                return Err(io::Error::other(
+                    "sleep marker directory is not a private directory",
+                ));
+            }
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn prepared_marker(marker: &Path) -> std::path::PathBuf {
@@ -335,7 +358,13 @@ fn unit_property(unit: &str, property: &str) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, fs, io, os::unix::fs::MetadataExt, path::PathBuf, rc::Rc};
+    use std::{
+        cell::RefCell,
+        fs, io,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        path::PathBuf,
+        rc::Rc,
+    };
 
     use super::{
         DaemonActiveState, DaemonManager, PlannedStop, prepare_sleep, restore_after_failed_guard,
@@ -434,6 +463,23 @@ mod tests {
         let manager = super::SystemdDaemonManager::for_unit("isolated.service");
 
         assert_eq!(manager.unit, "isolated.service");
+    }
+
+    #[test]
+    fn preparation_creates_a_private_helper_owned_marker_directory() {
+        let directory = std::env::temp_dir().join(format!(
+            "pt31553-sleep-guard-directory-{}",
+            std::process::id()
+        ));
+        let marker = directory.join("resume-daemon");
+        let prepared_marker = directory.join("resume-daemon-prepared");
+        let _directory_cleanup = DirectoryCleanup(directory.clone());
+        let mut manager = FakeDaemonManager::inactive();
+
+        prepare_sleep(&mut manager, &marker, &prepared_marker, || Ok(())).unwrap();
+
+        assert_eq!(fs::metadata(directory).unwrap().mode() & 0o777, 0o700);
+        assert!(prepared_marker.is_file());
     }
 
     #[test]
@@ -951,7 +997,17 @@ mod tests {
     }
 
     fn marker_path(case: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("pt31553-sleep-guard-{}-{case}", std::process::id()))
+        let test_name = std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .replace("::", "-");
+        let directory = std::env::temp_dir().join(format!(
+            "pt31553-sleep-guard-{}-{test_name}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        directory.join(case)
     }
 
     struct MarkerCleanup(PathBuf);
@@ -960,6 +1016,17 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
             let _ = fs::remove_file(super::start_gate_marker(&self.0));
+            if let Some(directory) = self.0.parent() {
+                let _ = fs::remove_dir(directory);
+            }
+        }
+    }
+
+    struct DirectoryCleanup(PathBuf);
+
+    impl Drop for DirectoryCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
         }
     }
 }
