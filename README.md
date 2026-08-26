@@ -25,3 +25,9 @@ cargo run -p fan-control-daemon
 cargo run -p fan-control-restore
 cargo run -p fan-control-qualify
 ```
+
+## Project boundary
+
+This project is limited to safe fan-control qualification for the exact Acer Predator PT315-53 on CachyOS through the standard in-tree `acer_wmi`/Acer hwmon interface. GUI work, other laptop models, other distributions, bypass backends, and unrelated system tuning are out of scope. See [CONTRIBUTING.md](CONTRIBUTING.md) for the required exact-model evidence.
+
+Original repository work is [MIT-licensed](LICENSE). Linux-derived material remains `GPL-2.0-only`; see [LICENSING.md](LICENSING.md) for the boundary and provenance rules. Report vulnerabilities, unsafe fan behavior, and sensitive qualification evidence privately according to [SECURITY.md](SECURITY.md).

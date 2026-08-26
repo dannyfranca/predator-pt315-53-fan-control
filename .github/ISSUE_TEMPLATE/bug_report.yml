@@ -1,0 +1,66 @@
+name: Exact-model bug report
+description: Report a reproducible PT315-53 safety or correctness problem
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not publish vulnerabilities, unsafe fan incidents, or identifying evidence here. Follow SECURITY.md and stop testing if cooling may be unsafe.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope confirmation
+      options:
+        - label: This report concerns an Acer Predator PT315-53 running CachyOS.
+          required: true
+        - label: It uses only the standard in-tree acer_wmi/Acer hwmon backend.
+          required: true
+        - label: It is not a GUI, other-model, other-distribution, bypass-backend, or unrelated-tuning request.
+          required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Tested commit
+      description: Full Git commit ID or exact release identifier.
+      placeholder: 40-character commit ID
+    validations:
+      required: true
+  - type: textarea
+    id: model
+    attributes:
+      label: Exact-model evidence
+      description: Redacted DMI product name, board name, and BIOS version.
+      placeholder: |
+        product: Predator PT315-53
+        board: ...
+        BIOS: ...
+    validations:
+      required: true
+  - type: textarea
+    id: platform
+    attributes:
+      label: Platform and trust evidence
+      description: CachyOS version; kernel package/release/source; Secure Boot; acer_wmi path, hash, signer, and vermagic.
+    validations:
+      required: true
+  - type: textarea
+    id: fan
+    attributes:
+      label: Fan-control evidence
+      description: Acer hwmon identity, exact two-fan endpoints, pre/post mode readbacks, restoration result, and a redacted qualification excerpt.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+      description: Minimal reproduction, expected result, observed result, and whether both fans were confirmed in Firmware Auto afterward.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs
+      description: Remove secrets, serial numbers, usernames, hostnames, paths, and unrelated system data. Full qualification evidence should remain private by default.
