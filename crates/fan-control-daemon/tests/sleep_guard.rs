@@ -116,11 +116,22 @@ fn sleep_guard_command_probe() {
             .unwrap();
         }
         "guard-resume" => {
-            restore_sleep_guard::resume_after_sleep(
-                &mut test_daemon_manager(),
-                &test_resume_marker(),
-            )
-            .unwrap();
+            let marker = test_resume_marker();
+            append_probe_log(
+                &log,
+                &format!("trace:guard-resume:before:{}", marker_evidence(&marker)),
+            );
+            let result =
+                restore_sleep_guard::resume_after_sleep(&mut test_daemon_manager(), &marker);
+            append_probe_log(
+                &log,
+                &format!(
+                    "trace:guard-resume:after:{}:error={:?}",
+                    marker_evidence(&marker),
+                    result.as_ref().err()
+                ),
+            );
+            result.unwrap();
         }
         "guard-failed" => {
             restore_sleep_guard::restore_after_failed_guard(
@@ -353,7 +364,9 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
         wait_for_state(&daemon_name, "failed");
         assert!(
             Path::new(&marker).is_file(),
-            "failed daemon readiness must preserve resume authorization for retry"
+            "failed daemon readiness must preserve resume authorization for retry: evidence={}; log={}",
+            marker_evidence(Path::new(&marker)),
+            fs::read_to_string(&log).unwrap()
         );
         assert!(Path::new(&start_gate).is_file());
         return;
@@ -418,8 +431,19 @@ fn assert_cancelled_recovery_order(log: &Path) {
 fn recovery_events(content: &str) -> Vec<&str> {
     content
         .lines()
-        .filter(|line| !line.starts_with("daemon-ready:"))
+        .filter(|line| !line.starts_with("daemon-ready:") && !line.starts_with("trace:"))
         .collect()
+}
+
+fn marker_evidence(marker: &Path) -> String {
+    format!(
+        "resume={},prepared={},gate={}",
+        marker.is_file(),
+        prepared_marker(marker).is_file(),
+        marker
+            .with_file_name("resume-daemon-start-blocked")
+            .is_file()
+    )
 }
 
 struct TestUnitInstallation {
