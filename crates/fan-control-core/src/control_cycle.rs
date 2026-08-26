@@ -2,10 +2,13 @@ use std::{error::Error, fmt, path::Path, time::Duration};
 
 use crate::{
     AcerHwmonDevice, AcerHwmonDiscoveryError, ArmedFanControl, BoundedIdentityBoundFileAccess,
-    Clock, CompleteSampleSet, ControlCycleSampleGate, ControllerOwnership, DemandSmoother,
-    EffectiveTemperature, Fan, FanEndpoints, FanOutputs, MonotonicTime, MonotonicTimeError,
-    PlatformError, PlatformErrorKind, Pwm, RuntimeLockAccess, SampleSetError, SampleSources,
-    ShutdownRequest, ValidatedConfig,
+    Clock, CompleteSampleSet, ControlCycleDiagnostic, ControlCycleSampleGate, ControllerOwnership,
+    DemandSmoother, EffectiveTemperature, Fan, FanDiagnostic, FanEndpoints, FanOutputs,
+    MonotonicTime, MonotonicTimeError, PlatformError, PlatformErrorKind, Pwm, RuntimeEndpoint,
+    RuntimeFault, RuntimeLockAccess, SampleSetError, SampleSources, ShutdownRequest,
+    ValidatedConfig,
+    diagnostics::sample_fault,
+    emit_control_cycle, emit_fault,
     output::{calculate_target_demand, fan_outputs_for_demand},
     tachometer::{TachometerObservationError, TachometerValidator},
 };
@@ -110,6 +113,7 @@ pub enum HealthyControlCycleError {
     Platform {
         fan: Fan,
         operation: ControlCycleOperation,
+        readback: Option<ControlCycleReadback>,
         source: PlatformError,
     },
     UnexpectedReadback {
@@ -152,6 +156,7 @@ impl fmt::Display for HealthyControlCycleError {
                 fan,
                 operation,
                 source,
+                ..
             } => write!(formatter, "{} fan {operation} failed: {source}", fan.name()),
             Self::UnexpectedReadback {
                 fan,
@@ -262,13 +267,18 @@ where
     }
     if !control.is_current_for(ownership) {
         control.invalidated = true;
-        return Err(HealthyControlCycleError::StaleArmingReceipt);
+        let error = HealthyControlCycleError::StaleArmingReceipt;
+        let (fault, endpoint) = cycle_fault_diagnostic(&error);
+        emit_fault(fault, endpoint);
+        return Err(error);
     }
 
     let shutdown = control.shutdown.clone();
     let result = try_run_cycle(ownership, control, sources, &shutdown);
-    if result.is_err() {
+    if let Err(error) = &result {
         control.invalidated = true;
+        let (fault, endpoint) = cycle_fault_diagnostic(error);
+        emit_fault(fault, endpoint);
     }
     result
 }
@@ -293,6 +303,7 @@ where
         .checked_add(crate::NORMAL_SAMPLE_CADENCE)
         .ok_or(HealthyControlCycleError::DeadlineOverflow)?;
     let (next_history, outputs) = next_outputs(&control.config, control.demand_history, sample)?;
+    let rpm_commands = control.last_outputs;
 
     verify_device_before(ownership.platform_mut(), &device, deadline)?;
     ensure_running(shutdown)?;
@@ -308,7 +319,7 @@ where
     verify_device_before(ownership.platform_mut(), &device, deadline)?;
     ensure_running(shutdown)?;
 
-    validate_tachometer_response(
+    let (cpu_rpm, gpu_rpm) = validate_tachometer_response(
         ownership.platform_mut(),
         &device,
         &mut control.tachometers,
@@ -352,6 +363,24 @@ where
 
     control.demand_history = Some(next_history);
     control.last_outputs = outputs;
+    emit_control_cycle(ControlCycleDiagnostic {
+        cpu_temperature: sample.cpu_temperature(),
+        gpu_temperature: sample.gpu_temperature(),
+        external_power: sample.external_power(),
+        demand: next_history.smoother.commanded(),
+        cpu: FanDiagnostic {
+            command: outputs.cpu_pwm(),
+            readback: outputs.cpu_pwm(),
+            rpm_command: rpm_commands.cpu_pwm(),
+            rpm: cpu_rpm,
+        },
+        gpu: FanDiagnostic {
+            command: outputs.gpu_pwm(),
+            readback: outputs.gpu_pwm(),
+            rpm_command: rpm_commands.gpu_pwm(),
+            rpm: gpu_rpm,
+        },
+    });
     Ok(CompletedControlCycle { sample, outputs })
 }
 
@@ -512,7 +541,7 @@ fn validate_tachometer_response(
     device: &AcerHwmonDevice,
     tachometers: &mut TachometerValidator,
     deadline: Duration,
-) -> Result<(), HealthyControlCycleError> {
+) -> Result<(u32, u32), HealthyControlCycleError> {
     let cpu_raw = read_tachometer(platform, device, device.cpu(), Fan::Cpu, deadline)?;
     let cpu_observed_at = platform.monotonic_now();
     let cpu_rpm = parse_tachometer(Fan::Cpu, cpu_raw)?;
@@ -521,7 +550,94 @@ fn validate_tachometer_response(
     let gpu_raw = read_tachometer(platform, device, device.gpu(), Fan::Gpu, deadline)?;
     let gpu_observed_at = platform.monotonic_now();
     let gpu_rpm = parse_tachometer(Fan::Gpu, gpu_raw)?;
-    observe_tachometer(tachometers, Fan::Gpu, gpu_rpm, gpu_observed_at)
+    observe_tachometer(tachometers, Fan::Gpu, gpu_rpm, gpu_observed_at)?;
+    Ok((cpu_rpm, gpu_rpm))
+}
+
+fn cycle_fault_diagnostic(
+    error: &HealthyControlCycleError,
+) -> (RuntimeFault, Option<RuntimeEndpoint>) {
+    match error {
+        HealthyControlCycleError::Invalidated | HealthyControlCycleError::StaleArmingReceipt => {
+            (RuntimeFault::DeviceChanged, None)
+        }
+        HealthyControlCycleError::ShutdownRequested => (RuntimeFault::ShutdownRequested, None),
+        HealthyControlCycleError::Sample(error) => sample_fault(error),
+        HealthyControlCycleError::PolicyClock(_)
+        | HealthyControlCycleError::DeadlineOverflow
+        | HealthyControlCycleError::DeadlineExceeded => (RuntimeFault::DeadlineExceeded, None),
+        HealthyControlCycleError::Device(_) | HealthyControlCycleError::DeviceChanged => {
+            (RuntimeFault::DeviceChanged, None)
+        }
+        HealthyControlCycleError::Platform {
+            fan,
+            operation,
+            readback,
+            ..
+        } => (
+            RuntimeFault::PlatformOperation,
+            Some(operation_endpoint(*fan, *operation, *readback)),
+        ),
+        HealthyControlCycleError::UnexpectedReadback { fan, field, .. } => (
+            RuntimeFault::UnexpectedReadback,
+            Some(readback_endpoint(*fan, *field)),
+        ),
+        HealthyControlCycleError::MalformedTachometer { fan, .. } => (
+            RuntimeFault::TachometerMalformed,
+            Some(tachometer_endpoint(*fan)),
+        ),
+        HealthyControlCycleError::TachometerOutOfBand { fan, .. } => (
+            RuntimeFault::TachometerOutOfBand,
+            Some(tachometer_endpoint(*fan)),
+        ),
+    }
+}
+
+fn operation_endpoint(
+    fan: Fan,
+    operation: ControlCycleOperation,
+    readback: Option<ControlCycleReadback>,
+) -> RuntimeEndpoint {
+    if let Some(field) = readback {
+        return readback_endpoint(fan, field);
+    }
+
+    match operation {
+        ControlCycleOperation::ConfirmBeforeOutput => enable_endpoint(fan),
+        ControlCycleOperation::ReadPriorDuty
+        | ControlCycleOperation::WriteDuty
+        | ControlCycleOperation::ConfirmWrittenDuty
+        | ControlCycleOperation::ConfirmResult => pwm_endpoint(fan),
+        ControlCycleOperation::ReadTachometer => tachometer_endpoint(fan),
+    }
+}
+
+fn readback_endpoint(fan: Fan, field: ControlCycleReadback) -> RuntimeEndpoint {
+    match field {
+        ControlCycleReadback::Mode => enable_endpoint(fan),
+        ControlCycleReadback::Duty => pwm_endpoint(fan),
+    }
+}
+
+const fn enable_endpoint(fan: Fan) -> RuntimeEndpoint {
+    match fan {
+        Fan::Cpu => RuntimeEndpoint::CpuEnable,
+        Fan::Gpu => RuntimeEndpoint::GpuEnable,
+    }
+}
+
+const fn pwm_endpoint(fan: Fan) -> RuntimeEndpoint {
+    match fan {
+        Fan::Cpu => RuntimeEndpoint::CpuPwm,
+        Fan::Gpu => RuntimeEndpoint::GpuPwm,
+    }
+}
+
+const fn tachometer_endpoint(fan: Fan) -> RuntimeEndpoint {
+    match fan {
+        Fan::Cpu => RuntimeEndpoint::CpuTachometer,
+        Fan::Gpu => RuntimeEndpoint::GpuTachometer,
+    }
 }
 
 fn read_tachometer(
@@ -539,7 +655,7 @@ fn read_tachometer(
             endpoint_identity(device, endpoints.tachometer()),
             deadline,
         )
-        .map_err(|source| operation_error(fan, ControlCycleOperation::ReadTachometer, source))
+        .map_err(|source| operation_error(fan, ControlCycleOperation::ReadTachometer, None, source))
 }
 
 fn parse_tachometer(fan: Fan, actual: String) -> Result<u32, HealthyControlCycleError> {
@@ -594,7 +710,7 @@ fn write(
             &pwm.value().to_string(),
             deadline,
         )
-        .map_err(|source| operation_error(fan, ControlCycleOperation::WriteDuty, source))
+        .map_err(|source| operation_error(fan, ControlCycleOperation::WriteDuty, None, source))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -616,7 +732,7 @@ fn confirm(
             endpoint_identity(device, path),
             deadline,
         )
-        .map_err(|source| operation_error(fan, operation, source))?;
+        .map_err(|source| operation_error(fan, operation, Some(field), source))?;
     if actual.trim() != expected {
         return Err(HealthyControlCycleError::UnexpectedReadback {
             fan,
@@ -644,6 +760,7 @@ fn endpoint_identity(device: &AcerHwmonDevice, path: &Path) -> crate::FileIdenti
 fn operation_error(
     fan: Fan,
     operation: ControlCycleOperation,
+    readback: Option<ControlCycleReadback>,
     source: PlatformError,
 ) -> HealthyControlCycleError {
     if source.kind() == PlatformErrorKind::TimedOut {
@@ -652,6 +769,7 @@ fn operation_error(
         HealthyControlCycleError::Platform {
             fan,
             operation,
+            readback,
             source,
         }
     }

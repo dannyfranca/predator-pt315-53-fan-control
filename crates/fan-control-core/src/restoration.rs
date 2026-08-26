@@ -1,6 +1,10 @@
 use std::{error::Error, fmt, time::Duration};
 
-use crate::{AcerHwmonDevice, BoundedFileAccess, Clock, PlatformError};
+use crate::{
+    AcerHwmonDevice, BoundedFileAccess, Clock, PlatformError, RestorationAttemptDiagnostic,
+    RestorationFanDiagnostic, RestorationReadback, RuntimeFault, emit_fault,
+    emit_restoration_attempt,
+};
 
 pub(crate) const FIRMWARE_AUTO: &str = "2";
 const CUSTOM_CONTROL: &str = "1";
@@ -161,9 +165,11 @@ where
 
         let cpu = status(platform, device.cpu().enable(), cpu_write_error, deadline);
         let gpu = status(platform, device.gpu().enable(), gpu_write_error, deadline);
+        emit_attempt(attempt, &cpu, &gpu);
         now = platform.monotonic_now();
 
         if now > deadline {
+            emit_fault(RuntimeFault::RestorationUnconfirmed, None);
             return Err(FirmwareAutoRestorationError::DeadlineExceeded {
                 attempts,
                 cpu: Box::new(cpu),
@@ -174,6 +180,7 @@ where
             return Ok(());
         }
         if now == deadline && attempt < MAX_ATTEMPTS {
+            emit_fault(RuntimeFault::RestorationUnconfirmed, None);
             return Err(FirmwareAutoRestorationError::DeadlineExceeded {
                 attempts,
                 cpu: Box::new(cpu),
@@ -185,11 +192,34 @@ where
         last_gpu = Some(gpu);
     }
 
+    emit_fault(RuntimeFault::RestorationUnconfirmed, None);
     Err(FirmwareAutoRestorationError::Unconfirmed {
         attempts,
         cpu: Box::new(last_cpu.expect("a restoration attempt always records CPU status")),
         gpu: Box::new(last_gpu.expect("a restoration attempt always records GPU status")),
     })
+}
+
+fn emit_attempt(attempt: u8, cpu: &FanRestorationStatus, gpu: &FanRestorationStatus) {
+    emit_restoration_attempt(RestorationAttemptDiagnostic {
+        attempt,
+        cpu: restoration_fan_diagnostic(cpu),
+        gpu: restoration_fan_diagnostic(gpu),
+    });
+}
+
+fn restoration_fan_diagnostic(status: &FanRestorationStatus) -> RestorationFanDiagnostic {
+    RestorationFanDiagnostic {
+        write_succeeded: status.write_error.is_none(),
+        readback: match &status.readback {
+            FirmwareAutoReadback::Confirmed => RestorationReadback::FirmwareAuto,
+            FirmwareAutoReadback::NotAuto(value) if value.trim() == CUSTOM_CONTROL => {
+                RestorationReadback::Custom
+            }
+            FirmwareAutoReadback::NotAuto(_) => RestorationReadback::Other,
+            FirmwareAutoReadback::Unreadable(_) => RestorationReadback::Unreadable,
+        },
+    }
 }
 
 pub(crate) fn contain_custom_fans_at_maximum<P>(

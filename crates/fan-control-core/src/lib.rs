@@ -13,6 +13,7 @@ mod control_cycle;
 mod coretemp;
 mod curve;
 mod demand;
+mod diagnostics;
 mod envelope;
 mod evidence;
 mod external_power;
@@ -70,6 +71,13 @@ pub use control_cycle::{
 pub use coretemp::{CoretempDevice, CoretempError, discover_coretemp};
 pub use curve::{CurvePoint, DemandCurve, DemandCurveError, TemperatureCelsius, TemperatureError};
 pub use demand::{DemandPercent, DemandPercentError, Pwm};
+pub use diagnostics::{
+    CONTROL_CYCLE_EVENT_ID, ControlCycleDiagnostic, FanDiagnostic, RESTORATION_ATTEMPT_EVENT_ID,
+    RUNTIME_FAULT_EVENT_ID, RestorationAttemptDiagnostic, RestorationFanDiagnostic,
+    RestorationReadback, RuntimeEndpoint, RuntimeFault, RuntimeState, RuntimeTransition,
+    STATE_TRANSITION_EVENT_ID, emit_control_cycle, emit_fault, emit_restoration_attempt,
+    emit_state_transition, init_journald_diagnostics,
+};
 pub use envelope::{EnvelopeValidationError, validate_against_protected_envelope};
 pub use evidence::{
     EVIDENCE_SCHEMA_VERSION, EVIDENCE_SCHEMA_VERSION_V2, EvidenceExternalPower, EvidenceFan,

@@ -392,12 +392,29 @@ impl SystemOwnershipPlatform {
         &mut self,
         device: &crate::AcerHwmonDevice,
     ) -> Result<crate::SystemFirmwareAutoRecovery, PlatformError> {
-        let pinned = PinnedAcerHwmon::open(device)?;
-        for _ in 0..3 {
-            let _ = self.write_firmware_auto(&pinned, device.cpu().enable());
-            let _ = self.write_firmware_auto(&pinned, device.gpu().enable());
+        let pinned = PinnedAcerHwmon::open(device).inspect_err(|_| {
+            crate::emit_fault(crate::RuntimeFault::DeviceChanged, None);
+        })?;
+        for attempt in 1..=3 {
+            let cpu_write_succeeded = self
+                .write_firmware_auto(&pinned, device.cpu().enable())
+                .is_ok();
+            let gpu_write_succeeded = self
+                .write_firmware_auto(&pinned, device.gpu().enable())
+                .is_ok();
             let cpu = pinned.read(device.cpu().enable());
             let gpu = pinned.read(device.gpu().enable());
+            crate::emit_restoration_attempt(crate::RestorationAttemptDiagnostic {
+                attempt,
+                cpu: crate::RestorationFanDiagnostic {
+                    write_succeeded: cpu_write_succeeded,
+                    readback: system_restoration_readback(&cpu),
+                },
+                gpu: crate::RestorationFanDiagnostic {
+                    write_succeeded: gpu_write_succeeded,
+                    readback: system_restoration_readback(&gpu),
+                },
+            });
             if matches!(cpu, Ok(ref mode) if mode.trim() == "2")
                 && matches!(gpu, Ok(ref mode) if mode.trim() == "2")
             {
@@ -405,8 +422,17 @@ impl SystemOwnershipPlatform {
             }
         }
 
-        let cpu = pinned.contain(device.cpu());
-        let gpu = pinned.contain(device.gpu());
+        crate::emit_fault(crate::RuntimeFault::RestorationUnconfirmed, None);
+        let cpu = pinned.contain(
+            device.cpu(),
+            crate::RuntimeEndpoint::CpuEnable,
+            crate::RuntimeEndpoint::CpuPwm,
+        );
+        let gpu = pinned.contain(
+            device.gpu(),
+            crate::RuntimeEndpoint::GpuEnable,
+            crate::RuntimeEndpoint::GpuPwm,
+        );
         match (cpu, gpu) {
             (Ok(()), Ok(())) => Ok(crate::SystemFirmwareAutoRecovery::Contained),
             (cpu, gpu) => Err(PlatformError::new(
@@ -432,6 +458,17 @@ impl SystemOwnershipPlatform {
             ));
         }
         pinned.write(endpoint, "2")
+    }
+}
+
+fn system_restoration_readback(
+    result: &Result<String, PlatformError>,
+) -> crate::RestorationReadback {
+    match result {
+        Ok(value) if value.trim() == "2" => crate::RestorationReadback::FirmwareAuto,
+        Ok(value) if value.trim() == "1" => crate::RestorationReadback::Custom,
+        Ok(_) => crate::RestorationReadback::Other,
+        Err(_) => crate::RestorationReadback::Unreadable,
     }
 }
 
@@ -612,26 +649,57 @@ impl<'a> PinnedAcerHwmon<'a> {
             .map_err(|error| io_platform_error(&format!("cannot write {}", path.display()), error))
     }
 
-    fn contain(&self, fan: &crate::FanEndpoints) -> Result<(), PlatformError> {
+    fn contain(
+        &self,
+        fan: &crate::FanEndpoints,
+        enable_endpoint: crate::RuntimeEndpoint,
+        pwm_endpoint: crate::RuntimeEndpoint,
+    ) -> Result<(), PlatformError> {
         match self.read(fan.enable()) {
             Ok(mode) if mode.trim() == "2" => Ok(()),
             Ok(mode) if mode.trim() == "1" => {
-                self.write(fan.pwm(), "255")?;
-                let readback = self.read(fan.pwm())?;
+                self.write(fan.pwm(), "255").inspect_err(|_| {
+                    crate::emit_fault(
+                        crate::RuntimeFault::ContainmentUnconfirmed,
+                        Some(pwm_endpoint),
+                    );
+                })?;
+                let readback = self.read(fan.pwm()).inspect_err(|_| {
+                    crate::emit_fault(
+                        crate::RuntimeFault::ContainmentUnconfirmed,
+                        Some(pwm_endpoint),
+                    );
+                })?;
                 if readback.trim() == "255" {
                     Ok(())
                 } else {
+                    crate::emit_fault(
+                        crate::RuntimeFault::ContainmentUnconfirmed,
+                        Some(pwm_endpoint),
+                    );
                     Err(PlatformError::new(
                         PlatformErrorKind::Unavailable,
                         format!("maximum PWM readback failed: {}", fan.pwm().display()),
                     ))
                 }
             }
-            Ok(mode) => Err(PlatformError::new(
-                PlatformErrorKind::Unavailable,
-                format!("unexpected fan mode {mode:?}: {}", fan.enable().display()),
-            )),
-            Err(error) => Err(error),
+            Ok(mode) => {
+                crate::emit_fault(
+                    crate::RuntimeFault::ContainmentUnconfirmed,
+                    Some(enable_endpoint),
+                );
+                Err(PlatformError::new(
+                    PlatformErrorKind::Unavailable,
+                    format!("unexpected fan mode {mode:?}: {}", fan.enable().display()),
+                ))
+            }
+            Err(error) => {
+                crate::emit_fault(
+                    crate::RuntimeFault::ContainmentUnconfirmed,
+                    Some(enable_endpoint),
+                );
+                Err(error)
+            }
         }
     }
 }
@@ -1626,9 +1694,13 @@ mod tests {
         let mut platform = SystemOwnershipPlatform::new();
         let device = crate::discover_acer_hwmon(&mut platform, &base).unwrap();
 
-        assert_eq!(
-            platform.restore_firmware_auto_cycle(&device).unwrap(),
-            crate::SystemFirmwareAutoRecovery::Restored
+        let (outcome, diagnostic_events) = crate::diagnostics::record_test_diagnostics(|| {
+            platform.restore_firmware_auto_cycle(&device).unwrap()
+        });
+        assert_eq!(outcome, crate::SystemFirmwareAutoRecovery::Restored);
+        assert_restoration_diagnostics(
+            &diagnostic_events,
+            &[(1, true, "firmware-auto", true, "firmware-auto")],
         );
         assert_eq!(
             fs::read_to_string(device_root.join("pwm1_enable")).unwrap(),
@@ -1654,11 +1726,19 @@ mod tests {
         let device = crate::discover_acer_hwmon(&mut discovery_platform, &base).unwrap();
         let mut recovery_platform = SystemOwnershipPlatform::with_failed_firmware_auto_writes();
 
-        assert_eq!(
+        let (outcome, diagnostic_events) = crate::diagnostics::record_test_diagnostics(|| {
             recovery_platform
                 .restore_firmware_auto_cycle(&device)
-                .unwrap(),
-            crate::SystemFirmwareAutoRecovery::Contained
+                .unwrap()
+        });
+        assert_eq!(outcome, crate::SystemFirmwareAutoRecovery::Contained);
+        assert_restoration_diagnostics(
+            &diagnostic_events,
+            &[
+                (1, false, "custom", false, "custom"),
+                (2, false, "custom", false, "custom"),
+                (3, false, "custom", false, "custom"),
+            ],
         );
         assert_eq!(
             fs::read_to_string(device_root.join("pwm1_enable")).unwrap(),
@@ -1671,6 +1751,32 @@ mod tests {
         assert_eq!(fs::read_to_string(device_root.join("pwm1")).unwrap(), "255");
         assert_eq!(fs::read_to_string(device_root.join("pwm2")).unwrap(), "255");
         fs::remove_dir_all(base).unwrap();
+    }
+
+    fn assert_restoration_diagnostics(
+        events: &[BTreeMap<String, String>],
+        expected: &[(u8, bool, &str, bool, &str)],
+    ) {
+        let restoration_events = events
+            .iter()
+            .filter(|event| {
+                event.get("event_id").map(|value| value.trim_matches('"'))
+                    == Some(crate::RESTORATION_ATTEMPT_EVENT_ID)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(restoration_events.len(), expected.len());
+        for (event, (attempt, cpu_write, cpu_readback, gpu_write, gpu_readback)) in
+            restoration_events.into_iter().zip(expected)
+        {
+            let field = |name: &str| event.get(name).unwrap().trim_matches('"');
+            assert_eq!(field("attempt"), attempt.to_string());
+            assert_eq!(field("cpu_enable_endpoint"), "acer:cpu:pwm1_enable");
+            assert_eq!(field("cpu_write_succeeded"), cpu_write.to_string());
+            assert_eq!(field("cpu_mode_readback"), *cpu_readback);
+            assert_eq!(field("gpu_enable_endpoint"), "acer:gpu:pwm2_enable");
+            assert_eq!(field("gpu_write_succeeded"), gpu_write.to_string());
+            assert_eq!(field("gpu_mode_readback"), *gpu_readback);
+        }
     }
 
     #[test]

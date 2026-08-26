@@ -1,5 +1,10 @@
 #![allow(dead_code)]
 
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, Once},
+};
+
 use fan_control_core::{
     CompatibilityDeclarationV1, CompatibilityObservation, EvidenceCompleteness, EvidenceRecord,
     EvidenceTimestamp, FanCalibrationEvidence, FanCommandEvidence, FanControlField,
@@ -7,6 +12,55 @@ use fan_control_core::{
     validate_config_v1,
 };
 use sha2::{Digest, Sha256};
+use tracing::{Event, Subscriber, field::Visit};
+use tracing_subscriber::{Layer, layer::Context, prelude::*};
+
+static DIAGNOSTIC_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+static DIAGNOSTIC_CAPTURE_SUBSCRIBER: Once = Once::new();
+
+#[derive(Debug, Default)]
+struct DiagnosticFields(BTreeMap<String, String>);
+
+impl Visit for DiagnosticFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.insert(field.name().to_owned(), format!("{value:?}"));
+    }
+}
+
+#[derive(Clone, Default)]
+struct DiagnosticRecordingLayer(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+
+impl<S> Layer<S> for DiagnosticRecordingLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+        let mut fields = DiagnosticFields::default();
+        event.record(&mut fields);
+        self.0.lock().unwrap().push(fields.0);
+    }
+}
+
+pub fn record_diagnostics<R>(action: impl FnOnce() -> R) -> (R, Vec<BTreeMap<String, String>>) {
+    // Keep callsites enabled for the lifetime of this integration-test process. Otherwise another
+    // test thread with no subscriber can globally cache the callsite as disabled mid-capture.
+    DIAGNOSTIC_CAPTURE_SUBSCRIBER.call_once(|| {
+        tracing::subscriber::set_global_default(tracing_subscriber::registry()).unwrap();
+    });
+    // Tracing's callsite interest cache is process-global. Keep thread-local test subscribers from
+    // invalidating one another while Rust's test harness runs capture assertions in parallel.
+    let _capture_guard = DIAGNOSTIC_CAPTURE_LOCK.lock().unwrap();
+    let layer = DiagnosticRecordingLayer::default();
+    let events = Arc::clone(&layer.0);
+    let result =
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), action);
+    let events = Arc::try_unwrap(events).unwrap().into_inner().unwrap();
+    (result, events)
+}
+
+pub fn diagnostic_field<'a>(event: &'a BTreeMap<String, String>, name: &str) -> &'a str {
+    event.get(name).unwrap().trim_matches('"')
+}
 
 pub const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 pub const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
