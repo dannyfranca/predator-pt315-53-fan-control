@@ -96,8 +96,9 @@ pub use matched_workload::{
     MINIMUM_MATCHED_WORKLOAD_SAMPLES, MatchedWorkloadClass, MatchedWorkloadEnvironment,
     MatchedWorkloadFanRestoration, MatchedWorkloadObservation, MatchedWorkloadPlan,
     MatchedWorkloadPlanError, MatchedWorkloadReport, MatchedWorkloadStartingConditions,
-    STARTING_TEMPERATURE_COMPARABILITY_MILLICELSIUS, THERMAL_COMPARISON_MARGIN_MILLICELSIUS,
-    THERMAL_SLOPE_LIMIT_MILLICELSIUS_PER_MINUTE, run_matched_custom_workload,
+    MatchedWorkloadTachometerCalibrations, STARTING_TEMPERATURE_COMPARABILITY_MILLICELSIUS,
+    THERMAL_COMPARISON_MARGIN_MILLICELSIUS, THERMAL_SLOPE_LIMIT_MILLICELSIUS_PER_MINUTE,
+    run_matched_custom_workload,
 };
 pub use nvidia_gpu::{
     NvidiaGpuSampleError, NvidiaGpuSelector, NvidiaGpuSelectorError, NvidiaGpuSelectorKind,

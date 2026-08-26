@@ -40,6 +40,10 @@ pub struct Pwm(u8);
 impl Pwm {
     pub const MAXIMUM: Self = Self(u8::MAX);
 
+    pub(crate) const fn from_raw(value: u8) -> Self {
+        Self(value)
+    }
+
     /// Returns the PWM value in the inclusive range `0..=255`.
     pub const fn value(self) -> u8 {
         self.0

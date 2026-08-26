@@ -1,20 +1,20 @@
 mod support;
 
-use std::{collections::VecDeque, path::Path};
+use std::{collections::VecDeque, path::Path, sync::OnceLock};
 
 use fan_control_core::{
     BaselineCleanupAttestation, BaselineObservation, BaselineStartingConditions,
     CapturedBaselineStartingConditions, CapturedMatchedWorkloadStartingConditions,
-    EvidenceExternalPower, EvidenceFan, EvidenceProfile, EvidenceTimestamp, FakePlatform,
+    EvidenceExternalPower, EvidenceFan, EvidenceProfile, EvidenceTimestamp, FakePlatform, Fan,
     FanCommandEvidence, FanControlField, FanReadbackEvidence, FanReadbackField, FaultEvidence,
     FilePermissions, FirmwareAutoBaselineEnvironment, FirmwareAutoBaselinePlan,
     MINIMUM_MATCHED_WORKLOAD_SAMPLES, MatchedWorkloadEnvironment, MatchedWorkloadFanRestoration,
     MatchedWorkloadObservation, MatchedWorkloadPlan, MatchedWorkloadStartingConditions,
-    ObservationOutcome, RestorationOutcome, RunOutcomeStatus, SampleFreshness,
-    TelemetrySampleEvidence, WorkloadEvidence, parse_evidence_v2, run_firmware_auto_baseline,
-    run_matched_custom_workload,
+    MatchedWorkloadTachometerCalibrations, ObservationOutcome, RestorationOutcome,
+    RunOutcomeStatus, SampleFreshness, TelemetrySampleEvidence, WorkloadEvidence,
+    parse_evidence_v2, run_firmware_auto_baseline, run_matched_custom_workload,
 };
-use support::{PROTECTED_POLICY, compatibility_declaration};
+use support::{PROTECTED_POLICY, compatibility_declaration, completed_calibration_evidence};
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const JSON_SCHEMA_V2: &str = include_str!(concat!(
@@ -32,7 +32,7 @@ fn passing_custom_run_is_compared_with_baseline_and_requests_its_required_repeat
         &MatchedWorkloadPlan {
             baseline: &baseline,
             previous_passing_runs: &[],
-            samples_required: MINIMUM_MATCHED_WORKLOAD_SAMPLES,
+            tachometer_calibrations: tachometer_calibrations(),
         },
     )
     .expect("valid matched-workload plan");
@@ -50,6 +50,87 @@ fn passing_custom_run_is_compared_with_baseline_and_requests_its_required_repeat
         ["stop", "restore-cpu", "restore-gpu"]
     );
     assert!(report.record().validate().is_ok());
+}
+
+#[test]
+fn custom_run_must_cover_the_exact_baseline_sample_count() {
+    let baseline = passing_baseline_with_samples(MINIMUM_MATCHED_WORKLOAD_SAMPLES + 1);
+    let mut environment = CustomEnvironment::new(passing_custom_observations());
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(!report.accepted());
+    assert_eq!(
+        report.record().samples.len(),
+        MINIMUM_MATCHED_WORKLOAD_SAMPLES
+    );
+    assert!(report.record().faults.iter().any(|fault| {
+        fault.code == "invalid-telemetry"
+            && fault.detail.contains("cannot capture required telemetry")
+    }));
+    assert_eq!(report.record().restoration_attempts.len(), 2);
+    assert!(report.record().validate().is_ok());
+}
+
+#[test]
+fn settled_out_of_band_rpm_aborts_then_restores_both_fans() {
+    let baseline = passing_baseline();
+    let mut observations = passing_custom_observations();
+    for observation in &mut observations {
+        observation
+            .readbacks
+            .iter_mut()
+            .find(|readback| {
+                readback.fan == EvidenceFan::Cpu && readback.field == FanReadbackField::Rpm
+            })
+            .unwrap()
+            .value = Some(20_000);
+    }
+    let mut environment = CustomEnvironment::new(observations);
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(!report.accepted());
+    assert!(report.record().faults.iter().any(|fault| {
+        fault.code == "fan-feedback-loss" && fault.detail.contains("qualified ±30% band")
+    }));
+    assert!(report.record().samples.len() < baseline.samples.len());
+    assert_eq!(
+        &environment.events[environment.events.len() - 3..],
+        ["stop", "restore-cpu", "restore-gpu"]
+    );
+    assert!(report.record().validate().is_ok());
+}
+
+#[test]
+fn unqualified_tachometer_calibration_is_rejected_before_custom_control() {
+    let baseline = passing_baseline();
+    let mut cpu = tachometer_calibrations().cpu.clone();
+    cpu.protocol_checkpoint = None;
+    let calibrations = tachometer_calibrations();
+    let mut environment = CustomEnvironment::new(passing_custom_observations());
+
+    let result = run_matched_custom_workload(
+        &mut environment,
+        &MatchedWorkloadPlan {
+            baseline: &baseline,
+            previous_passing_runs: &[],
+            tachometer_calibrations: MatchedWorkloadTachometerCalibrations {
+                cpu: &cpu,
+                gpu: calibrations.gpu,
+            },
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(
+            fan_control_core::MatchedWorkloadPlanError::InvalidCalibration {
+                fan: EvidenceFan::Cpu
+            }
+        )
+    ));
+    assert!(environment.events.is_empty());
 }
 
 #[test]
@@ -613,7 +694,7 @@ fn repeat_status_distinguishes_idle_first_runs_and_second_loaded_runs() {
             &MatchedWorkloadPlan {
                 baseline: &baseline,
                 previous_passing_runs: &duplicates,
-                samples_required: MINIMUM_MATCHED_WORKLOAD_SAMPLES,
+                tachometer_calibrations: tachometer_calibrations(),
             },
         );
         assert!(matches!(
@@ -647,7 +728,7 @@ fn repeat_credit_is_bound_to_the_exact_baseline_record() {
         &MatchedWorkloadPlan {
             baseline: &current_baseline,
             previous_passing_runs: &previous,
-            samples_required: MINIMUM_MATCHED_WORKLOAD_SAMPLES,
+            tachometer_calibrations: tachometer_calibrations(),
         },
     );
 
@@ -687,7 +768,7 @@ fn malformed_prior_passes_never_receive_repeat_credit() {
             &MatchedWorkloadPlan {
                 baseline: &baseline,
                 previous_passing_runs: &previous,
-                samples_required: MINIMUM_MATCHED_WORKLOAD_SAMPLES,
+                tachometer_calibrations: tachometer_calibrations(),
             },
         );
 
@@ -737,14 +818,43 @@ fn run_custom<'a>(
         &MatchedWorkloadPlan {
             baseline,
             previous_passing_runs,
-            samples_required: MINIMUM_MATCHED_WORKLOAD_SAMPLES,
+            tachometer_calibrations: tachometer_calibrations(),
         },
     )
     .unwrap()
 }
 
+fn tachometer_calibrations() -> MatchedWorkloadTachometerCalibrations<'static> {
+    static CALIBRATIONS: OnceLock<[fan_control_core::FanCalibrationEvidence; 2]> = OnceLock::new();
+    let calibrations = CALIBRATIONS.get_or_init(|| {
+        [
+            completed_calibration_evidence(Fan::Cpu),
+            completed_calibration_evidence(Fan::Gpu),
+        ]
+    });
+    MatchedWorkloadTachometerCalibrations {
+        cpu: &calibrations[0],
+        gpu: &calibrations[1],
+    }
+}
+
 fn passing_baseline() -> fan_control_core::EvidenceRecord {
     passing_baseline_for("cpu-ac-v1")
+}
+
+fn passing_baseline_with_samples(samples_required: usize) -> fan_control_core::EvidenceRecord {
+    baseline_for_sample_count(
+        "cpu-ac-v1",
+        BaselineStartingConditions {
+            ambient_millicelsius: 24_000,
+            cpu_millicelsius: 42_000,
+            gpu_millicelsius: 39_000,
+            power_profile: EvidenceProfile::Ac,
+        },
+        65_000,
+        54_000,
+        samples_required,
+    )
 }
 
 fn passing_baseline_for(workload_id: &str) -> fan_control_core::EvidenceRecord {
@@ -784,9 +894,25 @@ fn baseline_for(
     cpu_millicelsius: i32,
     gpu_millicelsius: i32,
 ) -> fan_control_core::EvidenceRecord {
+    baseline_for_sample_count(
+        workload_id,
+        conditions,
+        cpu_millicelsius,
+        gpu_millicelsius,
+        MINIMUM_MATCHED_WORKLOAD_SAMPLES,
+    )
+}
+
+fn baseline_for_sample_count(
+    workload_id: &str,
+    conditions: BaselineStartingConditions,
+    cpu_millicelsius: i32,
+    gpu_millicelsius: i32,
+    samples_required: usize,
+) -> fan_control_core::EvidenceRecord {
     let mut platform = auto_platform();
     let mut environment = BaselineEnvironment::new(
-        (1..=MINIMUM_MATCHED_WORKLOAD_SAMPLES)
+        (1..=samples_required)
             .map(|n| baseline_observation(n as u64 * 2_000, cpu_millicelsius, gpu_millicelsius))
             .collect(),
     );
@@ -800,7 +926,7 @@ fn baseline_for(
             hwmon_root: Path::new(HWMON_ROOT),
             qualification_envelope: envelope(),
             workload,
-            samples_required: MINIMUM_MATCHED_WORKLOAD_SAMPLES,
+            samples_required,
         },
     )
     .unwrap()

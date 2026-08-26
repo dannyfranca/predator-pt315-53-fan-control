@@ -5,11 +5,13 @@ use sha2::{Digest, Sha256};
 use crate::{
     CPU_ABSOLUTE_ABORT_MILLICELSIUS, EVIDENCE_SCHEMA_VERSION_V2, EvidenceExternalPower,
     EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceRecordStatus, EvidenceTimestamp,
-    EvidenceValidationError, FanCommandEvidence, FanControlField, FanReadbackEvidence,
-    FanReadbackField, FaultEvidence, GPU_ABSOLUTE_ABORT_MILLICELSIUS, ObservationOutcome,
-    RestorationAttemptEvidence, RestorationOutcome, RunOutcomeEvidence, RunOutcomeStatus,
-    SampleFreshness, StateTransitionEvidence, TelemetrySampleEvidence, WorkloadEvidence,
+    EvidenceValidationError, Fan, FanCalibrationEvidence, FanCommandEvidence, FanControlField,
+    FanReadbackEvidence, FanReadbackField, FaultEvidence, GPU_ABSOLUTE_ABORT_MILLICELSIUS,
+    ObservationOutcome, RestorationAttemptEvidence, RestorationOutcome, RunOutcomeEvidence,
+    RunOutcomeStatus, SampleFreshness, StateTransitionEvidence, TelemetrySampleEvidence,
+    WorkloadEvidence,
     evidence::{precise_final_thermal_slopes, summarize_thermal_evidence},
+    tachometer::{expected_rpm_from_evidence, rpm_in_band},
 };
 
 pub const AMBIENT_COMPARABILITY_MILLICELSIUS: i32 = 2_000;
@@ -133,7 +135,13 @@ pub trait MatchedWorkloadEnvironment {
 pub struct MatchedWorkloadPlan<'a> {
     pub baseline: &'a EvidenceRecord,
     pub previous_passing_runs: &'a [&'a EvidenceRecord],
-    pub samples_required: usize,
+    pub tachometer_calibrations: MatchedWorkloadTachometerCalibrations<'a>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MatchedWorkloadTachometerCalibrations<'a> {
+    pub cpu: &'a FanCalibrationEvidence,
+    pub gpu: &'a FanCalibrationEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,8 +149,8 @@ pub enum MatchedWorkloadPlanError {
     InvalidBaseline(EvidenceValidationError),
     InvalidPriorRun { index: usize, reason: String },
     BaselineNotAccepted,
+    InvalidCalibration { fan: EvidenceFan },
     UnknownWorkloadClass,
-    InvalidSampleCount,
     InvalidGeneratedEvidence(EvidenceValidationError),
 }
 
@@ -156,11 +164,11 @@ impl fmt::Display for MatchedWorkloadPlanError {
             Self::BaselineNotAccepted => {
                 formatter.write_str("baseline must be an accepted Firmware Auto baseline")
             }
+            Self::InvalidCalibration { fan } => {
+                write!(formatter, "{fan:?} tachometer calibration is not qualified")
+            }
             Self::UnknownWorkloadClass => formatter
                 .write_str("baseline workload id must begin with idle-, cpu-, gpu-, or combined-"),
-            Self::InvalidSampleCount => {
-                formatter.write_str("at least 151 two-second telemetry samples are required")
-            }
             Self::InvalidGeneratedEvidence(error) => {
                 write!(
                     formatter,
@@ -178,8 +186,8 @@ impl Error for MatchedWorkloadPlanError {
             Self::InvalidGeneratedEvidence(error) => Some(error),
             Self::InvalidPriorRun { .. }
             | Self::BaselineNotAccepted
-            | Self::UnknownWorkloadClass
-            | Self::InvalidSampleCount => None,
+            | Self::InvalidCalibration { .. }
+            | Self::UnknownWorkloadClass => None,
         }
     }
 }
@@ -227,7 +235,8 @@ where
     let mut workload = baseline_workload.clone();
     let mut starting_conditions_captured_at = None;
     let mut workload_started_at = None;
-    let mut samples = Vec::with_capacity(plan.samples_required);
+    let samples_required = plan.baseline.samples.len();
+    let mut samples = Vec::with_capacity(samples_required);
     let mut commands = Vec::new();
     let mut readbacks = Vec::new();
     let mut state_transitions = Vec::new();
@@ -239,6 +248,7 @@ where
     let mut custom_attempted = false;
     let mut workload_attempted = false;
     let mut control_evidence = ControlEvidenceState::default();
+    let mut tachometer_evidence = TachometerEvidenceState::default();
     let mut restoration_not_before = started_at;
 
     match environment.capture_starting_conditions() {
@@ -412,7 +422,7 @@ where
         }
     }
 
-    while faults.is_empty() && samples.len() < plan.samples_required {
+    while faults.is_empty() && samples.len() < samples_required {
         let sample_number = samples.len() as u64 + 1;
         let Some(offset) = sample_number.checked_mul(SAMPLE_CADENCE_MILLIS) else {
             push_fault(
@@ -503,6 +513,8 @@ where
             captured_at,
             expected_millis,
             &mut control_evidence,
+            plan.tachometer_calibrations,
+            &mut tachometer_evidence,
             &mut faults,
         );
         system_stable &= observation.system_stable;
@@ -716,8 +728,7 @@ where
         } else {
             observed_completed_at
         };
-    let accepted =
-        faults.is_empty() && samples.len() == plan.samples_required && both_fans_restored;
+    let accepted = faults.is_empty() && samples.len() == samples_required && both_fans_restored;
     let another_passing_run_required = !accepted
         || plan.previous_passing_runs.len().saturating_add(1)
             < usize::from(workload_class.required_passing_runs());
@@ -782,6 +793,14 @@ fn validate_plan(plan: &MatchedWorkloadPlan<'_>) -> Result<(), MatchedWorkloadPl
     if MatchedWorkloadClass::from_workload_id(&baseline_workload.workload_id).is_none() {
         return Err(MatchedWorkloadPlanError::UnknownWorkloadClass);
     }
+    for (fan, calibration) in [
+        (EvidenceFan::Cpu, plan.tachometer_calibrations.cpu),
+        (EvidenceFan::Gpu, plan.tachometer_calibrations.gpu),
+    ] {
+        if !calibration_is_qualified(calibration, fan) {
+            return Err(MatchedWorkloadPlanError::InvalidCalibration { fan });
+        }
+    }
     let mut prior_fingerprints = HashSet::new();
     for (index, prior) in plan.previous_passing_runs.iter().enumerate() {
         prior
@@ -803,6 +822,7 @@ fn validate_plan(plan: &MatchedWorkloadPlan<'_>) -> Result<(), MatchedWorkloadPl
             || prior.baseline_binding_sha256.as_deref() != Some(expected_baseline_binding.as_str())
             || !matched_workload_is_complete(prior)
             || !matched_workload_matches_baseline(prior, plan.baseline)
+            || !matched_workload_matches_calibrations(prior, plan.tachometer_calibrations)
         {
             return Err(MatchedWorkloadPlanError::InvalidPriorRun {
                 index,
@@ -812,15 +832,33 @@ fn validate_plan(plan: &MatchedWorkloadPlan<'_>) -> Result<(), MatchedWorkloadPl
             });
         }
     }
-    if plan.samples_required < MINIMUM_MATCHED_WORKLOAD_SAMPLES {
-        return Err(MatchedWorkloadPlanError::InvalidSampleCount);
-    }
     Ok(())
 }
 
 fn baseline_fingerprint(baseline: &EvidenceRecord) -> String {
     let canonical = serde_json::to_vec(baseline).expect("validated evidence always serializes");
     format!("{:x}", Sha256::digest(canonical))
+}
+
+fn calibration_is_qualified(
+    calibration: &FanCalibrationEvidence,
+    expected_fan: EvidenceFan,
+) -> bool {
+    if calibration.fan != expected_fan {
+        return false;
+    }
+    let fan = match expected_fan {
+        EvidenceFan::Cpu => Fan::Cpu,
+        EvidenceFan::Gpu => Fan::Gpu,
+    };
+    calibration
+        .protocol_checkpoint
+        .as_ref()
+        .and_then(|checkpoint| {
+            crate::ConservativeFanCalibration::resume(fan, checkpoint.clone()).ok()
+        })
+        .and_then(|session| session.evidence().cloned())
+        .is_some_and(|derived| derived == *calibration)
 }
 
 fn covers_final_five_minutes(record: &EvidenceRecord) -> bool {
@@ -1029,7 +1067,7 @@ fn matched_workload_matches_baseline(custom: &EvidenceRecord, baseline: &Evidenc
     else {
         return false;
     };
-    let (cpu_precise_slope, gpu_precise_slope) = precise_final_thermal_slopes(&custom.samples);
+    let comparison = evaluate_thermal_comparison(baseline_summary, custom_summary, &custom.samples);
     custom_workload.workload_id == baseline_workload.workload_id
         && custom_workload.command == baseline_workload.command
         && custom_workload.version == baseline_workload.version
@@ -1046,27 +1084,31 @@ fn matched_workload_matches_baseline(custom: &EvidenceRecord, baseline: &Evidenc
             .starting_gpu_millicelsius
             .abs_diff(baseline_workload.starting_gpu_millicelsius)
             <= STARTING_TEMPERATURE_COMPARABILITY_MILLICELSIUS as u32
-        && custom_summary.cpu_peak_millicelsius
-            <= baseline_summary
-                .cpu_peak_millicelsius
-                .saturating_add(THERMAL_COMPARISON_MARGIN_MILLICELSIUS)
-        && custom_summary.gpu_peak_millicelsius
-            <= baseline_summary
-                .gpu_peak_millicelsius
-                .saturating_add(THERMAL_COMPARISON_MARGIN_MILLICELSIUS)
-        && custom_summary.cpu_p95_millicelsius
-            <= baseline_summary
-                .cpu_p95_millicelsius
-                .saturating_add(THERMAL_COMPARISON_MARGIN_MILLICELSIUS)
-        && custom_summary.gpu_p95_millicelsius
-            <= baseline_summary
-                .gpu_p95_millicelsius
-                .saturating_add(THERMAL_COMPARISON_MARGIN_MILLICELSIUS)
-        && cpu_precise_slope <= f64::from(THERMAL_SLOPE_LIMIT_MILLICELSIUS_PER_MINUTE)
-        && gpu_precise_slope <= f64::from(THERMAL_SLOPE_LIMIT_MILLICELSIUS_PER_MINUTE)
+        && custom.samples.len() == baseline.samples.len()
+        && comparison.accepted()
         && custom_summary.system_stable == Some(true)
         && custom_summary.kernel_faults.is_empty()
         && custom_summary.nvidia_faults.is_empty()
+}
+
+fn matched_workload_matches_calibrations(
+    record: &EvidenceRecord,
+    calibrations: MatchedWorkloadTachometerCalibrations<'_>,
+) -> bool {
+    let mut state = TachometerEvidenceState::default();
+    record.samples.iter().all(|sample| {
+        [EvidenceFan::Cpu, EvidenceFan::Gpu].into_iter().all(|fan| {
+            evaluate_tachometer_sample(
+                sample.timestamp,
+                &record.commands,
+                &record.readbacks,
+                fan,
+                calibration_for_fan(calibrations, fan),
+                state_for_fan(&mut state, fan),
+            )
+            .is_ok()
+        })
+    })
 }
 
 #[derive(Default)]
@@ -1087,6 +1129,8 @@ fn validate_observation(
     captured_at: EvidenceTimestamp,
     expected_millis: u64,
     control_evidence: &mut ControlEvidenceState,
+    tachometer_calibrations: MatchedWorkloadTachometerCalibrations<'_>,
+    tachometer_evidence: &mut TachometerEvidenceState,
     faults: &mut Vec<FaultEvidence>,
 ) {
     let source_timestamp = observation.sample.timestamp;
@@ -1212,6 +1256,12 @@ fn validate_observation(
         control_evidence,
         faults,
     );
+    validate_tachometer_evidence(
+        observation,
+        tachometer_calibrations,
+        tachometer_evidence,
+        faults,
+    );
     if !observation.system_stable {
         push_fault(
             faults,
@@ -1235,6 +1285,164 @@ fn validate_observation(
             "nvidia-instability",
             nonempty(detail, "NVIDIA fault reported"),
         );
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TachometerEvidenceState {
+    cpu: Option<TachometerCommandState>,
+    gpu: Option<TachometerCommandState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TachometerCommandState {
+    pwm: u8,
+    confirmed_at_millis: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TachometerEvidenceError {
+    InvalidEvidence,
+    DeadlineOverflow,
+    OutOfBand { expected_rpm: u32, actual_rpm: u32 },
+}
+
+fn validate_tachometer_evidence(
+    observation: &MatchedWorkloadObservation,
+    calibrations: MatchedWorkloadTachometerCalibrations<'_>,
+    state: &mut TachometerEvidenceState,
+    faults: &mut Vec<FaultEvidence>,
+) {
+    for fan in [EvidenceFan::Cpu, EvidenceFan::Gpu] {
+        match evaluate_tachometer_sample(
+            observation.sample.timestamp,
+            &observation.commands,
+            &observation.readbacks,
+            fan,
+            calibration_for_fan(calibrations, fan),
+            state_for_fan(state, fan),
+        ) {
+            Ok(()) => {}
+            Err(TachometerEvidenceError::InvalidEvidence) => push_fault(
+                faults,
+                observation.sample.timestamp,
+                "invalid-control-evidence",
+                format!("{fan:?} tachometer evidence is missing, ambiguous, or misordered"),
+            ),
+            Err(TachometerEvidenceError::DeadlineOverflow) => push_fault(
+                faults,
+                observation.sample.timestamp,
+                "fan-feedback-loss",
+                format!("{fan:?} tachometer response deadline overflowed"),
+            ),
+            Err(TachometerEvidenceError::OutOfBand {
+                expected_rpm,
+                actual_rpm,
+            }) => push_fault(
+                faults,
+                observation.sample.timestamp,
+                "fan-feedback-loss",
+                format!(
+                    "{fan:?} fan tachometer settled outside its qualified ±30% band (expected {expected_rpm} RPM, got {actual_rpm} RPM)"
+                ),
+            ),
+        }
+    }
+}
+
+fn evaluate_tachometer_sample(
+    sample_at: EvidenceTimestamp,
+    commands: &[FanCommandEvidence],
+    readbacks: &[FanReadbackEvidence],
+    fan: EvidenceFan,
+    calibration: &FanCalibrationEvidence,
+    state: &mut Option<TachometerCommandState>,
+) -> Result<(), TachometerEvidenceError> {
+    let commands = commands
+        .iter()
+        .filter(|command| {
+            command.fan == fan
+                && command.field == FanControlField::Pwm
+                && timestamp_within_sample(command.timestamp, sample_at)
+        })
+        .collect::<Vec<_>>();
+    let pwm_readbacks = readbacks
+        .iter()
+        .filter(|readback| {
+            readback.fan == fan
+                && readback.field == FanReadbackField::Pwm
+                && readback.phase == Some(crate::FanReadbackPhase::Sample)
+                && timestamp_within_sample(readback.timestamp, sample_at)
+        })
+        .collect::<Vec<_>>();
+    let rpm_readbacks = readbacks
+        .iter()
+        .filter(|readback| {
+            readback.fan == fan
+                && readback.field == FanReadbackField::Rpm
+                && readback.phase == Some(crate::FanReadbackPhase::Sample)
+                && timestamp_within_sample(readback.timestamp, sample_at)
+        })
+        .collect::<Vec<_>>();
+    let ([command], [pwm_readback], [rpm_readback]) = (
+        commands.as_slice(),
+        pwm_readbacks.as_slice(),
+        rpm_readbacks.as_slice(),
+    ) else {
+        return Err(TachometerEvidenceError::InvalidEvidence);
+    };
+    let pwm = u8::try_from(command.value).map_err(|_| TachometerEvidenceError::InvalidEvidence)?;
+    let rpm = rpm_readback
+        .value
+        .filter(|value| *value > 0)
+        .ok_or(TachometerEvidenceError::InvalidEvidence)?;
+    if pwm_readback.outcome != ObservationOutcome::Confirmed
+        || pwm_readback.value != Some(command.value)
+        || rpm_readback.outcome != ObservationOutcome::Confirmed
+        || rpm_readback.timestamp.monotonic_millis < pwm_readback.timestamp.monotonic_millis
+    {
+        return Err(TachometerEvidenceError::InvalidEvidence);
+    }
+    if state.is_none_or(|current| current.pwm != pwm) {
+        *state = Some(TachometerCommandState {
+            pwm,
+            confirmed_at_millis: pwm_readback.timestamp.monotonic_millis,
+        });
+    }
+    let current = state.expect("tachometer command state was initialized");
+    let deadline = current
+        .confirmed_at_millis
+        .checked_add(calibration.response_deadline_millis)
+        .ok_or(TachometerEvidenceError::DeadlineOverflow)?;
+    let expected_rpm = expected_rpm_from_evidence(calibration, pwm)
+        .ok_or(TachometerEvidenceError::InvalidEvidence)?;
+    if rpm_in_band(rpm, expected_rpm) || rpm_readback.timestamp.monotonic_millis <= deadline {
+        Ok(())
+    } else {
+        Err(TachometerEvidenceError::OutOfBand {
+            expected_rpm,
+            actual_rpm: rpm,
+        })
+    }
+}
+
+const fn calibration_for_fan(
+    calibrations: MatchedWorkloadTachometerCalibrations<'_>,
+    fan: EvidenceFan,
+) -> &FanCalibrationEvidence {
+    match fan {
+        EvidenceFan::Cpu => calibrations.cpu,
+        EvidenceFan::Gpu => calibrations.gpu,
+    }
+}
+
+fn state_for_fan(
+    state: &mut TachometerEvidenceState,
+    fan: EvidenceFan,
+) -> &mut Option<TachometerCommandState> {
+    match fan {
+        EvidenceFan::Cpu => &mut state.cpu,
+        EvidenceFan::Gpu => &mut state.gpu,
     }
 }
 
@@ -1397,15 +1605,8 @@ fn compare_thermal_summaries<E: MatchedWorkloadEnvironment + ?Sized>(
     environment: &mut E,
 ) {
     let timestamp = environment.timestamp();
-    if custom.cpu_peak_millicelsius
-        > baseline
-            .cpu_peak_millicelsius
-            .saturating_add(THERMAL_COMPARISON_MARGIN_MILLICELSIUS)
-        || custom.gpu_peak_millicelsius
-            > baseline
-                .gpu_peak_millicelsius
-                .saturating_add(THERMAL_COMPARISON_MARGIN_MILLICELSIUS)
-    {
+    let comparison = evaluate_thermal_comparison(baseline, custom, custom_samples);
+    if !comparison.peaks_acceptable {
         push_fault(
             faults,
             timestamp,
@@ -1413,15 +1614,7 @@ fn compare_thermal_summaries<E: MatchedWorkloadEnvironment + ?Sized>(
             "Custom CPU or GPU peak exceeded baseline by more than 2 C",
         );
     }
-    if custom.cpu_p95_millicelsius
-        > baseline
-            .cpu_p95_millicelsius
-            .saturating_add(THERMAL_COMPARISON_MARGIN_MILLICELSIUS)
-        || custom.gpu_p95_millicelsius
-            > baseline
-                .gpu_p95_millicelsius
-                .saturating_add(THERMAL_COMPARISON_MARGIN_MILLICELSIUS)
-    {
+    if !comparison.percentiles_acceptable {
         push_fault(
             faults,
             timestamp,
@@ -1429,16 +1622,57 @@ fn compare_thermal_summaries<E: MatchedWorkloadEnvironment + ?Sized>(
             "Custom CPU or GPU 95th percentile exceeded baseline by more than 2 C",
         );
     }
-    let (cpu_precise_slope, gpu_precise_slope) = precise_final_thermal_slopes(custom_samples);
-    if cpu_precise_slope > f64::from(THERMAL_SLOPE_LIMIT_MILLICELSIUS_PER_MINUTE)
-        || gpu_precise_slope > f64::from(THERMAL_SLOPE_LIMIT_MILLICELSIUS_PER_MINUTE)
-    {
+    if !comparison.slopes_acceptable {
         push_fault(
             faults,
             timestamp,
             "final-slope-regression",
             "Custom final-five-minute CPU or GPU slope exceeded 1 C/min",
         );
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ThermalComparison {
+    peaks_acceptable: bool,
+    percentiles_acceptable: bool,
+    slopes_acceptable: bool,
+}
+
+impl ThermalComparison {
+    const fn accepted(self) -> bool {
+        self.peaks_acceptable && self.percentiles_acceptable && self.slopes_acceptable
+    }
+}
+
+fn evaluate_thermal_comparison(
+    baseline: &crate::ThermalSummaryEvidence,
+    custom: &crate::ThermalSummaryEvidence,
+    custom_samples: &[TelemetrySampleEvidence],
+) -> ThermalComparison {
+    let peaks_acceptable = custom.cpu_peak_millicelsius
+        <= baseline
+            .cpu_peak_millicelsius
+            .saturating_add(THERMAL_COMPARISON_MARGIN_MILLICELSIUS)
+        && custom.gpu_peak_millicelsius
+            <= baseline
+                .gpu_peak_millicelsius
+                .saturating_add(THERMAL_COMPARISON_MARGIN_MILLICELSIUS);
+    let percentiles_acceptable = custom.cpu_p95_millicelsius
+        <= baseline
+            .cpu_p95_millicelsius
+            .saturating_add(THERMAL_COMPARISON_MARGIN_MILLICELSIUS)
+        && custom.gpu_p95_millicelsius
+            <= baseline
+                .gpu_p95_millicelsius
+                .saturating_add(THERMAL_COMPARISON_MARGIN_MILLICELSIUS);
+    let (cpu_precise_slope, gpu_precise_slope) = precise_final_thermal_slopes(custom_samples);
+    ThermalComparison {
+        peaks_acceptable,
+        percentiles_acceptable,
+        slopes_acceptable: cpu_precise_slope
+            <= f64::from(THERMAL_SLOPE_LIMIT_MILLICELSIUS_PER_MINUTE)
+            && gpu_precise_slope <= f64::from(THERMAL_SLOPE_LIMIT_MILLICELSIUS_PER_MINUTE),
     }
 }
 
