@@ -334,6 +334,9 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
         assert_eq!(active_state(&guard_name), "activating");
         assert_eq!(active_state(&daemon_name), "inactive");
         systemctl(["stop", &target_name]);
+        // Cancelling the dependent target leaves its already-running required start job alone;
+        // explicitly cancelling the guard exercises its independent StopPost recovery handoff.
+        systemctl(["stop", &guard_name]);
         wait_for_log(&log, "guard-cancel-recovery");
         let _ = target_start.wait();
         assert_cancelled_recovery_order(&log);
