@@ -25,6 +25,7 @@ mod preflight;
 mod restoration;
 mod sampling;
 mod sensor_recovery;
+mod supervision;
 mod tachometer;
 mod termination;
 mod validation;
@@ -89,7 +90,7 @@ pub use output::{ExternalPower, FanOutputs, calculate_fan_outputs};
 pub use ownership::{
     ArmingReadySample, COMPETING_FAN_CONTROL_SERVICES, ControllerOwnership,
     ControllerOwnershipError, ControllerReleaseError, OwnershipSampleReadiness, RUNTIME_LOCK_PATH,
-    acquire_controller_ownership,
+    SystemFirmwareAutoRecovery, acquire_controller_ownership,
 };
 pub use platform::{
     BoundedFileAccess, BoundedIdentityBoundFileAccess, Clock, FakePlatform, FakeRuntimeLock,
@@ -118,6 +119,10 @@ pub use sampling::{
 pub use sensor_recovery::{
     SensorControlState, SensorControlStep, SensorSourceDiscovery, TransientSensorControl,
     TransientSensorControlError,
+};
+pub use supervision::{
+    ControlLoopHeartbeat, ServiceNotification, ServiceNotifier, SupervisedControlIterationError,
+    SystemdNotifier, run_supervised_control_iteration,
 };
 pub use tachometer::TachometerCalibrationError;
 pub use termination::{

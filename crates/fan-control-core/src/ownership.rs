@@ -6,10 +6,10 @@ use std::{
 };
 
 use crate::{
-    AcerHwmonDevice, BoundedFileAccess, Clock, CompleteSampleSet, EmergencyContainmentReport,
-    FirmwareAutoRestorationError, FreshSampleGate, PlatformError, PlatformErrorKind,
-    RuntimeLockAccess, RuntimeLockError, SampleReadiness, SampleSetError, SampleSources,
-    ServiceAccess,
+    AcerHwmonDevice, AcerHwmonDiscoveryError, BoundedFileAccess, Clock, CompleteSampleSet,
+    EmergencyContainmentReport, FirmwareAutoRestorationError, FreshSampleGate,
+    IdentityBoundFileAccess, PlatformError, PlatformErrorKind, RuntimeLockAccess, RuntimeLockError,
+    SampleReadiness, SampleSetError, SampleSources, ServiceAccess,
     restoration::{
         FIRMWARE_AUTO, contain_custom_fans_at_maximum, recover_firmware_auto, restore_firmware_auto,
     },
@@ -43,6 +43,15 @@ impl ArmingReadySample {
 pub enum OwnershipSampleReadiness {
     AwaitingSecondSample,
     Ready(ArmingReadySample),
+}
+
+/// Result of one system recovery cycle after every fan has reached a safe state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemFirmwareAutoRecovery {
+    /// Both fans were confirmed in Firmware Auto mode.
+    Restored,
+    /// Firmware Auto could not be confirmed, so both custom-mode fans were held at maximum PWM.
+    Contained,
 }
 
 #[derive(Debug)]
@@ -79,6 +88,17 @@ where
 {
     pub fn platform(&self) -> &P {
         self.platform
+    }
+
+    /// Discovers the exact fan device while this process holds exclusive controller ownership.
+    pub fn discover_acer_hwmon(
+        &mut self,
+        hwmon_root: &Path,
+    ) -> Result<AcerHwmonDevice, AcerHwmonDiscoveryError>
+    where
+        P: IdentityBoundFileAccess + Sized,
+    {
+        crate::discover_acer_hwmon(self.platform, hwmon_root)
     }
 
     pub(crate) fn platform_mut(&mut self) -> &mut P {
@@ -396,6 +416,22 @@ where
         sampling_epoch_started: false,
         sampling_epoch: 0,
     })
+}
+
+impl ControllerOwnership<'_, crate::SystemOwnershipPlatform> {
+    /// Runs one configuration-independent, FD-pinned Firmware Auto recovery cycle.
+    ///
+    /// A contained result means the caller must retry. The independent recovery executable keeps
+    /// ownership across retries, so no controller can arm between them.
+    pub fn recover_system_firmware_auto_cycle(
+        &mut self,
+        device: &AcerHwmonDevice,
+    ) -> Result<SystemFirmwareAutoRecovery, PlatformError> {
+        self.restoration_confirmed = false;
+        let outcome = self.platform.restore_firmware_auto_cycle(device)?;
+        self.restoration_confirmed = outcome == SystemFirmwareAutoRecovery::Restored;
+        Ok(outcome)
+    }
 }
 
 fn reject_competing_services(

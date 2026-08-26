@@ -1,12 +1,16 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
+    ffi::CString,
     fmt,
     fs::{self, File, OpenOptions},
-    io,
+    io::{self, Read, Write},
     os::{
-        fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        fd::{AsRawFd, FromRawFd},
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        },
     },
     path::{Path, PathBuf},
     process::Command,
@@ -310,6 +314,8 @@ pub enum RuntimeLockError {
 #[derive(Debug, Default)]
 pub struct SystemOwnershipPlatform {
     required_lock_owner: u32,
+    #[cfg(test)]
+    fail_firmware_auto_writes: bool,
 }
 
 impl SystemOwnershipPlatform {
@@ -321,6 +327,311 @@ impl SystemOwnershipPlatform {
     fn with_required_lock_owner(required_lock_owner: u32) -> Self {
         Self {
             required_lock_owner,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn with_failed_firmware_auto_writes() -> Self {
+        Self {
+            fail_firmware_auto_writes: true,
+            ..Self::default()
+        }
+    }
+}
+
+impl SystemOwnershipPlatform {
+    fn metadata(path: &Path) -> Result<fs::Metadata, PlatformError> {
+        fs::metadata(path).map_err(|error| {
+            io_platform_error(&format!("cannot inspect {}", path.display()), error)
+        })
+    }
+
+    fn read_file(path: &Path) -> Result<String, PlatformError> {
+        fs::read_to_string(path)
+            .map_err(|error| io_platform_error(&format!("cannot read {}", path.display()), error))
+    }
+
+    fn write_file(path: &Path, contents: &str) -> Result<(), PlatformError> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| {
+                io_platform_error(
+                    &format!("cannot open {} for writing", path.display()),
+                    error,
+                )
+            })?;
+        file.write_all(contents.as_bytes())
+            .map_err(|error| io_platform_error(&format!("cannot write {}", path.display()), error))
+    }
+
+    fn list_directory(directory: &Path) -> Result<Vec<PathBuf>, PlatformError> {
+        let entries = fs::read_dir(directory).map_err(|error| {
+            io_platform_error(&format!("cannot list {}", directory.display()), error)
+        })?;
+        entries
+            .map(|entry| {
+                entry.map(|entry| entry.path()).map_err(|error| {
+                    io_platform_error(
+                        &format!("cannot read directory entry in {}", directory.display()),
+                        error,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn file_identity(path: &Path) -> Result<FileIdentity, PlatformError> {
+        let metadata = Self::metadata(path)?;
+        Ok(FileIdentity::from_raw(metadata.dev(), metadata.ino()))
+    }
+
+    pub(crate) fn restore_firmware_auto_cycle(
+        &mut self,
+        device: &crate::AcerHwmonDevice,
+    ) -> Result<crate::SystemFirmwareAutoRecovery, PlatformError> {
+        let pinned = PinnedAcerHwmon::open(device)?;
+        for _ in 0..3 {
+            let _ = self.write_firmware_auto(&pinned, device.cpu().enable());
+            let _ = self.write_firmware_auto(&pinned, device.gpu().enable());
+            let cpu = pinned.read(device.cpu().enable());
+            let gpu = pinned.read(device.gpu().enable());
+            if matches!(cpu, Ok(ref mode) if mode.trim() == "2")
+                && matches!(gpu, Ok(ref mode) if mode.trim() == "2")
+            {
+                return Ok(crate::SystemFirmwareAutoRecovery::Restored);
+            }
+        }
+
+        let cpu = pinned.contain(device.cpu());
+        let gpu = pinned.contain(device.gpu());
+        match (cpu, gpu) {
+            (Ok(()), Ok(())) => Ok(crate::SystemFirmwareAutoRecovery::Contained),
+            (cpu, gpu) => Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("recovery containment incomplete (CPU: {cpu:?}, GPU: {gpu:?})"),
+            )),
+        }
+    }
+
+    fn write_firmware_auto(
+        &self,
+        pinned: &PinnedAcerHwmon<'_>,
+        endpoint: &Path,
+    ) -> Result<(), PlatformError> {
+        #[cfg(test)]
+        if self.fail_firmware_auto_writes {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!(
+                    "injected Firmware Auto write failure: {}",
+                    endpoint.display()
+                ),
+            ));
+        }
+        pinned.write(endpoint, "2")
+    }
+}
+
+impl FileAccess for SystemOwnershipPlatform {
+    fn read(&mut self, path: &Path) -> Result<String, PlatformError> {
+        Self::read_file(path)
+    }
+
+    fn write(&mut self, path: &Path, contents: &str) -> Result<(), PlatformError> {
+        Self::write_file(path, contents)
+    }
+
+    fn list(&mut self, directory: &Path) -> Result<Vec<PathBuf>, PlatformError> {
+        Self::list_directory(directory)
+    }
+
+    fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
+        Ok(FilePermissions::from_mode(
+            Self::metadata(path)?.permissions().mode(),
+        ))
+    }
+}
+
+impl IdentityBoundFileAccess for SystemOwnershipPlatform {
+    fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
+        Self::file_identity(path)
+    }
+
+    fn read_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+        child: &str,
+    ) -> Result<String, PlatformError> {
+        let path = direct_bound_child(directory, child)?;
+        let directory_handle = open_directory_bound(directory, expected)?;
+        let mut file = open_direct_child(&directory_handle, &path, libc::O_RDONLY)?;
+        let mut value = String::new();
+        file.read_to_string(&mut value).map_err(|error| {
+            io_platform_error(&format!("cannot read {}", path.display()), error)
+        })?;
+        Ok(value)
+    }
+
+    fn list_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        let directory_handle = open_directory_bound(directory, expected)?;
+        let pinned_path = PathBuf::from(format!("/proc/self/fd/{}", directory_handle.as_raw_fd()));
+        let entries = fs::read_dir(&pinned_path).map_err(|error| {
+            io_platform_error(&format!("cannot list {}", directory.display()), error)
+        })?;
+        entries
+            .map(|entry| {
+                entry
+                    .map(|entry| directory.join(entry.file_name()))
+                    .map_err(|error| {
+                        io_platform_error(
+                            &format!("cannot read directory entry in {}", directory.display()),
+                            error,
+                        )
+                    })
+            })
+            .collect()
+    }
+}
+
+fn open_directory_bound(directory: &Path, expected: FileIdentity) -> Result<File, PlatformError> {
+    let path = CString::new(directory.as_os_str().as_bytes()).map_err(|_| {
+        PlatformError::new(
+            PlatformErrorKind::Unavailable,
+            "directory path contains a NUL byte",
+        )
+    })?;
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io_platform_error(
+            &format!("cannot pin {}", directory.display()),
+            io::Error::last_os_error(),
+        ));
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
+    let metadata = file.metadata().map_err(|error| {
+        io_platform_error(
+            &format!("cannot inspect pinned {}", directory.display()),
+            error,
+        )
+    })?;
+    if FileIdentity::from_raw(metadata.dev(), metadata.ino()) != expected {
+        return Err(PlatformError::new(
+            PlatformErrorKind::Unavailable,
+            format!("backing identity changed: {}", directory.display()),
+        ));
+    }
+    Ok(file)
+}
+
+fn open_direct_child(
+    directory: &File,
+    path: &Path,
+    flags: libc::c_int,
+) -> Result<File, PlatformError> {
+    let child = path.file_name().ok_or_else(|| {
+        PlatformError::new(
+            PlatformErrorKind::Unavailable,
+            format!("bound endpoint has no filename: {}", path.display()),
+        )
+    })?;
+    let child = CString::new(child.as_bytes()).map_err(|_| {
+        PlatformError::new(
+            PlatformErrorKind::Unavailable,
+            format!("bound endpoint contains a NUL byte: {}", path.display()),
+        )
+    })?;
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            child.as_ptr(),
+            flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(io_platform_error(
+            &format!("cannot open pinned endpoint {}", path.display()),
+            io::Error::last_os_error(),
+        ));
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+struct PinnedAcerHwmon<'a> {
+    directory: File,
+    device: &'a crate::AcerHwmonDevice,
+}
+
+impl<'a> PinnedAcerHwmon<'a> {
+    fn open(device: &'a crate::AcerHwmonDevice) -> Result<Self, PlatformError> {
+        Ok(Self {
+            directory: open_directory_bound(device.root(), device.backing_identity())?,
+            device,
+        })
+    }
+
+    fn open_endpoint(&self, path: &Path, flags: libc::c_int) -> Result<File, PlatformError> {
+        let file = open_direct_child(&self.directory, path, flags)?;
+        let metadata = file.metadata().map_err(|error| {
+            io_platform_error(&format!("cannot inspect {}", path.display()), error)
+        })?;
+        let actual = FileIdentity::from_raw(metadata.dev(), metadata.ino());
+        if self.device.endpoint_identity(path) != Some(actual) {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("fan endpoint identity changed: {}", path.display()),
+            ));
+        }
+        Ok(file)
+    }
+
+    fn read(&self, path: &Path) -> Result<String, PlatformError> {
+        let mut file = self.open_endpoint(path, libc::O_RDONLY)?;
+        let mut value = String::new();
+        file.read_to_string(&mut value).map_err(|error| {
+            io_platform_error(&format!("cannot read {}", path.display()), error)
+        })?;
+        Ok(value)
+    }
+
+    fn write(&self, path: &Path, contents: &str) -> Result<(), PlatformError> {
+        let mut file = self.open_endpoint(path, libc::O_WRONLY)?;
+        file.write_all(contents.as_bytes())
+            .map_err(|error| io_platform_error(&format!("cannot write {}", path.display()), error))
+    }
+
+    fn contain(&self, fan: &crate::FanEndpoints) -> Result<(), PlatformError> {
+        match self.read(fan.enable()) {
+            Ok(mode) if mode.trim() == "2" => Ok(()),
+            Ok(mode) if mode.trim() == "1" => {
+                self.write(fan.pwm(), "255")?;
+                let readback = self.read(fan.pwm())?;
+                if readback.trim() == "255" {
+                    Ok(())
+                } else {
+                    Err(PlatformError::new(
+                        PlatformErrorKind::Unavailable,
+                        format!("maximum PWM readback failed: {}", fan.pwm().display()),
+                    ))
+                }
+            }
+            Ok(mode) => Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("unexpected fan mode {mode:?}: {}", fan.enable().display()),
+            )),
+            Err(error) => Err(error),
         }
     }
 }
@@ -1291,12 +1602,159 @@ mod tests {
         env,
         io::{BufRead, Read, Write},
         process::{Command, Stdio},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
     };
 
     use super::*;
 
     const CHILD_LOCK_PATH: &str = "FAN_CONTROL_TEST_LOCK_PATH";
     const CHILD_EXPECTATION: &str = "FAN_CONTROL_TEST_LOCK_EXPECTATION";
+
+    #[test]
+    fn system_recovery_completion_restores_both_fans() {
+        let base = env::temp_dir().join(format!(
+            "fan-control-supervised-recovery-{}",
+            std::process::id()
+        ));
+        let device_root = base.join("hwmon7");
+        fs::create_dir_all(&base).unwrap();
+        create_hwmon_fixture(&device_root);
+        let mut platform = SystemOwnershipPlatform::new();
+        let device = crate::discover_acer_hwmon(&mut platform, &base).unwrap();
+
+        assert_eq!(
+            platform.restore_firmware_auto_cycle(&device).unwrap(),
+            crate::SystemFirmwareAutoRecovery::Restored
+        );
+        assert_eq!(
+            fs::read_to_string(device_root.join("pwm1_enable")).unwrap(),
+            "2"
+        );
+        assert_eq!(
+            fs::read_to_string(device_root.join("pwm2_enable")).unwrap(),
+            "2"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn failed_system_auto_writes_contain_both_confirmed_custom_fans_at_maximum() {
+        let base = env::temp_dir().join(format!(
+            "fan-control-system-recovery-failure-{}",
+            std::process::id()
+        ));
+        let device_root = base.join("hwmon7");
+        fs::create_dir_all(&base).unwrap();
+        create_hwmon_fixture(&device_root);
+        let mut discovery_platform = SystemOwnershipPlatform::new();
+        let device = crate::discover_acer_hwmon(&mut discovery_platform, &base).unwrap();
+        let mut recovery_platform = SystemOwnershipPlatform::with_failed_firmware_auto_writes();
+
+        assert_eq!(
+            recovery_platform
+                .restore_firmware_auto_cycle(&device)
+                .unwrap(),
+            crate::SystemFirmwareAutoRecovery::Contained
+        );
+        assert_eq!(
+            fs::read_to_string(device_root.join("pwm1_enable")).unwrap(),
+            "1"
+        );
+        assert_eq!(
+            fs::read_to_string(device_root.join("pwm2_enable")).unwrap(),
+            "1"
+        );
+        assert_eq!(fs::read_to_string(device_root.join("pwm1")).unwrap(), "255");
+        assert_eq!(fs::read_to_string(device_root.join("pwm2")).unwrap(), "255");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn pinned_recovery_write_stays_on_the_discovered_device_after_hwmon_rebind() {
+        let base = env::temp_dir().join(format!(
+            "fan-control-pinned-recovery-{}",
+            std::process::id()
+        ));
+        let hwmon_root = base.join("class-hwmon");
+        let original = base.join("original");
+        let replacement = base.join("replacement");
+        fs::create_dir_all(&hwmon_root).unwrap();
+        create_hwmon_fixture(&original);
+        create_hwmon_fixture(&replacement);
+        let candidate = hwmon_root.join("hwmon7");
+        std::os::unix::fs::symlink(&original, &candidate).unwrap();
+        let mut platform = SystemOwnershipPlatform::new();
+        let device = crate::discover_acer_hwmon(&mut platform, &hwmon_root).unwrap();
+        let pinned = PinnedAcerHwmon::open(&device).unwrap();
+
+        fs::remove_file(&candidate).unwrap();
+        std::os::unix::fs::symlink(&replacement, &candidate).unwrap();
+        pinned.write(device.cpu().enable(), "2").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(original.join("pwm1_enable")).unwrap(),
+            "2"
+        );
+        assert_eq!(
+            fs::read_to_string(replacement.join("pwm1_enable")).unwrap(),
+            "1"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn bound_reads_never_escape_during_aba_directory_rebind() {
+        let base =
+            env::temp_dir().join(format!("fan-control-bound-read-aba-{}", std::process::id()));
+        let original = base.join("original");
+        let replacement = base.join("replacement");
+        let candidate = base.join("hwmon7");
+        fs::create_dir_all(&original).unwrap();
+        fs::create_dir_all(&replacement).unwrap();
+        let expected_value = "original\n".repeat(8_192);
+        let foreign_value = "foreign!\n".repeat(8_192);
+        fs::write(original.join("name"), &expected_value).unwrap();
+        fs::write(replacement.join("name"), foreign_value).unwrap();
+        std::os::unix::fs::symlink(&original, &candidate).unwrap();
+
+        let expected = SystemOwnershipPlatform::file_identity(&candidate).unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let toggle_running = running.clone();
+        let toggle_base = base.clone();
+        let toggle_candidate = candidate.clone();
+        let toggle_original = original.clone();
+        let toggle_replacement = replacement.clone();
+        let toggler = thread::spawn(move || {
+            let mut replacement_active = true;
+            while toggle_running.load(Ordering::Relaxed) {
+                let target = if replacement_active {
+                    &toggle_replacement
+                } else {
+                    &toggle_original
+                };
+                let next = toggle_base.join("next-link");
+                std::os::unix::fs::symlink(target, &next).unwrap();
+                fs::rename(&next, &toggle_candidate).unwrap();
+                replacement_active = !replacement_active;
+            }
+        });
+
+        let mut platform = SystemOwnershipPlatform::new();
+        for _ in 0..256 {
+            match IdentityBoundFileAccess::read_bound(&mut platform, &candidate, expected, "name") {
+                Ok(value) => assert_eq!(value, expected_value),
+                Err(error) => assert_eq!(error.kind(), PlatformErrorKind::Unavailable),
+            }
+        }
+        running.store(false, Ordering::Relaxed);
+        toggler.join().unwrap();
+
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn system_runtime_lock_serializes_separate_processes() {
@@ -1433,5 +1891,22 @@ mod tests {
         let mut remainder = String::new();
         stdout.read_to_string(&mut remainder).unwrap();
         assert!(child.wait().unwrap().success());
+    }
+
+    fn create_hwmon_fixture(root: &Path) {
+        fs::create_dir_all(root).unwrap();
+        for (name, contents, mode) in [
+            ("name", "acer\n", 0o444),
+            ("pwm1", "100", 0o644),
+            ("pwm1_enable", "1", 0o644),
+            ("fan1_input", "2000", 0o444),
+            ("pwm2", "100", 0o644),
+            ("pwm2_enable", "1", 0o644),
+            ("fan2_input", "2000", 0o444),
+        ] {
+            let path = root.join(name);
+            fs::write(&path, contents).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
     }
 }
