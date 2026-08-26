@@ -1,0 +1,26 @@
+[Unit]
+Description=PT315-53 fan safety guard for system sleep
+# All systemd suspend and hibernation services cross sleep.target. Making this guard a required,
+# ordered dependency turns an unsuccessful restoration command into a failed sleep transaction.
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+# Preparation records a healthy running daemon, stops it synchronously, then retries restoration and
+# safe containment until both fans confirm Auto. Its successful exit is the sleep permission boundary.
+ExecStart=/usr/bin/pt31553-fan-restore --prepare-sleep
+TimeoutStartSec=infinity
+RemainAfterExit=yes
+# Only a daemon deliberately stopped above is resumed. The helper safely clears its planned-start
+# counter first; a pre-existing fault latch remains stopped. A fresh process must fully rearm.
+ExecStop=/usr/bin/pt31553-fan-restore --resume-after-sleep
+# ExecStop is skipped when preparation never completed. ExecStopPost checks the root-only marker
+# written only after Auto confirmation, and keeps independent recovery alive if it is absent.
+ExecStopPost=/usr/bin/pt31553-fan-restore --restore-after-failed-sleep-guard
+TimeoutStopSec=infinity
+# Marker files live under /run, but are owned by the recovery helper rather than this unit. This
+# keeps the daemon start gate intact if systemd tears down a failed guard transaction.
+
+[Install]
+RequiredBy=sleep.target

@@ -26,3 +26,12 @@ jobs:
           cargo test -p fan-control-daemon --test service_supervision
           actual_systemd_manager_runs_watchdog_cleanup_restart_and_start_limit
           -- --ignored --exact --nocapture
+      - name: Exercise sleep gate and fresh resume under systemd
+        env:
+          PT31553_RUN_SYSTEMD_LIFECYCLE: "1"
+        run: |
+          cargo test -p fan-control-restore --bin fan-control-restore
+          cargo test -p fan-control-daemon --test sleep_guard
+          cargo test -p fan-control-daemon --test sleep_guard \
+            actual_systemd_manager_blocks_sleep_failure_and_restarts_fresh_after_resume \
+            -- --ignored --exact --nocapture
