@@ -2,7 +2,7 @@ use std::{error::Error, fmt, time::Duration};
 
 use crate::{AcerHwmonDevice, BoundedFileAccess, Clock, PlatformError};
 
-const FIRMWARE_AUTO: &str = "2";
+pub(crate) const FIRMWARE_AUTO: &str = "2";
 const CUSTOM_CONTROL: &str = "1";
 const MAXIMUM_PWM: &str = "255";
 const MAX_ATTEMPTS: u8 = 3;

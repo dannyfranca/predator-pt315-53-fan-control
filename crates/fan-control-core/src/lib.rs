@@ -5,6 +5,7 @@ use std::fmt;
 mod acer_hwmon;
 mod arming;
 mod authority;
+mod baseline;
 mod compatibility;
 mod config;
 mod control_cycle;
@@ -36,6 +37,13 @@ pub use authority::{
     AdmittedPolicyAuthority, PolicyAuthorityAdmissionError, PolicyAuthorityError,
     admit_policy_authority,
 };
+pub use baseline::{
+    BaselineCleanupAttestation, BaselineObservation, BaselineStartingConditions,
+    CPU_ABSOLUTE_ABORT_MILLICELSIUS, CapturedBaselineStartingConditions,
+    FirmwareAutoBaselineAccess, FirmwareAutoBaselineEnvironment, FirmwareAutoBaselinePlan,
+    FirmwareAutoBaselinePlanError, FirmwareAutoBaselineReport, GPU_ABSOLUTE_ABORT_MILLICELSIUS,
+    run_firmware_auto_baseline,
+};
 pub use compatibility::{
     AdmittedCompatibility, CompatibilityAdmissionError, CompatibilityDeclarationError,
     CompatibilityDeclarationV1, CompatibilityObservation, EscapeHatchCapability,
@@ -56,14 +64,14 @@ pub use curve::{CurvePoint, DemandCurve, DemandCurveError, TemperatureCelsius, T
 pub use demand::{DemandPercent, DemandPercentError, Pwm};
 pub use envelope::{EnvelopeValidationError, validate_against_protected_envelope};
 pub use evidence::{
-    EVIDENCE_SCHEMA_VERSION, EvidenceExternalPower, EvidenceFan, EvidenceParseError,
-    EvidenceProfile, EvidenceRecordStatus, EvidenceRecordV1, EvidenceTimestamp,
+    EVIDENCE_SCHEMA_VERSION, EVIDENCE_SCHEMA_VERSION_V2, EvidenceExternalPower, EvidenceFan,
+    EvidenceParseError, EvidenceProfile, EvidenceRecord, EvidenceRecordStatus, EvidenceTimestamp,
     EvidenceValidationError, EvidenceWriteError, FanCalibrationEvidence, FanCommandEvidence,
-    FanControlField, FanReadbackEvidence, FanReadbackField, FaultEvidence, ObservationOutcome,
-    QualificationEnvelopeIdentityV1, RestorationAttemptEvidence, RestorationOutcome,
-    RpmAnchorEvidence, RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness,
+    FanControlField, FanReadbackEvidence, FanReadbackField, FanReadbackPhase, FaultEvidence,
+    ObservationOutcome, QualificationEnvelopeIdentityV1, RestorationAttemptEvidence,
+    RestorationOutcome, RpmAnchorEvidence, RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness,
     StateTransitionEvidence, TelemetrySampleEvidence, ThermalSummaryEvidence, WorkloadEvidence,
-    parse_evidence_v1, write_evidence_atomically,
+    parse_evidence_v1, parse_evidence_v2, write_evidence_atomically,
 };
 pub use external_power::observe_external_power;
 pub use nvidia_gpu::{

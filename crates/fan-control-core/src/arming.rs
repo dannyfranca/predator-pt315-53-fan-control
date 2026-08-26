@@ -6,10 +6,10 @@ use crate::{
     EmergencyContainmentReport, EnvelopeValidationError, Fan, FanEndpoints,
     FirmwareAutoRestorationError, PlatformError, RuntimeLockAccess, ValidatedConfig,
     ownership::FirmwareAutoSafingOutcome,
+    restoration::FIRMWARE_AUTO,
     tachometer::{MAXIMUM_PLAUSIBLE_RPM, MINIMUM_PLAUSIBLE_RPM, QualifiedTachometerCalibrations},
 };
 
-const FIRMWARE_AUTO: &str = "2";
 const CUSTOM_CONTROL: &str = "1";
 const MAXIMUM_PWM: &str = "255";
 const HANDOVER_WINDOW: Duration = Duration::from_secs(2);

@@ -525,19 +525,21 @@ fn unsupported_incomplete_and_ambiguous_records_are_rejected() {
 
     assert!(matches!(
         parse_evidence_v1(&FIXTURE.replacen("\"schema_version\": 1", "\"schema_version\": 2", 1)),
-        Err(EvidenceParseError::Parse(_))
+        Err(EvidenceParseError::Invalid(
+            EvidenceValidationError::UnsupportedSchemaVersion
+        ))
     ));
 
     assert!(
-        serde_json::from_str::<fan_control_core::EvidenceRecordV1>(&FIXTURE.replacen(
+        serde_json::from_str::<fan_control_core::EvidenceRecord>(&FIXTURE.replacen(
             "\"schema_version\": 1",
             "\"schema_version\": 2",
             1
         ))
-        .is_err()
+        .is_ok()
     );
     assert!(
-        serde_json::from_str::<fan_control_core::EvidenceRecordV1>(&FIXTURE.replacen(
+        serde_json::from_str::<fan_control_core::EvidenceRecord>(&FIXTURE.replacen(
             "\"qualification_record_schema_version\": 1",
             "\"qualification_record_schema_version\": 2",
             1
@@ -545,7 +547,7 @@ fn unsupported_incomplete_and_ambiguous_records_are_rejected() {
         .is_err()
     );
     assert!(
-        serde_json::from_str::<fan_control_core::EvidenceRecordV1>(&FIXTURE.replacen(
+        serde_json::from_str::<fan_control_core::EvidenceRecord>(&FIXTURE.replacen(
             "\"monotonic_millis\": 101900",
             "\"monotonic_millis\": 103000",
             1
@@ -554,7 +556,7 @@ fn unsupported_incomplete_and_ambiguous_records_are_rejected() {
     );
 
     let mut unsupported = parse_evidence_v1(FIXTURE).unwrap();
-    unsupported.schema_version = 2;
+    unsupported.schema_version = 3;
     assert!(serde_json::to_string(&unsupported).is_err());
 
     let mut unsupported = parse_evidence_v1(FIXTURE).unwrap();
@@ -627,7 +629,7 @@ fn invalid_records_and_destinations_are_never_published() {
     fs::create_dir(&directory).unwrap();
     let destination = directory.join("run.json");
     let mut record = parse_evidence_v1(FIXTURE).unwrap();
-    record.schema_version = 2;
+    record.schema_version = 3;
 
     assert!(matches!(
         write_evidence_atomically(&destination, &record),
@@ -679,19 +681,14 @@ fn assert_all_object_fields_are_required(
     if schema.get("type").and_then(|value| value.as_str()) == Some("object") {
         let properties = schema["properties"].as_object().unwrap();
         let required = schema["required"].as_array().unwrap();
-        assert_eq!(
-            required.len(),
-            properties.len(),
-            "every property must be required at {path}"
-        );
-        for (field, field_schema) in properties {
+        for (field, field_instance) in instance.as_object().unwrap() {
+            let field_schema = properties
+                .get(field)
+                .unwrap_or_else(|| panic!("schema omits {path}.{field}"));
             assert!(
                 required.iter().any(|required| required == field),
                 "{path}.{field} is not required"
             );
-            let field_instance = instance
-                .get(field)
-                .unwrap_or_else(|| panic!("fixture omits {path}.{field}"));
             assert_all_object_fields_are_required(
                 root,
                 field_schema,

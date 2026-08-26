@@ -10,7 +10,9 @@ use crate::{
     FirmwareAutoRestorationError, FreshSampleGate, PlatformError, PlatformErrorKind,
     RuntimeLockAccess, RuntimeLockError, SampleReadiness, SampleSetError, SampleSources,
     ServiceAccess,
-    restoration::{contain_custom_fans_at_maximum, recover_firmware_auto, restore_firmware_auto},
+    restoration::{
+        FIRMWARE_AUTO, contain_custom_fans_at_maximum, recover_firmware_auto, restore_firmware_auto,
+    },
 };
 
 pub const RUNTIME_LOCK_PATH: &str = "/run/pt31553-fan-control/lock";
@@ -169,8 +171,8 @@ where
             .saturating_add(crate::NORMAL_SAMPLE_CADENCE);
         let cpu = self.platform.read_before(device.cpu().enable(), deadline);
         let gpu = self.platform.read_before(device.gpu().enable(), deadline);
-        let confirmed = matches!(cpu, Ok(ref value) if value.trim() == "2")
-            && matches!(gpu, Ok(ref value) if value.trim() == "2");
+        let confirmed = matches!(cpu, Ok(ref value) if value.trim() == FIRMWARE_AUTO)
+            && matches!(gpu, Ok(ref value) if value.trim() == FIRMWARE_AUTO);
         if !confirmed {
             self.invalidate_firmware_auto_epoch();
         }

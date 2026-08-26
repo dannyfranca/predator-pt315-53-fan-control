@@ -16,16 +16,19 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser, ser::Seri
 use crate::{CompatibilityDeclarationV1, compatibility::validate_declaration};
 
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
+pub const EVIDENCE_SCHEMA_VERSION_V2: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(try_from = "EvidenceRecordV1Wire")]
-pub struct EvidenceRecordV1 {
+#[serde(try_from = "EvidenceRecordWire")]
+pub struct EvidenceRecord {
     pub schema_version: u32,
     pub record_status: EvidenceRecordStatus,
     pub qualification_envelope: QualificationEnvelopeIdentityV1,
     pub stage: String,
     pub started_at: EvidenceTimestamp,
     pub completed_at: EvidenceTimestamp,
+    pub starting_conditions_captured_at: Option<EvidenceTimestamp>,
+    pub workload_started_at: Option<EvidenceTimestamp>,
     pub workload: Option<WorkloadEvidence>,
     pub samples: Vec<TelemetrySampleEvidence>,
     pub commands: Vec<FanCommandEvidence>,
@@ -40,7 +43,7 @@ pub struct EvidenceRecordV1 {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EvidenceRecordV1Wire {
+struct EvidenceRecordWire {
     #[serde(deserialize_with = "deserialize_schema_version")]
     schema_version: u32,
     record_status: EvidenceRecordStatus,
@@ -48,6 +51,10 @@ struct EvidenceRecordV1Wire {
     stage: String,
     started_at: EvidenceTimestamp,
     completed_at: EvidenceTimestamp,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    starting_conditions_captured_at: Option<EvidenceTimestamp>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    workload_started_at: Option<EvidenceTimestamp>,
     #[serde(deserialize_with = "deserialize_required_option")]
     workload: Option<WorkloadEvidence>,
     samples: Vec<TelemetrySampleEvidence>,
@@ -62,10 +69,10 @@ struct EvidenceRecordV1Wire {
     outcome: RunOutcomeEvidence,
 }
 
-impl TryFrom<EvidenceRecordV1Wire> for EvidenceRecordV1 {
+impl TryFrom<EvidenceRecordWire> for EvidenceRecord {
     type Error = EvidenceValidationError;
 
-    fn try_from(wire: EvidenceRecordV1Wire) -> Result<Self, Self::Error> {
+    fn try_from(wire: EvidenceRecordWire) -> Result<Self, Self::Error> {
         let record = Self {
             schema_version: wire.schema_version,
             record_status: wire.record_status,
@@ -73,6 +80,8 @@ impl TryFrom<EvidenceRecordV1Wire> for EvidenceRecordV1 {
             stage: wire.stage,
             started_at: wire.started_at,
             completed_at: wire.completed_at,
+            starting_conditions_captured_at: wire.starting_conditions_captured_at,
+            workload_started_at: wire.workload_started_at,
             workload: wire.workload,
             samples: wire.samples,
             commands: wire.commands,
@@ -89,19 +98,32 @@ impl TryFrom<EvidenceRecordV1Wire> for EvidenceRecordV1 {
     }
 }
 
-impl Serialize for EvidenceRecordV1 {
+impl Serialize for EvidenceRecord {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         self.validate().map_err(ser::Error::custom)?;
-        let mut record = serializer.serialize_struct("EvidenceRecordV1", 16)?;
+        let mut record = serializer.serialize_struct(
+            "EvidenceRecord",
+            16 + usize::from(self.starting_conditions_captured_at.is_some())
+                + usize::from(self.workload_started_at.is_some()),
+        )?;
         record.serialize_field("schema_version", &self.schema_version)?;
         record.serialize_field("record_status", &self.record_status)?;
         record.serialize_field("qualification_envelope", &self.qualification_envelope)?;
         record.serialize_field("stage", &self.stage)?;
         record.serialize_field("started_at", &self.started_at)?;
         record.serialize_field("completed_at", &self.completed_at)?;
+        if let Some(starting_conditions_captured_at) = self.starting_conditions_captured_at {
+            record.serialize_field(
+                "starting_conditions_captured_at",
+                &starting_conditions_captured_at,
+            )?;
+        }
+        if let Some(workload_started_at) = self.workload_started_at {
+            record.serialize_field("workload_started_at", &workload_started_at)?;
+        }
         record.serialize_field("workload", &self.workload)?;
         record.serialize_field("samples", &self.samples)?;
         record.serialize_field("commands", &self.commands)?;
@@ -222,6 +244,22 @@ pub struct FanReadbackEvidence {
     pub value: Option<u32>,
     pub endpoint_identity: String,
     pub outcome: ObservationOutcome,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub phase: Option<FanReadbackPhase>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FanReadbackPhase {
+    Initial,
+    StartGate,
+    WorkloadStarted,
+    Sample,
+    Final,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -315,6 +353,12 @@ pub struct ThermalSummaryEvidence {
     pub gpu_p95_millicelsius: i32,
     pub cpu_final_slope_millicelsius_per_minute: i32,
     pub gpu_final_slope_millicelsius_per_minute: i32,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub system_stable: Option<bool>,
     pub kernel_faults: Vec<String>,
     pub nvidia_faults: Vec<String>,
 }
@@ -339,6 +383,7 @@ pub enum RunOutcomeStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvidenceValidationError {
     UnsupportedSchemaVersion,
+    IncompatibleSchemaField { field: &'static str },
     InvalidIdentity { field: &'static str },
     InvalidStage,
     InvalidTimeRange,
@@ -354,6 +399,12 @@ impl fmt::Display for EvidenceValidationError {
         match self {
             Self::UnsupportedSchemaVersion => {
                 formatter.write_str("unsupported evidence schema version")
+            }
+            Self::IncompatibleSchemaField { field } => {
+                write!(
+                    formatter,
+                    "{field} is incompatible with the evidence schema version"
+                )
             }
             Self::InvalidIdentity { field } => {
                 write!(formatter, "invalid qualification identity at {field}")
@@ -455,10 +506,43 @@ impl EvidenceWriteError {
     }
 }
 
-impl EvidenceRecordV1 {
+impl EvidenceRecord {
     pub fn validate(&self) -> Result<(), EvidenceValidationError> {
-        if self.schema_version != EVIDENCE_SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version,
+            EVIDENCE_SCHEMA_VERSION | EVIDENCE_SCHEMA_VERSION_V2
+        ) {
             return Err(EvidenceValidationError::UnsupportedSchemaVersion);
+        }
+        if self.schema_version == EVIDENCE_SCHEMA_VERSION {
+            if self.starting_conditions_captured_at.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "starting_conditions_captured_at",
+                });
+            }
+            if self.workload_started_at.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "workload_started_at",
+                });
+            }
+            if self
+                .readbacks
+                .iter()
+                .any(|readback| readback.phase.is_some())
+            {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "readbacks.phase",
+                });
+            }
+            if self
+                .thermal_summary
+                .as_ref()
+                .is_some_and(|summary| summary.system_stable.is_some())
+            {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "thermal_summary.system_stable",
+                });
+            }
         }
         validate_identity(&self.qualification_envelope)?;
         if !is_identifier(&self.stage) {
@@ -466,6 +550,17 @@ impl EvidenceRecordV1 {
         }
         if self.started_at.monotonic_millis > self.completed_at.monotonic_millis {
             return Err(EvidenceValidationError::InvalidTimeRange);
+        }
+        if let Some(starting_conditions_captured_at) = self.starting_conditions_captured_at {
+            validate_timestamp(
+                self,
+                starting_conditions_captured_at,
+                "starting_conditions_captured_at",
+                0,
+            )?;
+        }
+        if let Some(workload_started_at) = self.workload_started_at {
+            validate_timestamp(self, workload_started_at, "workload_started_at", 0)?;
         }
         if let Some(workload) = &self.workload {
             validate_workload(workload)?;
@@ -639,15 +734,7 @@ impl EvidenceRecordV1 {
                         && final_enable_readback_confirms_auto(self, EvidenceFan::Cpu)
                         && final_enable_readback_confirms_auto(self, EvidenceFan::Gpu)
                 }
-                "firmware-auto-baseline" => {
-                    self.workload.is_some()
-                        && self.thermal_summary.is_some()
-                        && self.commands.is_empty()
-                        && self.state_transitions.is_empty()
-                        && self.restoration_attempts.is_empty()
-                        && final_enable_readback_confirms_auto(self, EvidenceFan::Cpu)
-                        && final_enable_readback_confirms_auto(self, EvidenceFan::Gpu)
-                }
+                "firmware-auto-baseline" => firmware_auto_baseline_is_complete(self),
                 _ => {
                     self.workload.is_some()
                         && self.thermal_summary.is_some()
@@ -676,9 +763,264 @@ impl EvidenceRecordV1 {
     }
 }
 
-pub fn parse_evidence_v1(source: &str) -> Result<EvidenceRecordV1, EvidenceParseError> {
-    let record: EvidenceRecordV1 =
-        serde_json::from_str(source).map_err(EvidenceParseError::Parse)?;
+fn firmware_auto_baseline_is_complete(record: &EvidenceRecord) -> bool {
+    let Some(workload) = &record.workload else {
+        return false;
+    };
+    let workload_conditions_are_safe = (-40_000..=80_000).contains(&workload.ambient_millicelsius)
+        && (-40_000..95_000).contains(&workload.starting_cpu_millicelsius)
+        && (-40_000..85_000).contains(&workload.starting_gpu_millicelsius);
+    let samples_are_complete = record.samples.len() >= 2
+        && record.samples.iter().all(|sample| {
+            sample.freshness == SampleFreshness::Fresh
+                && sample
+                    .cpu_millicelsius
+                    .is_some_and(|value| (-40_000..95_000).contains(&value))
+                && sample
+                    .gpu_millicelsius
+                    .is_some_and(|value| (-40_000..85_000).contains(&value))
+                && sample.external_power == Some(profile_power(workload.power_profile))
+                && sample.selected_profile == Some(workload.power_profile)
+                && sample.cpu_source_demand_basis_points.is_some()
+                && sample.gpu_source_demand_basis_points.is_some()
+                && sample.commanded_demand_basis_points.is_some()
+                && sample.cpu_thermal_throttling == Some(false)
+                && sample.gpu_thermal_throttling == Some(false)
+        });
+    let Some(workload_started_at) = record.workload_started_at else {
+        return false;
+    };
+    let Some(starting_conditions_captured_at) = record.starting_conditions_captured_at else {
+        return false;
+    };
+    let starting_conditions_precede_workload =
+        starting_conditions_captured_at.monotonic_millis <= workload_started_at.monotonic_millis;
+    let cadence_is_valid = record.samples.first().is_some_and(|sample| {
+        let elapsed = sample
+            .timestamp
+            .monotonic_millis
+            .saturating_sub(workload_started_at.monotonic_millis);
+        (1_900..=2_100).contains(&elapsed)
+    }) && record.samples.windows(2).all(|samples| {
+        let delta = samples[1]
+            .timestamp
+            .monotonic_millis
+            .saturating_sub(samples[0].timestamp.monotonic_millis);
+        (1_900..=2_100).contains(&delta)
+    });
+    let readbacks_are_complete = record.readbacks.iter().all(|readback| {
+        readback.field == FanReadbackField::Enable
+            && readback.value == Some(2)
+            && readback.outcome == ObservationOutcome::Confirmed
+            && readback.phase.is_some()
+    }) && [EvidenceFan::Cpu, EvidenceFan::Gpu]
+        .into_iter()
+        .all(|fan| baseline_readback_phases_are_complete(record, fan, workload_started_at));
+    let summary_matches = record
+        .thermal_summary
+        .as_ref()
+        .is_some_and(|summary| baseline_summary_matches(record, summary));
+
+    workload_conditions_are_safe
+        && samples_are_complete
+        && starting_conditions_precede_workload
+        && cadence_is_valid
+        && readbacks_are_complete
+        && summary_matches
+        && record.faults.is_empty()
+        && record.commands.is_empty()
+        && record.state_transitions.is_empty()
+        && record.restoration_attempts.is_empty()
+        && record.calibration.is_empty()
+        && final_enable_readback_confirms_auto(record, EvidenceFan::Cpu)
+        && final_enable_readback_confirms_auto(record, EvidenceFan::Gpu)
+}
+
+fn baseline_readback_phases_are_complete(
+    record: &EvidenceRecord,
+    fan: EvidenceFan,
+    workload_started_at: EvidenceTimestamp,
+) -> bool {
+    let Some(endpoint_identity) = record
+        .readbacks
+        .iter()
+        .find(|readback| readback.fan == fan && readback.phase == Some(FanReadbackPhase::Initial))
+        .map(|readback| readback.endpoint_identity.as_str())
+    else {
+        return false;
+    };
+    if !record
+        .readbacks
+        .iter()
+        .filter(|readback| readback.fan == fan)
+        .all(|readback| readback.endpoint_identity == endpoint_identity)
+    {
+        return false;
+    }
+    let unique_phase = |phase| {
+        let mut matches = record
+            .readbacks
+            .iter()
+            .filter(|readback| readback.fan == fan && readback.phase == Some(phase));
+        let readback = matches.next()?;
+        matches.next().is_none().then_some(readback)
+    };
+    let (Some(initial), Some(start_gate), Some(workload_started), Some(final_readback)) = (
+        unique_phase(FanReadbackPhase::Initial),
+        unique_phase(FanReadbackPhase::StartGate),
+        unique_phase(FanReadbackPhase::WorkloadStarted),
+        unique_phase(FanReadbackPhase::Final),
+    ) else {
+        return false;
+    };
+    record.started_at.monotonic_millis <= initial.timestamp.monotonic_millis
+        && record
+            .starting_conditions_captured_at
+            .is_some_and(|starting_conditions_captured_at| {
+                initial.timestamp.monotonic_millis
+                    <= starting_conditions_captured_at.monotonic_millis
+                    && starting_conditions_captured_at.monotonic_millis
+                        <= start_gate.timestamp.monotonic_millis
+            })
+        && start_gate.timestamp.monotonic_millis <= workload_started_at.monotonic_millis
+        && workload_started_at.monotonic_millis <= workload_started.timestamp.monotonic_millis
+        && record.samples.first().is_some_and(|sample| {
+            workload_started.timestamp.monotonic_millis <= sample.timestamp.monotonic_millis
+        })
+        && record.samples.iter().all(|sample| {
+            record
+                .readbacks
+                .iter()
+                .filter(|readback| {
+                    let delay = readback
+                        .timestamp
+                        .monotonic_millis
+                        .saturating_sub(sample.timestamp.monotonic_millis);
+                    readback.fan == fan
+                        && readback.phase == Some(FanReadbackPhase::Sample)
+                        && readback.timestamp.monotonic_millis >= sample.timestamp.monotonic_millis
+                        && delay <= 100
+                })
+                .count()
+                == 1
+        })
+        && final_readback.timestamp == record.completed_at
+        && record
+            .readbacks
+            .iter()
+            .filter(|readback| readback.fan == fan)
+            .count()
+            == record.samples.len() + 4
+}
+
+fn profile_power(profile: EvidenceProfile) -> EvidenceExternalPower {
+    match profile {
+        EvidenceProfile::Ac => EvidenceExternalPower::Ac,
+        EvidenceProfile::Battery => EvidenceExternalPower::Battery,
+    }
+}
+
+fn baseline_summary_matches(record: &EvidenceRecord, summary: &ThermalSummaryEvidence) -> bool {
+    summary == &summarize_thermal_evidence(&record.samples, true, Vec::new(), Vec::new())
+}
+
+pub(crate) fn summarize_thermal_evidence(
+    samples: &[TelemetrySampleEvidence],
+    system_stable: bool,
+    kernel_faults: Vec<String>,
+    nvidia_faults: Vec<String>,
+) -> ThermalSummaryEvidence {
+    let cpu = evidence_temperatures(samples, |sample| sample.cpu_millicelsius);
+    let gpu = evidence_temperatures(samples, |sample| sample.gpu_millicelsius);
+    ThermalSummaryEvidence {
+        cpu_peak_millicelsius: cpu.iter().map(|(_, value)| *value).max().unwrap_or(0),
+        gpu_peak_millicelsius: gpu.iter().map(|(_, value)| *value).max().unwrap_or(0),
+        cpu_p95_millicelsius: evidence_percentile_95(&cpu),
+        gpu_p95_millicelsius: evidence_percentile_95(&gpu),
+        cpu_final_slope_millicelsius_per_minute: evidence_final_slope(&cpu),
+        gpu_final_slope_millicelsius_per_minute: evidence_final_slope(&gpu),
+        system_stable: Some(system_stable),
+        kernel_faults,
+        nvidia_faults,
+    }
+}
+
+fn evidence_temperatures(
+    samples: &[TelemetrySampleEvidence],
+    select: impl Fn(&TelemetrySampleEvidence) -> Option<i32>,
+) -> Vec<(u64, i32)> {
+    samples
+        .iter()
+        .filter_map(|sample| select(sample).map(|value| (sample.timestamp.monotonic_millis, value)))
+        .collect()
+}
+
+fn evidence_percentile_95(values: &[(u64, i32)]) -> i32 {
+    let mut values = values.iter().map(|(_, value)| *value).collect::<Vec<_>>();
+    values.sort_unstable();
+    let rank = (95 * values.len()).div_ceil(100);
+    values.get(rank.saturating_sub(1)).copied().unwrap_or(0)
+}
+
+fn evidence_final_slope(values: &[(u64, i32)]) -> i32 {
+    const WINDOW_MILLIS: u64 = 5 * 60 * 1_000;
+    let Some((last_millis, _)) = values.last() else {
+        return 0;
+    };
+    let window_start = last_millis.saturating_sub(WINDOW_MILLIS);
+    let values = values
+        .iter()
+        .filter(|(millis, _)| *millis >= window_start)
+        .collect::<Vec<_>>();
+    if values.len() < 2 {
+        return 0;
+    }
+    let origin = values[0].0 as f64;
+    let mean_x = values
+        .iter()
+        .map(|(millis, _)| (*millis as f64 - origin) / 60_000.0)
+        .sum::<f64>()
+        / values.len() as f64;
+    let mean_y = values.iter().map(|(_, value)| *value as f64).sum::<f64>() / values.len() as f64;
+    let numerator = values
+        .iter()
+        .map(|(millis, value)| {
+            let x = (*millis as f64 - origin) / 60_000.0;
+            (x - mean_x) * (*value as f64 - mean_y)
+        })
+        .sum::<f64>();
+    let denominator = values
+        .iter()
+        .map(|(millis, _)| {
+            let x = (*millis as f64 - origin) / 60_000.0;
+            (x - mean_x).powi(2)
+        })
+        .sum::<f64>();
+    if denominator == 0.0 {
+        0
+    } else {
+        (numerator / denominator).round() as i32
+    }
+}
+
+pub fn parse_evidence_v1(source: &str) -> Result<EvidenceRecord, EvidenceParseError> {
+    let record: EvidenceRecord = serde_json::from_str(source).map_err(EvidenceParseError::Parse)?;
+    if record.schema_version != EVIDENCE_SCHEMA_VERSION {
+        return Err(EvidenceParseError::Invalid(
+            EvidenceValidationError::UnsupportedSchemaVersion,
+        ));
+    }
+    record.validate().map_err(EvidenceParseError::Invalid)?;
+    Ok(record)
+}
+
+pub fn parse_evidence_v2(source: &str) -> Result<EvidenceRecord, EvidenceParseError> {
+    let record: EvidenceRecord = serde_json::from_str(source).map_err(EvidenceParseError::Parse)?;
+    if record.schema_version != EVIDENCE_SCHEMA_VERSION_V2 {
+        return Err(EvidenceParseError::Invalid(
+            EvidenceValidationError::UnsupportedSchemaVersion,
+        ));
+    }
     record.validate().map_err(EvidenceParseError::Invalid)?;
     Ok(record)
 }
@@ -689,14 +1031,14 @@ pub fn parse_evidence_v1(source: &str) -> Result<EvidenceRecordV1, EvidenceParse
 /// complete inode has been synced, and an existing record is never replaced.
 pub fn write_evidence_atomically(
     destination: &Path,
-    record: &EvidenceRecordV1,
+    record: &EvidenceRecord,
 ) -> Result<(), EvidenceWriteError> {
     write_evidence_with_observer(destination, record, |_| Ok(()))
 }
 
 fn write_evidence_with_observer(
     destination: &Path,
-    record: &EvidenceRecordV1,
+    record: &EvidenceRecord,
     observer: impl FnMut(PublicationStage) -> io::Result<()>,
 ) -> Result<(), EvidenceWriteError> {
     record.validate().map_err(EvidenceWriteError::Invalid)?;
@@ -822,7 +1164,15 @@ fn deserialize_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: Deserializer<'de>,
 {
-    deserialize_exact_version(deserializer, "schema_version")
+    let version = u32::deserialize(deserializer)?;
+    if matches!(
+        version,
+        EVIDENCE_SCHEMA_VERSION | EVIDENCE_SCHEMA_VERSION_V2
+    ) {
+        Ok(version)
+    } else {
+        Err(de::Error::custom("schema_version must be 1 or 2"))
+    }
 }
 
 fn deserialize_qualification_record_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
@@ -873,7 +1223,15 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
-fn validate_identity(
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+pub(crate) fn validate_identity(
     identity: &QualificationEnvelopeIdentityV1,
 ) -> Result<(), EvidenceValidationError> {
     if identity.qualification_record_schema_version != 1 {
@@ -903,7 +1261,9 @@ fn validate_identity(
     })
 }
 
-fn validate_workload(workload: &WorkloadEvidence) -> Result<(), EvidenceValidationError> {
+pub(crate) fn validate_workload(
+    workload: &WorkloadEvidence,
+) -> Result<(), EvidenceValidationError> {
     if !is_identifier(&workload.workload_id) {
         return Err(EvidenceValidationError::InvalidWorkload {
             field: "workload_id",
@@ -918,7 +1278,7 @@ fn validate_workload(workload: &WorkloadEvidence) -> Result<(), EvidenceValidati
     Ok(())
 }
 
-fn final_enable_readback_confirms_auto(record: &EvidenceRecordV1, fan: EvidenceFan) -> bool {
+fn final_enable_readback_confirms_auto(record: &EvidenceRecord, fan: EvidenceFan) -> bool {
     record
         .readbacks
         .iter()
@@ -929,7 +1289,7 @@ fn final_enable_readback_confirms_auto(record: &EvidenceRecordV1, fan: EvidenceF
         })
 }
 
-fn final_restoration_confirms_auto(record: &EvidenceRecordV1, fan: EvidenceFan) -> bool {
+fn final_restoration_confirms_auto(record: &EvidenceRecord, fan: EvidenceFan) -> bool {
     final_restoration_attempt_after_command(record, fan).is_some_and(|attempt| {
         attempt.enable_readback == Some(2)
             && attempt.outcome == RestorationOutcome::FirmwareAutoConfirmed
@@ -937,7 +1297,7 @@ fn final_restoration_confirms_auto(record: &EvidenceRecordV1, fan: EvidenceFan) 
 }
 
 fn final_restoration_attempt_after_command(
-    record: &EvidenceRecordV1,
+    record: &EvidenceRecord,
     fan: EvidenceFan,
 ) -> Option<&RestorationAttemptEvidence> {
     let latest_command_millis = record
@@ -956,7 +1316,7 @@ fn final_restoration_attempt_after_command(
         .then_some(attempt)
 }
 
-fn final_state_follows_restoration(record: &EvidenceRecordV1) -> bool {
+fn final_state_follows_restoration(record: &EvidenceRecord) -> bool {
     let latest_restoration_millis = record
         .restoration_attempts
         .iter()
@@ -973,7 +1333,7 @@ fn final_state_follows_restoration(record: &EvidenceRecordV1) -> bool {
         })
 }
 
-fn final_state_confirms_auto(record: &EvidenceRecordV1) -> bool {
+fn final_state_confirms_auto(record: &EvidenceRecord) -> bool {
     record
         .state_transitions
         .iter()
@@ -984,7 +1344,7 @@ fn final_state_confirms_auto(record: &EvidenceRecordV1) -> bool {
 }
 
 fn validate_timestamp(
-    record: &EvidenceRecordV1,
+    record: &EvidenceRecord,
     timestamp: EvidenceTimestamp,
     field: &'static str,
     index: usize,
