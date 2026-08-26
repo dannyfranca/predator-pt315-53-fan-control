@@ -57,7 +57,16 @@ impl DaemonManager for SystemdDaemonManager {
     }
 
     fn reset_failed(&mut self) -> io::Result<()> {
-        systemctl(&["reset-failed", &daemon_unit()])
+        let unit = daemon_unit();
+        match unit_property(&unit, "LoadState")?.as_str() {
+            "loaded" => systemctl(&["reset-failed", &unit]),
+            // Garbage collection discards the unit's in-memory failure/start-limit state. A
+            // subsequent start reloads its fragment, so there is nothing left to reset.
+            "not-found" => Ok(()),
+            state => Err(io::Error::other(format!(
+                "{unit} has unsupported load state {state:?}"
+            ))),
+        }
     }
 
     fn start_ready(&mut self) -> io::Result<()> {
