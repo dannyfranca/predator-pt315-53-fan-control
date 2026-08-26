@@ -69,15 +69,17 @@ impl DaemonManager for SystemdDaemonManager {
 
     fn reset_planned_state(&mut self, invocation: &str) -> io::Result<()> {
         let unit = daemon_unit();
-        systemctl(&["reset-failed", &unit])?;
         let state = self.active_state()?;
         let observed = self.invocation_id()?;
-        if state == DaemonActiveState::Active && observed == invocation {
+        if state == DaemonActiveState::Inactive && observed.is_empty() {
             return Ok(());
         }
-        Err(io::Error::other(format!(
-            "{unit} changed while resetting the planned invocation"
-        )))
+        if state != DaemonActiveState::Inactive || observed != invocation {
+            return Err(io::Error::other(format!(
+                "{unit} changed before resetting the cleanly stopped invocation"
+            )));
+        }
+        systemctl(&["reset-failed", &unit])
     }
 
     fn restart_ready(&mut self) -> io::Result<()> {
@@ -100,8 +102,12 @@ pub(crate) fn prepare_sleep(
         DaemonActiveState::Active => {
             let invocation = manager.invocation_id()?;
             validate_invocation_id(&invocation)?;
-            manager.reset_planned_state(&invocation)?;
-            (manager.stop()? == PlannedStop::Clean).then_some(invocation)
+            if manager.stop()? == PlannedStop::Clean {
+                manager.reset_planned_state(&invocation)?;
+                Some(invocation)
+            } else {
+                None
+            }
         }
         DaemonActiveState::Transitioning => {
             let _ = manager.stop()?;
@@ -374,7 +380,7 @@ mod tests {
 
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "invocation-id", "reset-planned", "stop", "restore"]
+            &["state", "invocation-id", "stop", "reset-planned", "restore"]
         );
         assert!(marker.is_file());
         assert!(prepared_marker.is_file());
@@ -385,8 +391,8 @@ mod tests {
             &[
                 "state",
                 "invocation-id",
-                "reset-planned",
                 "stop",
+                "reset-planned",
                 "restore",
                 "state",
                 "invocation-id",
@@ -461,7 +467,7 @@ mod tests {
         resume_after_sleep(&mut manager, &marker).unwrap();
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "invocation-id", "reset-planned", "stop"]
+            &["state", "invocation-id", "stop", "reset-planned"]
         );
     }
 
@@ -485,22 +491,22 @@ mod tests {
             [
                 "state",
                 "invocation-id",
-                "reset-planned",
                 "stop",
+                "reset-planned",
                 "state",
                 "invocation-id",
                 "restart",
                 "state",
                 "invocation-id",
-                "reset-planned",
                 "stop",
+                "reset-planned",
                 "state",
                 "invocation-id",
                 "restart",
                 "state",
                 "invocation-id",
-                "reset-planned",
                 "stop",
+                "reset-planned",
                 "state",
                 "invocation-id",
                 "restart",
@@ -526,8 +532,8 @@ mod tests {
             &[
                 "state",
                 "invocation-id",
-                "reset-planned",
                 "stop",
+                "reset-planned",
                 "state",
                 "invocation-id",
                 "restart"
@@ -559,7 +565,7 @@ mod tests {
 
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "invocation-id", "reset-planned", "stop"]
+            &["state", "invocation-id", "stop"]
         );
         assert!(!marker.exists());
     }
@@ -581,8 +587,8 @@ mod tests {
             &[
                 "state",
                 "invocation-id",
-                "reset-planned",
                 "stop",
+                "reset-planned",
                 "state",
                 "stop",
                 "restart"
@@ -605,7 +611,7 @@ mod tests {
 
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "invocation-id", "reset-planned", "stop", "state"]
+            &["state", "invocation-id", "stop", "reset-planned", "state"]
         );
         assert!(marker.is_file());
     }
@@ -659,8 +665,8 @@ mod tests {
             &[
                 "state",
                 "invocation-id",
-                "reset-planned",
                 "stop",
+                "reset-planned",
                 "state",
                 "stop",
                 "restart"
@@ -686,8 +692,8 @@ mod tests {
             &[
                 "state",
                 "invocation-id",
-                "reset-planned",
                 "stop",
+                "reset-planned",
                 "state",
                 "invocation-id"
             ]
@@ -713,8 +719,8 @@ mod tests {
             &[
                 "state",
                 "invocation-id",
-                "reset-planned",
                 "stop",
+                "reset-planned",
                 "state",
                 "invocation-id",
                 "restart"
