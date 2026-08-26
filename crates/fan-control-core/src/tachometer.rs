@@ -355,7 +355,7 @@ fn interpolate_rpm_values(
     u32::try_from(interpolated).expect("interpolation stays between u32 anchors")
 }
 
-const fn pwm_to_basis_points(pwm: Pwm) -> u16 {
+pub(crate) const fn pwm_to_basis_points(pwm: Pwm) -> u16 {
     ((pwm.value() as u32 * MAXIMUM_DUTY_BASIS_POINTS as u32 + u8::MAX as u32 / 2) / u8::MAX as u32)
         as u16
 }

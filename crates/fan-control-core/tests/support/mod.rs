@@ -8,9 +8,11 @@ use std::{
 use fan_control_core::{
     CalibrationLevelObservation, CalibrationReadbackSample, CalibrationStep,
     CompatibilityDeclarationV1, CompatibilityObservation, ConservativeFanCalibration,
-    EvidenceCompleteness, EvidenceRecord, EvidenceTimestamp, Fan, FanCalibrationEvidence,
-    FanCommandEvidence, FanControlField, FanHoldObservation, FanWriteBackend, ObservedFanAbi,
-    ValidatedConfig, parse_compatibility_v1, parse_config_v1, validate_config_v1,
+    EvidenceCompleteness, EvidenceFan, EvidenceRecord, EvidenceTimestamp, Fan,
+    FanCalibrationEvidence, FanCommandEvidence, FanControlField, FanHoldObservation,
+    FanWriteBackend, ObservedFanAbi, RestorationAttemptEvidence, RestorationOutcome,
+    RunOutcomeStatus, StateTransitionEvidence, ValidatedConfig, parse_compatibility_v1,
+    parse_config_v1, validate_config_v1,
 };
 use sha2::{Digest, Sha256};
 use tracing::{Event, Subscriber, field::Visit};
@@ -322,6 +324,46 @@ pub fn completed_calibration_evidence(fan: Fan) -> FanCalibrationEvidence {
         record_stable_calibration_level(&mut session, rpm, response, &mut clock);
     }
     session.evidence().unwrap().clone()
+}
+
+pub fn completed_calibration_record(mut record: EvidenceRecord, fan: Fan) -> EvidenceRecord {
+    record.schema_version = 2;
+    record.stage = "fan-calibration".into();
+    record.baseline_binding_sha256 = None;
+    record.faults.clear();
+    if let Some(summary) = &mut record.thermal_summary {
+        summary.kernel_faults.clear();
+        summary.nvidia_faults.clear();
+    }
+    record.restoration_attempts = [EvidenceFan::Cpu, EvidenceFan::Gpu]
+        .into_iter()
+        .map(|fan| RestorationAttemptEvidence {
+            timestamp: record.completed_at,
+            fan,
+            auto_write_succeeded: true,
+            enable_readback: Some(2),
+            outcome: RestorationOutcome::FirmwareAutoConfirmed,
+        })
+        .collect();
+    record.state_transitions = vec![
+        StateTransitionEvidence {
+            timestamp: record.started_at,
+            from: "firmware-auto".into(),
+            to: "custom-control".into(),
+        },
+        StateTransitionEvidence {
+            timestamp: record.completed_at,
+            from: "custom-control".into(),
+            to: "firmware-auto".into(),
+        },
+    ];
+    record.outcome.status = RunOutcomeStatus::Passed;
+    record.outcome.reason = "fan calibration passed".into();
+    record.outcome.another_passing_run_required = false;
+    let calibration = completed_calibration_evidence(fan);
+    record.calibration = vec![calibration.clone()];
+    bind_record_to_calibration_protocol(&mut record, &calibration);
+    record
 }
 
 fn record_stable_calibration_level(

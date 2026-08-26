@@ -7,11 +7,11 @@ use crate::{
     EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceRecordStatus, EvidenceTimestamp,
     EvidenceValidationError, Fan, FanCalibrationEvidence, FanCommandEvidence, FanControlField,
     FanReadbackEvidence, FanReadbackField, FaultEvidence, GPU_ABSOLUTE_ABORT_MILLICELSIUS,
-    ObservationOutcome, RestorationAttemptEvidence, RestorationOutcome, RunOutcomeEvidence,
+    ObservationOutcome, Pwm, RestorationAttemptEvidence, RestorationOutcome, RunOutcomeEvidence,
     RunOutcomeStatus, SampleFreshness, StateTransitionEvidence, TelemetrySampleEvidence,
     WorkloadEvidence,
     evidence::{precise_final_thermal_slopes, summarize_thermal_evidence},
-    tachometer::{expected_rpm_from_evidence, rpm_in_band},
+    tachometer::{expected_rpm_from_evidence, pwm_to_basis_points, rpm_in_band},
 };
 
 pub const AMBIENT_COMPARABILITY_MILLICELSIUS: i32 = 2_000;
@@ -140,8 +140,8 @@ pub struct MatchedWorkloadPlan<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct MatchedWorkloadTachometerCalibrations<'a> {
-    pub cpu: &'a FanCalibrationEvidence,
-    pub gpu: &'a FanCalibrationEvidence,
+    pub cpu: &'a EvidenceRecord,
+    pub gpu: &'a EvidenceRecord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -455,10 +455,11 @@ where
             );
             break;
         };
-        if environment.timestamp().monotonic_millis > deadline {
+        let wait_started_at = environment.timestamp();
+        if wait_started_at.monotonic_millis > deadline {
             push_fault(
                 &mut faults,
-                environment.timestamp(),
+                wait_started_at,
                 "sample-cadence",
                 "telemetry deadline elapsed before the wait began",
             );
@@ -473,10 +474,22 @@ where
             );
             break;
         }
-        if environment.timestamp().monotonic_millis > deadline {
+        let wait_completed_at = environment.timestamp();
+        if wait_completed_at.monotonic_millis < wait_started_at.monotonic_millis
+            || wait_completed_at.monotonic_millis < expected_millis
+        {
             push_fault(
                 &mut faults,
-                environment.timestamp(),
+                wait_started_at,
+                "sample-cadence",
+                "telemetry wait completion time regressed or preceded its target",
+            );
+            break;
+        }
+        if wait_completed_at.monotonic_millis > deadline {
+            push_fault(
+                &mut faults,
+                wait_completed_at,
                 "sample-cadence",
                 "telemetry wait exceeded its deadline",
             );
@@ -495,6 +508,14 @@ where
             }
         };
         let captured_at = environment.timestamp();
+        if captured_at.monotonic_millis < wait_completed_at.monotonic_millis {
+            push_fault(
+                &mut faults,
+                wait_completed_at,
+                "invalid-telemetry",
+                "telemetry capture completion time regressed",
+            );
+        }
         if captured_at.monotonic_millis >= restoration_not_before.monotonic_millis {
             restoration_not_before = captured_at;
         }
@@ -523,6 +544,20 @@ where
         commands.extend(observation.commands);
         readbacks.extend(observation.readbacks);
         samples.push(observation.sample);
+    }
+
+    if faults.is_empty() {
+        let timestamp = samples
+            .last()
+            .map_or_else(|| environment.timestamp(), |sample| sample.timestamp);
+        for fan in tachometer_evidence.pending_fans() {
+            push_fault(
+                &mut faults,
+                timestamp,
+                "fan-feedback-loss",
+                format!("{fan:?} fan response did not settle before workload completion"),
+            );
+        }
     }
 
     if workload_attempted {
@@ -642,6 +677,7 @@ where
             let identity_matches =
                 expected_identity == Some(restoration.endpoint_identity.as_str());
             both_fans_restored &= restoration.outcome == RestorationOutcome::FirmwareAutoConfirmed
+                && restoration.auto_write_succeeded
                 && restoration.enable_readback == Some(2)
                 && identity_matches
                 && timing_confirmed;
@@ -784,6 +820,7 @@ fn validate_plan(plan: &MatchedWorkloadPlan<'_>) -> Result<(), MatchedWorkloadPl
         || plan.baseline.outcome.status != RunOutcomeStatus::Passed
         || plan.baseline.workload.is_none()
         || plan.baseline.thermal_summary.is_none()
+        || plan.baseline.samples.len() < MINIMUM_MATCHED_WORKLOAD_SAMPLES
         || !covers_final_five_minutes(plan.baseline)
     {
         return Err(MatchedWorkloadPlanError::BaselineNotAccepted);
@@ -793,11 +830,11 @@ fn validate_plan(plan: &MatchedWorkloadPlan<'_>) -> Result<(), MatchedWorkloadPl
     if MatchedWorkloadClass::from_workload_id(&baseline_workload.workload_id).is_none() {
         return Err(MatchedWorkloadPlanError::UnknownWorkloadClass);
     }
-    for (fan, calibration) in [
+    for (fan, calibration_record) in [
         (EvidenceFan::Cpu, plan.tachometer_calibrations.cpu),
         (EvidenceFan::Gpu, plan.tachometer_calibrations.gpu),
     ] {
-        if !calibration_is_qualified(calibration, fan) {
+        if !calibration_record_is_qualified(calibration_record, fan, plan.baseline) {
             return Err(MatchedWorkloadPlanError::InvalidCalibration { fan });
         }
     }
@@ -809,7 +846,7 @@ fn validate_plan(plan: &MatchedWorkloadPlan<'_>) -> Result<(), MatchedWorkloadPl
                 index,
                 reason: error.to_string(),
             })?;
-        if !prior_fingerprints.insert(baseline_fingerprint(prior)) {
+        if !prior_fingerprints.insert(matched_run_fingerprint(prior)) {
             return Err(MatchedWorkloadPlanError::InvalidPriorRun {
                 index,
                 reason: "duplicate previous passing run".into(),
@@ -838,6 +875,27 @@ fn validate_plan(plan: &MatchedWorkloadPlan<'_>) -> Result<(), MatchedWorkloadPl
 fn baseline_fingerprint(baseline: &EvidenceRecord) -> String {
     let canonical = serde_json::to_vec(baseline).expect("validated evidence always serializes");
     format!("{:x}", Sha256::digest(canonical))
+}
+
+fn matched_run_fingerprint(record: &EvidenceRecord) -> String {
+    let mut transcript = record.clone();
+    transcript.outcome.reason = "canonical-run-transcript".into();
+    transcript.outcome.another_passing_run_required = false;
+    baseline_fingerprint(&transcript)
+}
+
+fn calibration_record_is_qualified(
+    record: &EvidenceRecord,
+    expected_fan: EvidenceFan,
+    baseline: &EvidenceRecord,
+) -> bool {
+    record.validate().is_ok()
+        && record.schema_version == EVIDENCE_SCHEMA_VERSION_V2
+        && record.stage == "fan-calibration"
+        && record.outcome.status == RunOutcomeStatus::Passed
+        && record.faults.is_empty()
+        && record.qualification_envelope == baseline.qualification_envelope
+        && matches!(record.calibration.as_slice(), [calibration] if calibration_is_qualified(calibration, expected_fan))
 }
 
 fn calibration_is_qualified(
@@ -1006,10 +1064,11 @@ fn matched_fan_evidence_is_complete(record: &EvidenceRecord, fan: EvidenceFan) -
             let expected_value = match field {
                 FanReadbackField::Enable => Some(1),
                 FanReadbackField::Pwm => Some(command.value),
-                FanReadbackField::Rpm => readback.value.filter(|value| *value > 0),
+                FanReadbackField::Rpm => readback.value,
             };
             if readback.outcome != ObservationOutcome::Confirmed
                 || readback.value != expected_value
+                || readback.timestamp.monotonic_millis < command.timestamp.monotonic_millis
                 || endpoint_identities[field_index]
                     .is_some_and(|identity| identity != readback.endpoint_identity)
             {
@@ -1296,8 +1355,18 @@ struct TachometerEvidenceState {
 
 #[derive(Debug, Clone, Copy)]
 struct TachometerCommandState {
-    pwm: u8,
     confirmed_at_millis: u64,
+}
+
+impl TachometerEvidenceState {
+    fn pending_fans(self) -> impl Iterator<Item = EvidenceFan> {
+        [
+            self.cpu.map(|_| EvidenceFan::Cpu),
+            self.gpu.map(|_| EvidenceFan::Gpu),
+        ]
+        .into_iter()
+        .flatten()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1394,46 +1463,54 @@ fn evaluate_tachometer_sample(
     let pwm = u8::try_from(command.value).map_err(|_| TachometerEvidenceError::InvalidEvidence)?;
     let rpm = rpm_readback
         .value
-        .filter(|value| *value > 0)
         .ok_or(TachometerEvidenceError::InvalidEvidence)?;
     if pwm_readback.outcome != ObservationOutcome::Confirmed
         || pwm_readback.value != Some(command.value)
         || rpm_readback.outcome != ObservationOutcome::Confirmed
+        || pwm_readback.timestamp.monotonic_millis < command.timestamp.monotonic_millis
         || rpm_readback.timestamp.monotonic_millis < pwm_readback.timestamp.monotonic_millis
     {
         return Err(TachometerEvidenceError::InvalidEvidence);
     }
-    if state.is_none_or(|current| current.pwm != pwm) {
-        *state = Some(TachometerCommandState {
-            pwm,
-            confirmed_at_millis: pwm_readback.timestamp.monotonic_millis,
-        });
+    let duty = pwm_to_basis_points(Pwm::from_raw(pwm));
+    if duty < calibration.floor_basis_points || duty > 10_000 {
+        return Err(TachometerEvidenceError::InvalidEvidence);
     }
-    let current = state.expect("tachometer command state was initialized");
-    let deadline = current
-        .confirmed_at_millis
-        .checked_add(calibration.response_deadline_millis)
-        .ok_or(TachometerEvidenceError::DeadlineOverflow)?;
     let expected_rpm = expected_rpm_from_evidence(calibration, pwm)
         .ok_or(TachometerEvidenceError::InvalidEvidence)?;
-    if rpm_in_band(rpm, expected_rpm) || rpm_readback.timestamp.monotonic_millis <= deadline {
-        Ok(())
-    } else {
-        Err(TachometerEvidenceError::OutOfBand {
-            expected_rpm,
-            actual_rpm: rpm,
-        })
+    if rpm_in_band(rpm, expected_rpm) {
+        *state = None;
+        return Ok(());
     }
+    let response_started_at = state
+        .get_or_insert(TachometerCommandState {
+            confirmed_at_millis: pwm_readback.timestamp.monotonic_millis,
+        })
+        .confirmed_at_millis;
+    let deadline = response_started_at
+        .checked_add(calibration.response_deadline_millis)
+        .ok_or(TachometerEvidenceError::DeadlineOverflow)?;
+    if rpm_readback.timestamp.monotonic_millis <= deadline {
+        return Ok(());
+    }
+    Err(TachometerEvidenceError::OutOfBand {
+        expected_rpm,
+        actual_rpm: rpm,
+    })
 }
 
-const fn calibration_for_fan(
+fn calibration_for_fan(
     calibrations: MatchedWorkloadTachometerCalibrations<'_>,
     fan: EvidenceFan,
 ) -> &FanCalibrationEvidence {
-    match fan {
+    let record = match fan {
         EvidenceFan::Cpu => calibrations.cpu,
         EvidenceFan::Gpu => calibrations.gpu,
-    }
+    };
+    record
+        .calibration
+        .first()
+        .expect("validated calibration record has exactly one calibration")
 }
 
 fn state_for_fan(
@@ -1556,9 +1633,12 @@ fn validate_fan_control_evidence(
         let expected = match field {
             FanReadbackField::Enable => Some(1),
             FanReadbackField::Pwm => command.map(|command| command.value),
-            FanReadbackField::Rpm => readback.value.filter(|value| *value > 0),
+            FanReadbackField::Rpm => readback.value,
         };
-        if readback.value != expected || expected.is_none() {
+        let follows_command = command.is_some_and(|command| {
+            readback.timestamp.monotonic_millis >= command.timestamp.monotonic_millis
+        });
+        if readback.value != expected || expected.is_none() || !follows_command {
             push_fault(
                 faults,
                 sample_at,

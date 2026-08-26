@@ -14,7 +14,7 @@ use fan_control_core::{
     RunOutcomeStatus, SampleFreshness, TelemetrySampleEvidence, WorkloadEvidence,
     parse_evidence_v2, run_firmware_auto_baseline, run_matched_custom_workload,
 };
-use support::{PROTECTED_POLICY, compatibility_declaration, completed_calibration_evidence};
+use support::{PROTECTED_POLICY, compatibility_declaration, completed_calibration_record};
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const JSON_SCHEMA_V2: &str = include_str!(concat!(
@@ -73,6 +73,28 @@ fn custom_run_must_cover_the_exact_baseline_sample_count() {
 }
 
 #[test]
+fn baseline_below_the_matched_sample_minimum_is_rejected_before_custom_control() {
+    let baseline = valid_five_minute_baseline_below_matched_minimum();
+    assert!(baseline.validate().is_ok());
+    let mut environment = CustomEnvironment::new(passing_custom_observations());
+
+    let result = run_matched_custom_workload(
+        &mut environment,
+        &MatchedWorkloadPlan {
+            baseline: &baseline,
+            previous_passing_runs: &[],
+            tachometer_calibrations: tachometer_calibrations(),
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(fan_control_core::MatchedWorkloadPlanError::BaselineNotAccepted)
+    ));
+    assert!(environment.events.is_empty());
+}
+
+#[test]
 fn settled_out_of_band_rpm_aborts_then_restores_both_fans() {
     let baseline = passing_baseline();
     let mut observations = passing_custom_observations();
@@ -106,7 +128,7 @@ fn settled_out_of_band_rpm_aborts_then_restores_both_fans() {
 fn unqualified_tachometer_calibration_is_rejected_before_custom_control() {
     let baseline = passing_baseline();
     let mut cpu = tachometer_calibrations().cpu.clone();
-    cpu.protocol_checkpoint = None;
+    cpu.calibration[0].protocol_checkpoint = None;
     let calibrations = tachometer_calibrations();
     let mut environment = CustomEnvironment::new(passing_custom_observations());
 
@@ -131,6 +153,138 @@ fn unqualified_tachometer_calibration_is_rejected_before_custom_control() {
         )
     ));
     assert!(environment.events.is_empty());
+}
+
+#[test]
+fn calibration_record_must_match_the_qualification_envelope() {
+    let baseline = passing_baseline();
+    let calibrations = tachometer_calibrations();
+    let mut cpu = calibrations.cpu.clone();
+    cpu.qualification_envelope.protected_policy_sha256 = "b".repeat(64);
+    assert!(cpu.validate().is_ok());
+    let mut environment = CustomEnvironment::new(passing_custom_observations());
+
+    let result = run_matched_custom_workload(
+        &mut environment,
+        &MatchedWorkloadPlan {
+            baseline: &baseline,
+            previous_passing_runs: &[],
+            tachometer_calibrations: MatchedWorkloadTachometerCalibrations {
+                cpu: &cpu,
+                gpu: calibrations.gpu,
+            },
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(
+            fan_control_core::MatchedWorkloadPlanError::InvalidCalibration {
+                fan: EvidenceFan::Cpu
+            }
+        )
+    ));
+    assert!(environment.events.is_empty());
+}
+
+#[test]
+fn stale_precommand_readbacks_are_rejected() {
+    let baseline = passing_baseline();
+    let mut observation = custom_observation(11_950, 65_000, 54_000);
+    for command in &mut observation.commands {
+        command.timestamp = timestamp(12_000);
+    }
+    for readback in &mut observation.readbacks {
+        readback.timestamp = timestamp(11_990);
+    }
+    let mut environment = CustomEnvironment::new(vec![observation]);
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(!report.accepted());
+    assert!(report.record().faults.iter().any(|fault| {
+        fault.code == "mode-pwm-mismatch" || fault.code == "invalid-control-evidence"
+    }));
+    assert!(report.record().validate().is_ok());
+}
+
+#[test]
+fn pwm_below_the_qualified_floor_is_rejected() {
+    let baseline = passing_baseline();
+    let mut observation = custom_observation(12_000, 65_000, 54_000);
+    observation.commands[0].value = 50;
+    observation
+        .readbacks
+        .iter_mut()
+        .find(|readback| {
+            readback.fan == EvidenceFan::Cpu && readback.field == FanReadbackField::Pwm
+        })
+        .unwrap()
+        .value = Some(50);
+    let mut environment = CustomEnvironment::new(vec![observation]);
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(!report.accepted());
+    assert!(
+        report
+            .record()
+            .faults
+            .iter()
+            .any(|fault| fault.code == "invalid-control-evidence")
+    );
+}
+
+#[test]
+fn transient_zero_rpm_is_allowed_within_a_reissued_commands_response_window() {
+    let baseline = passing_baseline();
+    let mut observations = passing_custom_observations();
+    observations[10]
+        .readbacks
+        .iter_mut()
+        .find(|readback| {
+            readback.fan == EvidenceFan::Cpu && readback.field == FanReadbackField::Rpm
+        })
+        .unwrap()
+        .value = Some(0);
+    let mut environment = CustomEnvironment::new(observations);
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(report.accepted(), "{:#?}", report.record());
+    assert!(report.record().validate().is_ok());
+}
+
+#[test]
+fn changing_pwm_cannot_extend_an_unsettled_response_forever() {
+    let baseline = passing_baseline();
+    let mut observations = passing_custom_observations();
+    for (index, observation) in observations.iter_mut().enumerate() {
+        let pwm = if index % 2 == 0 { 128 } else { 200 };
+        for command in &mut observation.commands {
+            command.value = pwm;
+        }
+        for readback in &mut observation.readbacks {
+            if readback.field == FanReadbackField::Pwm {
+                readback.value = Some(pwm);
+            } else if readback.field == FanReadbackField::Rpm {
+                readback.value = Some(20_000);
+            }
+        }
+    }
+    let mut environment = CustomEnvironment::new(observations);
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(!report.accepted());
+    assert!(
+        report
+            .record()
+            .faults
+            .iter()
+            .any(|fault| fault.code == "fan-feedback-loss")
+    );
+    assert!(report.record().samples.len() < baseline.samples.len());
 }
 
 #[test]
@@ -376,6 +530,7 @@ fn callback_failures_and_late_callbacks_still_stop_then_restore() {
         CallbackFailure::LateWait,
         CallbackFailure::Capture,
         CallbackFailure::LateCapture,
+        CallbackFailure::RollbackCapture,
         CallbackFailure::Stop,
         CallbackFailure::RollbackStop,
         CallbackFailure::LateRestoration,
@@ -413,6 +568,26 @@ fn callback_failures_and_late_callbacks_still_stop_then_restore() {
             assert_eq!(report.record().restoration_attempts.len(), 2);
         }
     }
+}
+
+#[test]
+fn capture_callback_clock_rollback_fails_closed() {
+    let baseline = passing_baseline();
+    let mut observations = passing_custom_observations();
+    observations[0] = custom_observation(11_999, 65_000, 54_000);
+    let mut environment = CustomEnvironment::new(observations);
+    environment.failure = Some(CallbackFailure::RollbackCapture);
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(!report.accepted());
+    assert!(report.record().faults.iter().any(|fault| {
+        fault.code == "invalid-telemetry" && fault.detail.contains("completion time regressed")
+    }));
+    assert_eq!(
+        &environment.events[environment.events.len() - 3..],
+        ["stop", "restore-cpu", "restore-gpu"]
+    );
 }
 
 #[test]
@@ -488,6 +663,23 @@ fn a_failed_cpu_restoration_does_not_skip_gpu_restoration() {
         ["stop", "restore-cpu", "restore-gpu"]
     );
     assert!(!report.record().outcome.final_firmware_auto_confirmed);
+    assert!(report.record().validate().is_ok());
+}
+
+#[test]
+fn unsuccessful_auto_write_cannot_be_reported_as_restored() {
+    let baseline = passing_baseline();
+    let mut environment = CustomEnvironment::new(passing_custom_observations());
+    environment.cpu_restoration.auto_write_succeeded = false;
+
+    let report = run_custom(&baseline, &mut environment, &[]);
+
+    assert!(!report.accepted());
+    assert!(!report.record().outcome.final_firmware_auto_confirmed);
+    assert_eq!(
+        &environment.events[environment.events.len() - 3..],
+        ["stop", "restore-cpu", "restore-gpu"]
+    );
     assert!(report.record().validate().is_ok());
 }
 
@@ -705,6 +897,34 @@ fn repeat_status_distinguishes_idle_first_runs_and_second_loaded_runs() {
 }
 
 #[test]
+fn cosmetic_prior_run_changes_do_not_create_repeat_credit() {
+    let baseline = passing_baseline();
+    let mut first_environment = CustomEnvironment::new(passing_custom_observations());
+    let first = run_custom(&baseline, &mut first_environment, &[]).into_record();
+    let mut alias = first.clone();
+    alias.outcome.reason = "same pass with edited presentation text".into();
+    alias.outcome.another_passing_run_required = false;
+    assert!(alias.validate().is_ok());
+    let previous = [&first, &alias];
+    let mut environment = CustomEnvironment::new(passing_custom_observations());
+
+    let result = run_matched_custom_workload(
+        &mut environment,
+        &MatchedWorkloadPlan {
+            baseline: &baseline,
+            previous_passing_runs: &previous,
+            tachometer_calibrations: tachometer_calibrations(),
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(fan_control_core::MatchedWorkloadPlanError::InvalidPriorRun { .. })
+    ));
+    assert!(environment.events.is_empty());
+}
+
+#[test]
 fn repeat_credit_is_bound_to_the_exact_baseline_record() {
     let current_baseline = passing_baseline();
     let other_baseline = baseline_for(
@@ -825,11 +1045,11 @@ fn run_custom<'a>(
 }
 
 fn tachometer_calibrations() -> MatchedWorkloadTachometerCalibrations<'static> {
-    static CALIBRATIONS: OnceLock<[fan_control_core::FanCalibrationEvidence; 2]> = OnceLock::new();
+    static CALIBRATIONS: OnceLock<[fan_control_core::EvidenceRecord; 2]> = OnceLock::new();
     let calibrations = CALIBRATIONS.get_or_init(|| {
         [
-            completed_calibration_evidence(Fan::Cpu),
-            completed_calibration_evidence(Fan::Gpu),
+            completed_calibration_record(passing_baseline(), Fan::Cpu),
+            completed_calibration_record(passing_baseline(), Fan::Gpu),
         ]
     });
     MatchedWorkloadTachometerCalibrations {
@@ -840,6 +1060,38 @@ fn tachometer_calibrations() -> MatchedWorkloadTachometerCalibrations<'static> {
 
 fn passing_baseline() -> fan_control_core::EvidenceRecord {
     passing_baseline_for("cpu-ac-v1")
+}
+
+fn valid_five_minute_baseline_below_matched_minimum() -> fan_control_core::EvidenceRecord {
+    let mut record = passing_baseline();
+    let sample_count = MINIMUM_MATCHED_WORKLOAD_SAMPLES - 7;
+    record.samples.truncate(sample_count);
+    for (index, sample) in record.samples.iter_mut().enumerate() {
+        sample.timestamp = timestamp((index as u64 + 1) * 2_100);
+    }
+    for fan in [EvidenceFan::Cpu, EvidenceFan::Gpu] {
+        let mut sample_index = 0;
+        record.readbacks.retain_mut(|readback| {
+            if readback.fan != fan
+                || readback.phase != Some(fan_control_core::FanReadbackPhase::Sample)
+            {
+                return true;
+            }
+            if sample_index == sample_count {
+                return false;
+            }
+            readback.timestamp = timestamp((sample_index as u64 + 1) * 2_100);
+            sample_index += 1;
+            true
+        });
+    }
+    record.completed_at = record.samples.last().unwrap().timestamp;
+    for readback in &mut record.readbacks {
+        if readback.phase == Some(fan_control_core::FanReadbackPhase::Final) {
+            readback.timestamp = record.completed_at;
+        }
+    }
+    record
 }
 
 fn passing_baseline_with_samples(samples_required: usize) -> fan_control_core::EvidenceRecord {
@@ -1126,6 +1378,7 @@ enum CallbackFailure {
     LateWait,
     Capture,
     LateCapture,
+    RollbackCapture,
     Stop,
     RollbackStop,
     LateRestoration,
@@ -1223,6 +1476,9 @@ impl MatchedWorkloadEnvironment for CustomEnvironment {
         }
         if self.failure == Some(CallbackFailure::LateCapture) {
             self.now = self.now.saturating_add(101);
+        }
+        if self.failure == Some(CallbackFailure::RollbackCapture) {
+            self.now = self.now.saturating_sub(1);
         }
         self.observations
             .pop_front()

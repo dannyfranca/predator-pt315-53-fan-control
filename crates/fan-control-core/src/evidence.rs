@@ -1503,7 +1503,8 @@ fn final_enable_readback_confirms_auto(record: &EvidenceRecord, fan: EvidenceFan
 
 fn final_restoration_confirms_auto(record: &EvidenceRecord, fan: EvidenceFan) -> bool {
     final_restoration_attempt_after_command(record, fan).is_some_and(|attempt| {
-        attempt.enable_readback == Some(2)
+        attempt.auto_write_succeeded
+            && attempt.enable_readback == Some(2)
             && attempt.outcome == RestorationOutcome::FirmwareAutoConfirmed
     })
 }
