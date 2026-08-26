@@ -390,12 +390,20 @@ fn wait_for_state(name: &str, expected: &str) {
         if observed == expected {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "{name} remained {observed}, expected {expected}"
-        );
+        if Instant::now() >= deadline {
+            let status = systemctl_output(["status", "--no-pager", name]);
+            panic!(
+                "{name} remained {observed}, expected {expected}:\n{}\n{}",
+                String::from_utf8_lossy(&status.stdout),
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+fn systemctl_output<const N: usize>(arguments: [&str; N]) -> std::process::Output {
+    systemctl_command(arguments).output().unwrap()
 }
 
 fn wait_for_log(path: &Path, expected: &str) {
