@@ -36,6 +36,7 @@ pub struct EvidenceRecord {
     pub completed_at: EvidenceTimestamp,
     pub starting_conditions_captured_at: Option<EvidenceTimestamp>,
     pub workload_started_at: Option<EvidenceTimestamp>,
+    pub baseline_binding_sha256: Option<String>,
     pub workload: Option<WorkloadEvidence>,
     pub samples: Vec<TelemetrySampleEvidence>,
     pub commands: Vec<FanCommandEvidence>,
@@ -62,6 +63,8 @@ struct EvidenceRecordWire {
     starting_conditions_captured_at: Option<EvidenceTimestamp>,
     #[serde(default, deserialize_with = "deserialize_present_option")]
     workload_started_at: Option<EvidenceTimestamp>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    baseline_binding_sha256: Option<String>,
     #[serde(deserialize_with = "deserialize_required_option")]
     workload: Option<WorkloadEvidence>,
     samples: Vec<TelemetrySampleEvidence>,
@@ -89,6 +92,7 @@ impl TryFrom<EvidenceRecordWire> for EvidenceRecord {
             completed_at: wire.completed_at,
             starting_conditions_captured_at: wire.starting_conditions_captured_at,
             workload_started_at: wire.workload_started_at,
+            baseline_binding_sha256: wire.baseline_binding_sha256,
             workload: wire.workload,
             samples: wire.samples,
             commands: wire.commands,
@@ -114,7 +118,8 @@ impl Serialize for EvidenceRecord {
         let mut record = serializer.serialize_struct(
             "EvidenceRecord",
             16 + usize::from(self.starting_conditions_captured_at.is_some())
-                + usize::from(self.workload_started_at.is_some()),
+                + usize::from(self.workload_started_at.is_some())
+                + usize::from(self.baseline_binding_sha256.is_some()),
         )?;
         record.serialize_field("schema_version", &self.schema_version)?;
         record.serialize_field("record_status", &self.record_status)?;
@@ -130,6 +135,9 @@ impl Serialize for EvidenceRecord {
         }
         if let Some(workload_started_at) = self.workload_started_at {
             record.serialize_field("workload_started_at", &workload_started_at)?;
+        }
+        if let Some(baseline_binding_sha256) = &self.baseline_binding_sha256 {
+            record.serialize_field("baseline_binding_sha256", baseline_binding_sha256)?;
         }
         record.serialize_field("workload", &self.workload)?;
         record.serialize_field("samples", &self.samples)?;
@@ -536,6 +544,11 @@ impl EvidenceRecord {
                     field: "workload_started_at",
                 });
             }
+            if self.baseline_binding_sha256.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "baseline_binding_sha256",
+                });
+            }
             if self
                 .readbacks
                 .iter()
@@ -558,6 +571,21 @@ impl EvidenceRecord {
         validate_identity(&self.qualification_envelope)?;
         if !is_identifier(&self.stage) {
             return Err(EvidenceValidationError::InvalidStage);
+        }
+        match (
+            self.schema_version,
+            self.stage.as_str(),
+            self.baseline_binding_sha256.as_deref(),
+        ) {
+            (EVIDENCE_SCHEMA_VERSION_V2, "matched-workload", Some(binding))
+                if is_lower_hex(binding, 64) => {}
+            (EVIDENCE_SCHEMA_VERSION_V2, "matched-workload", _) | (_, _, Some(_)) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "baseline_binding_sha256",
+                    index: 0,
+                });
+            }
+            (_, _, None) => {}
         }
         if self.started_at.monotonic_millis > self.completed_at.monotonic_millis {
             return Err(EvidenceValidationError::InvalidTimeRange);
@@ -670,9 +698,7 @@ impl EvidenceRecord {
             validate_timestamp(self, attempt.timestamp, "restoration_attempts", index)?;
             if attempt.enable_readback.is_some_and(|value| value > 2)
                 || matches!(attempt.outcome, RestorationOutcome::FirmwareAutoConfirmed)
-                    && attempt.enable_readback != Some(2)
-                || matches!(attempt.outcome, RestorationOutcome::FirmwareAutoUnconfirmed)
-                    && attempt.enable_readback == Some(2)
+                    && (attempt.enable_readback != Some(2) || !attempt.auto_write_succeeded)
             {
                 return Err(EvidenceValidationError::InvalidValue {
                     field: "restoration_attempts.enable_readback",
@@ -680,10 +706,23 @@ impl EvidenceRecord {
                 });
             }
         }
-        if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2
-            && ((self.stage == "fan-calibration" && self.calibration.len() != 1)
-                || (self.stage != "fan-calibration" && !self.calibration.is_empty()))
-        {
+        let calibration_count_is_valid = match self.stage.as_str() {
+            "fan-calibration" => self.calibration.len() == 1,
+            "matched-workload" => {
+                self.calibration.len() == 2
+                    && [crate::EvidenceFan::Cpu, crate::EvidenceFan::Gpu]
+                        .into_iter()
+                        .all(|fan| {
+                            self.calibration
+                                .iter()
+                                .filter(|calibration| calibration.fan == fan)
+                                .count()
+                                == 1
+                        })
+            }
+            _ => self.calibration.is_empty(),
+        };
+        if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2 && !calibration_count_is_valid {
             return Err(EvidenceValidationError::InvalidValue {
                 field: "calibration",
                 index: self.calibration.len(),
@@ -755,19 +794,21 @@ impl EvidenceRecord {
                         .and_then(|session| session.evidence().cloned())
                         .is_some_and(|derived| derived == *calibration);
                         replay_matches
-                            && calibration_checkpoint_is_bound_to_record(
-                                self,
-                                calibration.fan,
-                                checkpoint,
-                            )
+                            && (self.stage == "matched-workload"
+                                || calibration_checkpoint_is_bound_to_record(
+                                    self,
+                                    calibration.fan,
+                                    checkpoint,
+                                ))
                     });
             if !is_allowed_calibration_floor(calibration.floor_basis_points)
                 || !deadline_is_derived
                 || !checkpoint_matches
-                || !self
-                    .commands
-                    .iter()
-                    .any(|command| command.fan == calibration.fan)
+                || self.stage == "fan-calibration"
+                    && !self
+                        .commands
+                        .iter()
+                        .any(|command| command.fan == calibration.fan)
                 || !duties_match
                 || calibration
                     .anchors
@@ -843,6 +884,9 @@ impl EvidenceRecord {
                         && final_enable_readback_confirms_auto(self, EvidenceFan::Gpu)
                 }
                 "firmware-auto-baseline" => firmware_auto_baseline_is_complete(self),
+                "matched-workload" if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2 => {
+                    crate::matched_workload::matched_workload_is_complete(self)
+                }
                 _ => {
                     self.workload.is_some()
                         && self.thermal_summary.is_some()
@@ -1113,6 +1157,15 @@ pub(crate) fn summarize_thermal_evidence(
     }
 }
 
+pub(crate) fn precise_final_thermal_slopes(samples: &[TelemetrySampleEvidence]) -> (f64, f64) {
+    let cpu = evidence_temperatures(samples, |sample| sample.cpu_millicelsius);
+    let gpu = evidence_temperatures(samples, |sample| sample.gpu_millicelsius);
+    (
+        evidence_final_slope_precise(&cpu),
+        evidence_final_slope_precise(&gpu),
+    )
+}
+
 fn evidence_temperatures(
     samples: &[TelemetrySampleEvidence],
     select: impl Fn(&TelemetrySampleEvidence) -> Option<i32>,
@@ -1131,9 +1184,13 @@ fn evidence_percentile_95(values: &[(u64, i32)]) -> i32 {
 }
 
 fn evidence_final_slope(values: &[(u64, i32)]) -> i32 {
+    evidence_final_slope_precise(values).round() as i32
+}
+
+fn evidence_final_slope_precise(values: &[(u64, i32)]) -> f64 {
     const WINDOW_MILLIS: u64 = 5 * 60 * 1_000;
     let Some((last_millis, _)) = values.last() else {
-        return 0;
+        return 0.0;
     };
     let window_start = last_millis.saturating_sub(WINDOW_MILLIS);
     let values = values
@@ -1141,7 +1198,7 @@ fn evidence_final_slope(values: &[(u64, i32)]) -> i32 {
         .filter(|(millis, _)| *millis >= window_start)
         .collect::<Vec<_>>();
     if values.len() < 2 {
-        return 0;
+        return 0.0;
     }
     let origin = values[0].0 as f64;
     let mean_x = values
@@ -1165,9 +1222,9 @@ fn evidence_final_slope(values: &[(u64, i32)]) -> i32 {
         })
         .sum::<f64>();
     if denominator == 0.0 {
-        0
+        0.0
     } else {
-        (numerator / denominator).round() as i32
+        numerator / denominator
     }
 }
 
@@ -1459,7 +1516,8 @@ fn final_enable_readback_confirms_auto(record: &EvidenceRecord, fan: EvidenceFan
 
 fn final_restoration_confirms_auto(record: &EvidenceRecord, fan: EvidenceFan) -> bool {
     final_restoration_attempt_after_command(record, fan).is_some_and(|attempt| {
-        attempt.enable_readback == Some(2)
+        attempt.auto_write_succeeded
+            && attempt.enable_readback == Some(2)
             && attempt.outcome == RestorationOutcome::FirmwareAutoConfirmed
     })
 }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/dannyfranca/predator-pt315-53-fan-control/schemas/evidence-v2.json",
   "title": "PT315-53 qualification evidence v2",
-  "$comment": "Structural validation MUST be followed by semantic validation. The canonical Rust API is parse_evidence_v2. Schema v2 adds source timestamps and phased Firmware Auto readbacks for matched baseline evidence; schema v1 remains available separately.",
+  "$comment": "Structural validation MUST be followed by semantic validation. The canonical Rust API is parse_evidence_v2. Schema v2 adds source timestamps, phased Firmware Auto readbacks, and exact baseline binding for matched workload evidence; schema v1 remains available separately.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -32,6 +32,10 @@
     "completed_at": { "$ref": "#/$defs/timestamp" },
     "starting_conditions_captured_at": { "$ref": "#/$defs/timestamp" },
     "workload_started_at": { "$ref": "#/$defs/timestamp" },
+    "baseline_binding_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "workload": {
       "anyOf": [
         { "$ref": "#/$defs/workload" },
@@ -64,7 +68,7 @@
     },
     "calibration": {
       "type": "array",
-      "maxItems": 1,
+      "maxItems": 2,
       "items": { "$ref": "#/$defs/calibration" }
     },
     "thermal_summary": {
@@ -76,6 +80,37 @@
     "outcome": { "$ref": "#/$defs/outcome" }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": { "stage": { "const": "matched-workload" } },
+        "required": ["stage"]
+      },
+      "then": { "required": ["baseline_binding_sha256"] },
+      "else": { "not": { "required": ["baseline_binding_sha256"] } }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": { "const": "matched-workload" },
+          "outcome": {
+            "properties": { "status": { "const": "passed" } },
+            "required": ["status"]
+          }
+        },
+        "required": ["stage", "outcome"]
+      },
+      "then": {
+        "required": ["starting_conditions_captured_at", "workload_started_at"],
+        "properties": {
+          "samples": { "minItems": 151 },
+          "commands": { "minItems": 302 },
+          "readbacks": { "minItems": 908 },
+          "state_transitions": { "minItems": 2 },
+          "faults": { "maxItems": 0 },
+          "restoration_attempts": { "minItems": 2, "maxItems": 2 }
+        }
+      }
+    },
     {
       "if": {
         "properties": { "stage": { "const": "fan-calibration" } },
@@ -90,7 +125,25 @@
           }
         }
       },
-      "else": { "properties": { "calibration": { "maxItems": 0 } } }
+      "else": {
+        "if": {
+          "properties": { "stage": { "const": "matched-workload" } },
+          "required": ["stage"]
+        },
+        "then": {
+          "properties": {
+            "calibration": {
+              "minItems": 2,
+              "maxItems": 2,
+              "allOf": [
+                { "contains": { "properties": { "fan": { "const": "cpu" } }, "required": ["fan"] } },
+                { "contains": { "properties": { "fan": { "const": "gpu" } }, "required": ["fan"] } }
+              ]
+            }
+          }
+        },
+        "else": { "properties": { "calibration": { "maxItems": 0 } } }
+      }
     },
     {
       "if": {
@@ -575,14 +628,12 @@
             "properties": { "outcome": { "const": "firmware-auto-confirmed" } },
             "required": ["outcome"]
           },
-          "then": { "properties": { "enable_readback": { "const": 2 } } }
-        },
-        {
-          "if": {
-            "properties": { "outcome": { "const": "firmware-auto-unconfirmed" } },
-            "required": ["outcome"]
-          },
-          "then": { "properties": { "enable_readback": { "not": { "const": 2 } } } }
+          "then": {
+            "properties": {
+              "auto_write_succeeded": { "const": true },
+              "enable_readback": { "const": 2 }
+            }
+          }
         }
       ]
     },

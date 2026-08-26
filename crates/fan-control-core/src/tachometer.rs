@@ -2,7 +2,7 @@ use std::{error::Error, fmt, time::Duration};
 
 use serde::Deserialize;
 
-use crate::{Fan, Pwm, ValidatedConfig};
+use crate::{Fan, FanCalibrationEvidence, Pwm, ValidatedConfig};
 
 const MAXIMUM_DUTY_BASIS_POINTS: u16 = 10_000;
 const MAXIMUM_RESPONSE_DEADLINE_MILLIS: u64 = 30_000;
@@ -331,20 +331,54 @@ impl QualifiedFanCalibration {
 }
 
 fn interpolate_rpm(lower: RpmAnchor, upper: RpmAnchor, duty: u16) -> u32 {
-    let duty = duty.clamp(lower.duty_basis_points, upper.duty_basis_points);
-    let span = u64::from(upper.duty_basis_points - lower.duty_basis_points);
-    let offset = u64::from(duty - lower.duty_basis_points);
-    let rpm_delta = u64::from(upper.median_rpm - lower.median_rpm);
-    let interpolated = u64::from(lower.median_rpm) + (rpm_delta * offset + span / 2) / span;
+    interpolate_rpm_values(
+        lower.duty_basis_points,
+        lower.median_rpm,
+        upper.duty_basis_points,
+        upper.median_rpm,
+        duty,
+    )
+}
+
+fn interpolate_rpm_values(
+    lower_duty: u16,
+    lower_rpm: u32,
+    upper_duty: u16,
+    upper_rpm: u32,
+    duty: u16,
+) -> u32 {
+    let duty = duty.clamp(lower_duty, upper_duty);
+    let span = u64::from(upper_duty - lower_duty);
+    let offset = u64::from(duty - lower_duty);
+    let rpm_delta = u64::from(upper_rpm - lower_rpm);
+    let interpolated = u64::from(lower_rpm) + (rpm_delta * offset + span / 2) / span;
     u32::try_from(interpolated).expect("interpolation stays between u32 anchors")
 }
 
-const fn pwm_to_basis_points(pwm: Pwm) -> u16 {
+pub(crate) const fn pwm_to_basis_points(pwm: Pwm) -> u16 {
     ((pwm.value() as u32 * MAXIMUM_DUTY_BASIS_POINTS as u32 + u8::MAX as u32 / 2) / u8::MAX as u32)
         as u16
 }
 
-const fn rpm_in_band(actual: u32, expected: u32) -> bool {
+pub(crate) fn expected_rpm_from_evidence(
+    calibration: &FanCalibrationEvidence,
+    pwm: u8,
+) -> Option<u32> {
+    let duty = pwm_to_basis_points(Pwm::from_raw(pwm));
+    let adjacent = calibration
+        .anchors
+        .windows(2)
+        .find(|pair| duty <= pair[1].duty_basis_points)?;
+    Some(interpolate_rpm_values(
+        adjacent[0].duty_basis_points,
+        adjacent[0].median_rpm,
+        adjacent[1].duty_basis_points,
+        adjacent[1].median_rpm,
+        duty,
+    ))
+}
+
+pub(crate) const fn rpm_in_band(actual: u32, expected: u32) -> bool {
     let actual = actual as u64;
     let expected = expected as u64;
     actual * 100 >= expected * 70 && actual * 100 <= expected * 130

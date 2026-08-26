@@ -6,10 +6,13 @@ use std::{
 };
 
 use fan_control_core::{
-    CompatibilityDeclarationV1, CompatibilityObservation, EvidenceCompleteness, EvidenceRecord,
-    EvidenceTimestamp, FanCalibrationEvidence, FanCommandEvidence, FanControlField,
-    FanWriteBackend, ObservedFanAbi, ValidatedConfig, parse_compatibility_v1, parse_config_v1,
-    validate_config_v1,
+    CalibrationLevelObservation, CalibrationReadbackSample, CalibrationStep,
+    CompatibilityDeclarationV1, CompatibilityObservation, ConservativeFanCalibration,
+    EvidenceCompleteness, EvidenceFan, EvidenceRecord, EvidenceTimestamp, Fan,
+    FanCalibrationEvidence, FanCommandEvidence, FanControlField, FanHoldObservation,
+    FanWriteBackend, ObservedFanAbi, RestorationAttemptEvidence, RestorationOutcome,
+    RunOutcomeStatus, StateTransitionEvidence, ValidatedConfig, parse_compatibility_v1,
+    parse_config_v1, validate_config_v1,
 };
 use sha2::{Digest, Sha256};
 use tracing::{Event, Subscriber, field::Visit};
@@ -275,4 +278,127 @@ pub fn bind_record_to_calibration_protocol(
         .unwrap()
         .timestamp
         .monotonic_millis = last + 2;
+}
+
+pub fn completed_calibration_evidence(fan: Fan) -> FanCalibrationEvidence {
+    let mut session = ConservativeFanCalibration::start(fan);
+    let mut clock = 1;
+    for rpm in [5_000, 3_800, 3_300, 2_800] {
+        record_stable_calibration_level(&mut session, rpm, 3_000, &mut clock);
+    }
+    let step = session.next_step();
+    let mut unstable = calibration_level_observation(step, 900, 2_000, &mut clock);
+    for (index, sample) in unstable.samples.iter_mut().enumerate() {
+        sample.selected_rpm = Some(if index % 2 == 0 { 900 } else { 1_300 });
+    }
+    session.record_level(unstable).unwrap();
+    for _ in 0..5 {
+        record_stable_calibration_level(&mut session, 5_000, 4_000, &mut clock);
+        record_stable_calibration_level(&mut session, 3_300, 5_000, &mut clock);
+    }
+    let hold_step = session.next_step();
+    let hold_samples = (0..451)
+        .map(|index| CalibrationReadbackSample {
+            monotonic_millis: clock + index * 2_000,
+            selected_enable_readback: 1,
+            selected_pwm_readback: hold_step.pwm_value().unwrap(),
+            other_enable_readback: 1,
+            other_pwm_readback: u8::MAX,
+            selected_rpm: Some(3_300),
+        })
+        .collect();
+    clock += 451 * 2_000;
+    session
+        .record_hold(FanHoldObservation {
+            samples: hold_samples,
+            stall_observed: false,
+            unexplained_rpm_collapse_observed: false,
+        })
+        .unwrap();
+    for (rpm, response) in [
+        (3_300, 3_000),
+        (3_800, 4_000),
+        (4_500, 5_000),
+        (6_200, 6_000),
+    ] {
+        record_stable_calibration_level(&mut session, rpm, response, &mut clock);
+    }
+    session.evidence().unwrap().clone()
+}
+
+pub fn completed_calibration_record(mut record: EvidenceRecord, fan: Fan) -> EvidenceRecord {
+    record.schema_version = 2;
+    record.stage = "fan-calibration".into();
+    record.baseline_binding_sha256 = None;
+    record.faults.clear();
+    if let Some(summary) = &mut record.thermal_summary {
+        summary.kernel_faults.clear();
+        summary.nvidia_faults.clear();
+    }
+    record.restoration_attempts = [EvidenceFan::Cpu, EvidenceFan::Gpu]
+        .into_iter()
+        .map(|fan| RestorationAttemptEvidence {
+            timestamp: record.completed_at,
+            fan,
+            auto_write_succeeded: true,
+            enable_readback: Some(2),
+            outcome: RestorationOutcome::FirmwareAutoConfirmed,
+        })
+        .collect();
+    record.state_transitions = vec![
+        StateTransitionEvidence {
+            timestamp: record.started_at,
+            from: "firmware-auto".into(),
+            to: "custom-control".into(),
+        },
+        StateTransitionEvidence {
+            timestamp: record.completed_at,
+            from: "custom-control".into(),
+            to: "firmware-auto".into(),
+        },
+    ];
+    record.outcome.status = RunOutcomeStatus::Passed;
+    record.outcome.reason = "fan calibration passed".into();
+    record.outcome.another_passing_run_required = false;
+    let calibration = completed_calibration_evidence(fan);
+    record.calibration = vec![calibration.clone()];
+    bind_record_to_calibration_protocol(&mut record, &calibration);
+    record
+}
+
+fn record_stable_calibration_level(
+    session: &mut ConservativeFanCalibration,
+    rpm: u32,
+    response_millis: u64,
+    clock: &mut u64,
+) {
+    let observation =
+        calibration_level_observation(session.next_step(), rpm, response_millis, clock);
+    session.record_level(observation).unwrap();
+}
+
+fn calibration_level_observation(
+    step: CalibrationStep,
+    rpm: u32,
+    response_millis: u64,
+    clock: &mut u64,
+) -> CalibrationLevelObservation {
+    let started_at = *clock;
+    let intervals = response_millis.div_ceil(2_000).max(3);
+    *clock += response_millis + 1;
+    CalibrationLevelObservation {
+        commanded_at_monotonic_millis: started_at,
+        samples: (0..=intervals)
+            .map(|index| CalibrationReadbackSample {
+                monotonic_millis: started_at + response_millis * index / intervals,
+                selected_enable_readback: 1,
+                selected_pwm_readback: step.pwm_value().unwrap(),
+                other_enable_readback: 1,
+                other_pwm_readback: u8::MAX,
+                selected_rpm: (index + 3 > intervals).then_some(rpm),
+            })
+            .collect(),
+        stall_observed: false,
+        unexplained_rpm_collapse_observed: false,
+    }
 }
