@@ -208,15 +208,27 @@ fn assert_actual_sleep_lifecycle(restoration_succeeds: bool) {
     let target_start = systemctl_status(["start", &target_name]);
     assert!(target_start.success());
     let mut daemon_pids = Vec::new();
+    let mut intervening_pid = None;
     for cycle in 0..3 {
         assert_eq!(active_state(&target_name), "active");
         assert_eq!(active_state(&guard_name), "active");
         assert_eq!(active_state(&daemon_name), "inactive");
 
+        if cycle == 0 {
+            systemctl(["start", &daemon_name]);
+            intervening_pid = Some(unit_property(&daemon_name, "MainPID"));
+        }
         systemctl(["stop", &target_name]);
         wait_for_state(&guard_name, "inactive");
         wait_for_state(&daemon_name, "active");
         daemon_pids.push(unit_property(&daemon_name, "MainPID"));
+        if cycle == 0 {
+            assert_ne!(
+                daemon_pids.last(),
+                intervening_pid.as_ref(),
+                "resume must replace a daemon started after sleep preparation"
+            );
+        }
 
         if cycle < 2 {
             systemctl(["start", &target_name]);
@@ -234,6 +246,7 @@ fn assert_actual_sleep_lifecycle(restoration_succeeds: bool) {
         &[
             "daemon-cleanup",
             "guard-prepare",
+            "daemon-cleanup",
             "daemon-cleanup",
             "guard-prepare",
             "daemon-cleanup",

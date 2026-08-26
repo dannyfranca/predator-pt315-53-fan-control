@@ -13,6 +13,7 @@ const SYSTEMCTL: &str = "/usr/bin/systemctl";
 pub(crate) enum DaemonActiveState {
     Active,
     Inactive,
+    Failed,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -25,7 +26,7 @@ pub(crate) trait DaemonManager {
     fn active_state(&mut self) -> io::Result<DaemonActiveState>;
     fn stop(&mut self) -> io::Result<PlannedStop>;
     fn reset_failed(&mut self) -> io::Result<()>;
-    fn start_ready(&mut self) -> io::Result<()>;
+    fn restart_ready(&mut self) -> io::Result<()>;
 }
 
 pub(crate) struct SystemdDaemonManager;
@@ -35,7 +36,8 @@ impl DaemonManager for SystemdDaemonManager {
         let unit = daemon_unit();
         match unit_property(&unit, "ActiveState")?.as_str() {
             "active" => Ok(DaemonActiveState::Active),
-            "inactive" | "failed" => Ok(DaemonActiveState::Inactive),
+            "inactive" => Ok(DaemonActiveState::Inactive),
+            "failed" => Ok(DaemonActiveState::Failed),
             state => Err(io::Error::other(format!(
                 "{unit} has transitional or unsupported state {state:?}"
             ))),
@@ -69,8 +71,8 @@ impl DaemonManager for SystemdDaemonManager {
         }
     }
 
-    fn start_ready(&mut self) -> io::Result<()> {
-        systemctl(&["start", &daemon_unit()])
+    fn restart_ready(&mut self) -> io::Result<()> {
+        systemctl(&["restart", &daemon_unit()])
     }
 }
 
@@ -119,8 +121,25 @@ pub(crate) fn resume_after_sleep(
         Err(error) => return Err(error),
     }
 
+    match manager.active_state()? {
+        DaemonActiveState::Inactive => {}
+        DaemonActiveState::Failed => {
+            return Err(io::Error::other(
+                "daemon faulted after sleep preparation; preserving fault latch",
+            ));
+        }
+        DaemonActiveState::Active => {
+            if manager.stop()? != PlannedStop::Clean {
+                return Err(io::Error::other(
+                    "intervening daemon did not complete a clean stop",
+                ));
+            }
+        }
+    }
     manager.reset_failed()?;
-    manager.start_ready()?;
+    // Restart is deliberate: if another start races resume, systemd must still replace that
+    // process rather than accepting it as the fresh post-sleep controller.
+    manager.restart_ready()?;
     fs::remove_file(marker)
 }
 
@@ -199,7 +218,7 @@ mod tests {
     impl DaemonManager for FakeDaemonManager {
         fn active_state(&mut self) -> io::Result<DaemonActiveState> {
             self.calls.borrow_mut().push("state");
-            self.state.take().expect("one state query")
+            self.state.take().unwrap_or(Ok(DaemonActiveState::Inactive))
         }
 
         fn stop(&mut self) -> io::Result<PlannedStop> {
@@ -212,8 +231,8 @@ mod tests {
             Ok(())
         }
 
-        fn start_ready(&mut self) -> io::Result<()> {
-            self.calls.borrow_mut().push("start");
+        fn restart_ready(&mut self) -> io::Result<()> {
+            self.calls.borrow_mut().push("restart");
             self.start_result.take().unwrap_or(Ok(()))
         }
     }
@@ -240,7 +259,14 @@ mod tests {
         resume_after_sleep(&mut manager, &marker).unwrap();
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "stop", "restore", "reset-failed", "start"]
+            &[
+                "state",
+                "stop",
+                "restore",
+                "state",
+                "reset-failed",
+                "restart"
+            ]
         );
         assert!(!marker.exists());
     }
@@ -304,16 +330,19 @@ mod tests {
             [
                 "state",
                 "stop",
+                "state",
                 "reset-failed",
-                "start",
+                "restart",
                 "state",
                 "stop",
+                "state",
                 "reset-failed",
-                "start",
+                "restart",
                 "state",
                 "stop",
+                "state",
                 "reset-failed",
-                "start",
+                "restart",
             ]
         );
     }
@@ -349,6 +378,41 @@ mod tests {
     }
 
     #[test]
+    fn intervening_daemon_is_stopped_and_replaced_during_resume() {
+        let marker = marker_path("intervening");
+        let prepared_marker = marker_path("intervening-prepared");
+        let _cleanup = MarkerCleanup(marker.clone());
+        let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
+        let mut manager = FakeDaemonManager::active();
+        prepare_sleep(&mut manager, &marker, &prepared_marker, || Ok(())).unwrap();
+        manager.state = Some(Ok(DaemonActiveState::Active));
+
+        resume_after_sleep(&mut manager, &marker).unwrap();
+
+        assert_eq!(
+            &*manager.calls.borrow(),
+            &["state", "stop", "state", "stop", "reset-failed", "restart"]
+        );
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn fault_after_preparation_preserves_latch_and_resume_authorization() {
+        let marker = marker_path("resume-fault");
+        let prepared_marker = marker_path("resume-fault-prepared");
+        let _cleanup = MarkerCleanup(marker.clone());
+        let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
+        let mut manager = FakeDaemonManager::active();
+        prepare_sleep(&mut manager, &marker, &prepared_marker, || Ok(())).unwrap();
+        manager.state = Some(Ok(DaemonActiveState::Failed));
+
+        assert!(resume_after_sleep(&mut manager, &marker).is_err());
+
+        assert_eq!(&*manager.calls.borrow(), &["state", "stop", "state"]);
+        assert!(marker.is_file());
+    }
+
+    #[test]
     fn cancelled_guard_without_auto_confirmation_hands_off_recovery() {
         let prepared_marker = marker_path("cancelled-prepared");
         let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
@@ -377,6 +441,36 @@ mod tests {
         .unwrap();
 
         assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn corrupt_prepared_marker_runs_independent_recovery() {
+        let prepared_marker = marker_path("corrupt-prepared");
+        let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
+        fs::write(&prepared_marker, b"firmware-auto-conf").unwrap();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let recovery_calls = Rc::clone(&calls);
+
+        restore_after_failed_guard(&prepared_marker, move || {
+            recovery_calls.borrow_mut().push("restore");
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(&*calls.borrow(), &["restore"]);
+    }
+
+    #[test]
+    fn corrupt_resume_marker_never_resets_or_restarts_daemon() {
+        let marker = marker_path("corrupt-resume");
+        let _cleanup = MarkerCleanup(marker.clone());
+        fs::write(&marker, b"res").unwrap();
+        let mut manager = FakeDaemonManager::inactive();
+
+        assert!(resume_after_sleep(&mut manager, &marker).is_err());
+
+        assert!(manager.calls.borrow().is_empty());
+        assert!(marker.is_file());
     }
 
     fn marker_path(case: &str) -> PathBuf {
