@@ -7,17 +7,18 @@ use fan_control_core::{
     AcerHwmonDiscoveryError, AdmittedPolicyAuthority, ArmingReadySample, BoundedFileAccess,
     BoundedIdentityBoundFileAccess, Clock, ControllerOwnership, EmergencyFanStatus, ExternalPower,
     FakePlatform, FakeRuntimeLock, Fan, FanArmingError, FanArmingFailure, FanArmingOperation,
-    FileAccess, FileIdentity, FilePermissions, FreshSampleGate, IdentityBoundFileAccess,
-    ObservedSample, OwnershipSampleReadiness, PlatformError, PlatformErrorKind, PlatformOperation,
-    RuntimeLockAccess, RuntimeLockError, SampleCapture, SampleSetError, SampleSourceError,
-    SampleSources, ServiceAccess, TemperatureCelsius, ValidatedConfig,
-    acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
+    FanArmingReadback, FileAccess, FileIdentity, FilePermissions, FreshSampleGate,
+    IdentityBoundFileAccess, ObservedSample, OwnershipSampleReadiness, PlatformError,
+    PlatformErrorKind, PlatformOperation, RuntimeLockAccess, RuntimeLockError, SampleCapture,
+    SampleSetError, SampleSourceError, SampleSources, ServiceAccess, TemperatureCelsius,
+    ValidatedConfig, acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
     discover_acer_hwmon,
 };
 
 mod support;
 use support::{
-    PROTECTED_POLICY, matching_observation_for_policy, matching_record, protected_config,
+    PROTECTED_POLICY, diagnostic_field, matching_observation_for_policy, matching_record,
+    protected_config, record_diagnostics,
 };
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
@@ -532,6 +533,36 @@ fn handover_deadline_failure_occurs_only_after_both_custom_writes_then_restores(
 }
 
 #[test]
+fn custom_duty_read_failure_is_attributed_to_the_pwm_endpoint() {
+    let (platform, device) = fixture("2400\n", "2600\n");
+    let mut platform = PathAwarePlatform::new(platform, InjectedFault::RejectCpuCustomDutyRead);
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, candidate, sample) = admit_and_sample(&mut ownership, &device);
+
+    let (error, diagnostic_events) = record_diagnostics(|| {
+        arm_both_fans_safely(&mut ownership, &device, &authority, &candidate, sample).unwrap_err()
+    });
+
+    assert!(matches!(
+        error.reason(),
+        FanArmingFailure::Platform {
+            fan: Fan::Cpu,
+            operation: FanArmingOperation::ConfirmCustom,
+            readback: Some(FanArmingReadback::Duty),
+            ..
+        }
+    ));
+    let fault = diagnostic_events
+        .iter()
+        .find(|event| {
+            event.get("fault_id").map(|value| value.trim_matches('"')) == Some("arming-rejected")
+        })
+        .unwrap();
+    assert_eq!(diagnostic_field(fault, "endpoint"), "acer:cpu:pwm1");
+    ownership.release().unwrap();
+}
+
+#[test]
 fn implausible_nonzero_tachometer_values_restore_both() {
     for cpu_rpm in ["1\n", "20001\n", "4294967295\n"] {
         let (mut platform, device) = fixture(cpu_rpm, "2600\n");
@@ -659,13 +690,24 @@ fn ready_sample_is_invalidated_by_a_new_firmware_auto_epoch() {
     ownership.restore_firmware_auto(&device).unwrap();
     let marker = ownership.platform().operations().len();
 
-    let error =
-        arm_both_fans_safely(&mut ownership, &device, &authority, &candidate, sample).unwrap_err();
+    let (error, diagnostic_events) = record_diagnostics(|| {
+        arm_both_fans_safely(&mut ownership, &device, &authority, &candidate, sample).unwrap_err()
+    });
 
     assert!(matches!(
         error,
         FanArmingError::Rejected(FanArmingFailure::ObsoleteSampleEpoch)
     ));
+    let fault = diagnostic_events
+        .iter()
+        .find(|event| diagnostic_field(event, "event_id") == "pt31553.runtime-fault.v1")
+        .unwrap();
+    assert_eq!(diagnostic_field(fault, "fault_id"), "arming-rejected");
+    assert!(
+        diagnostic_events
+            .iter()
+            .all(|event| { diagnostic_field(event, "event_id") != "pt31553.state-transition.v1" })
+    );
     assert!(ownership.platform().operations()[marker..].iter().all(
         |operation| !matches!(operation, PlatformOperation::Write { path, contents }
                 if (path == cpu_enable() || path == gpu_enable()) && contents == "1")
@@ -932,6 +974,7 @@ enum InjectedFault {
     CpuStopsBeforeGpuResponds,
     RejectCpuTachRead,
     RejectGpuTachRead,
+    RejectCpuCustomDutyRead,
     ExpireCustomConfirmation,
     RebindRootBeforeMaximum,
     RebindGpuPwmBeforeMaximum,
@@ -1054,6 +1097,14 @@ impl BoundedFileAccess for PathAwarePlatform {
         {
             self.fault_consumed = true;
             return Err(Self::injected_error("tachometer read rejected"));
+        }
+        if !self.fault_consumed
+            && self.fault == InjectedFault::RejectCpuCustomDutyRead
+            && path == cpu_pwm()
+            && self.gpu_custom_written
+        {
+            self.fault_consumed = true;
+            return Err(Self::injected_error("CPU Custom duty read rejected"));
         }
         if self.fault == InjectedFault::ExpireCustomConfirmation
             && !self.deadline_expired

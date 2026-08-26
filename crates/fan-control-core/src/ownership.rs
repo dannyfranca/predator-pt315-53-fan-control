@@ -394,11 +394,17 @@ pub fn acquire_controller_ownership<P>(
 where
     P: RuntimeLockAccess + ServiceAccess + ?Sized,
 {
-    reject_competing_services(platform)?;
+    reject_competing_services(platform).inspect_err(|_| {
+        crate::emit_fault(crate::RuntimeFault::OwnershipDenied, None);
+    })?;
     let lock = platform
         .try_acquire_root_runtime_lock(Path::new(RUNTIME_LOCK_PATH))
-        .map_err(ControllerOwnershipError::RuntimeLock)?;
+        .map_err(ControllerOwnershipError::RuntimeLock)
+        .inspect_err(|_| {
+            crate::emit_fault(crate::RuntimeFault::OwnershipDenied, None);
+        })?;
     if let Err(rejection) = reject_competing_services(platform) {
+        crate::emit_fault(crate::RuntimeFault::OwnershipDenied, None);
         return match platform.release_runtime_lock(lock) {
             Ok(()) => Err(rejection),
             Err((_lock, error)) => Err(ControllerOwnershipError::RuntimeLock(

@@ -3,8 +3,10 @@ use std::{env, error::Error, io};
 use fan_control_core::{StartupStatus, SystemdNotifier};
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("fan-control-daemon: supervision failed: {error}");
+    fan_control_core::init_journald_diagnostics();
+    if run().is_err() {
+        fan_control_core::emit_fault(fan_control_core::RuntimeFault::PlatformOperation, None);
+        eprintln!("fan-control-daemon: supervision failed; inspect PT31553_FAULT_ID");
         std::process::exit(1);
     }
 }

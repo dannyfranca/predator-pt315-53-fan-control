@@ -9,22 +9,23 @@ use std::{
 
 use fan_control_core::{
     BoundedFileAccess, BoundedIdentityBoundFileAccess, Clock, ControlCycleOperation,
-    ControlCycleReadback, ControlCycleSampleGate, ControllerOwnership, ExternalPower, FakePlatform,
-    FakeRuntimeLock, FakeStep, Fan, FileAccess, FileIdentity, FilePermissions, FreshSampleGate,
-    HealthyControl, HealthyControlCycleError, IdentityBoundFileAccess, ObservedSample,
-    OwnershipSampleReadiness, PlatformError, PlatformErrorKind, PlatformOperation,
-    RuntimeLockAccess, RuntimeLockError, SampleCapture, SampleSetError, SampleSourceError,
-    SampleSources, SensorControlState, SensorControlStep, SensorSourceDiscovery, ServiceAccess,
-    ServiceNotification, ServiceNotifier, ShutdownController, ShutdownRequest, TemperatureCelsius,
-    TransientSensorControl, TransientSensorControlError, ValidatedConfig,
-    acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
+    ControlCycleReadback, ControlCycleSampleGate, ControllerOwnership, DemandPercent,
+    ExternalPower, FakePlatform, FakeRuntimeLock, FakeStep, Fan, FileAccess, FileIdentity,
+    FilePermissions, FreshSampleGate, HealthyControl, HealthyControlCycleError,
+    IdentityBoundFileAccess, ObservedSample, OwnershipSampleReadiness, PlatformError,
+    PlatformErrorKind, PlatformOperation, Pwm, RuntimeLockAccess, RuntimeLockError, SampleCapture,
+    SampleSetError, SampleSourceError, SampleSources, SensorControlState, SensorControlStep,
+    SensorSourceDiscovery, ServiceAccess, ServiceNotification, ServiceNotifier, ShutdownController,
+    ShutdownRequest, TemperatureCelsius, TransientSensorControl, TransientSensorControlError,
+    ValidatedConfig, acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
     calculate_fan_outputs, discover_acer_hwmon, run_healthy_control_cycle,
     run_supervised_control_iteration,
 };
 
 mod support;
 use support::{
-    matching_observation_for_policy, matching_record, protected_config, runtime_protected_policy,
+    diagnostic_field, matching_observation_for_policy, matching_record, protected_config,
+    record_diagnostics, runtime_protected_policy,
 };
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
@@ -143,6 +144,7 @@ struct RecoveryScript {
     next_binding: u64,
     last_sample_binding: Option<u64>,
     source_drop_probe: Option<SourceDropProbe>,
+    shutdown_after_sample: Option<ShutdownRequest>,
 }
 
 impl RecoveryScript {
@@ -160,6 +162,7 @@ impl RecoveryScript {
             next_binding: 1,
             last_sample_binding: None,
             source_drop_probe: None,
+            shutdown_after_sample: None,
         }))
     }
 }
@@ -221,6 +224,9 @@ impl SampleSources for RecoverySources {
         }
         let power = script.frames[script.frame].power;
         script.frame += 1;
+        if let Some(shutdown) = script.shutdown_after_sample.take() {
+            shutdown.request();
+        }
         drop(script);
         Ok(capture.capture(power))
     }
@@ -264,6 +270,19 @@ fn recovery_control(
     TransientSensorControl<RecoveryDiscovery>,
     Rc<RefCell<RecoveryScript>>,
 ) {
+    let (control, script, _) = recovery_control_with_shutdown(armed, authority, frames);
+    (control, script)
+}
+
+fn recovery_control_with_shutdown(
+    armed: fan_control_core::ArmedFanControl,
+    authority: fan_control_core::AdmittedPolicyAuthority,
+    frames: Vec<Frame>,
+) -> (
+    TransientSensorControl<RecoveryDiscovery>,
+    Rc<RefCell<RecoveryScript>>,
+    ShutdownRequest,
+) {
     let script = RecoveryScript::new(frames);
     let discovery = RecoveryDiscovery {
         script: Rc::clone(&script),
@@ -272,15 +291,17 @@ fn recovery_control(
         script: Rc::clone(&script),
         binding: 0,
     };
+    let shutdown = ShutdownRequest::new();
     (
         TransientSensorControl::from_armed(
             armed,
             authority,
-            ShutdownRequest::new(),
+            shutdown.clone(),
             discovery,
             initial_sources,
         ),
         script,
+        shutdown,
     )
 }
 
@@ -421,7 +442,9 @@ fn one_cycle_uses_one_fresh_snapshot_and_verifies_each_changed_output() {
     }]);
     let marker = ownership.platform().operations().len();
 
-    let completed = run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
+    let (completed, diagnostic_events) = record_diagnostics(|| {
+        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap()
+    });
 
     let expected = calculate_fan_outputs(
         &candidate,
@@ -429,6 +452,59 @@ fn one_cycle_uses_one_fresh_snapshot_and_verifies_each_changed_output() {
         TemperatureCelsius::try_from(65.0).unwrap(),
         ExternalPower::Connected,
     );
+    assert_eq!(diagnostic_events.len(), 1);
+    let event = &diagnostic_events[0];
+    assert_eq!(
+        diagnostic_field(event, "event_id"),
+        "pt31553.control-cycle.v1"
+    );
+    assert_eq!(diagnostic_field(event, "cpu_temperature_celsius"), "70.0");
+    assert_eq!(diagnostic_field(event, "gpu_temperature_celsius"), "65.0");
+    assert_eq!(diagnostic_field(event, "external_power"), "connected");
+    assert_eq!(diagnostic_field(event, "profile"), "ac");
+    let demand = DemandPercent::try_from(
+        diagnostic_field(event, "demand_percent")
+            .parse::<f64>()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(Pwm::from(demand), expected.cpu_pwm());
+    assert_eq!(Pwm::from(demand), expected.gpu_pwm());
+    assert_eq!(diagnostic_field(event, "cpu_pwm_endpoint"), "acer:cpu:pwm1");
+    assert_eq!(
+        diagnostic_field(event, "cpu_command_pwm"),
+        expected.cpu_pwm().value().to_string()
+    );
+    assert_eq!(
+        diagnostic_field(event, "cpu_readback_pwm"),
+        expected.cpu_pwm().value().to_string()
+    );
+    assert_eq!(
+        diagnostic_field(event, "cpu_tachometer_endpoint"),
+        "acer:cpu:fan1_input"
+    );
+    assert_eq!(diagnostic_field(event, "cpu_rpm_command_pwm"), "255");
+    assert_eq!(diagnostic_field(event, "cpu_rpm"), "3000");
+    assert_eq!(diagnostic_field(event, "gpu_pwm_endpoint"), "acer:gpu:pwm2");
+    assert_eq!(
+        diagnostic_field(event, "gpu_command_pwm"),
+        expected.gpu_pwm().value().to_string()
+    );
+    assert_eq!(
+        diagnostic_field(event, "gpu_readback_pwm"),
+        expected.gpu_pwm().value().to_string()
+    );
+    assert_eq!(
+        diagnostic_field(event, "gpu_tachometer_endpoint"),
+        "acer:gpu:fan2_input"
+    );
+    assert_eq!(diagnostic_field(event, "gpu_rpm_command_pwm"), "255");
+    assert_eq!(diagnostic_field(event, "gpu_rpm"), "3000");
+    assert_eq!(
+        diagnostic_field(event, "message"),
+        "completed fan control cycle"
+    );
+
     assert_eq!(completed.outputs(), expected);
     assert_eq!(
         completed.sample().external_power(),
@@ -1865,8 +1941,9 @@ fn transient_cpu_failure_restores_auto_then_rediscovers_and_fully_rearms() {
     script.borrow_mut().fail_cpu = true;
     let marker = ownership.platform().operations().len();
 
+    let (step, diagnostic_events) = record_diagnostics(|| control.step(&mut ownership).unwrap());
     assert!(matches!(
-        control.step(&mut ownership).unwrap(),
+        step,
         SensorControlStep::FirmwareAutoRestored {
             fault: SampleSetError::Input {
                 input: fan_control_core::RequiredInput::Cpu,
@@ -1874,6 +1951,18 @@ fn transient_cpu_failure_restores_auto_then_rediscovers_and_fully_rearms() {
             }
         }
     ));
+    let sample_faults = diagnostic_events
+        .iter()
+        .filter(|event| {
+            event.get("fault_id").map(|value| value.trim_matches('"')) == Some("sensor-unavailable")
+        })
+        .collect::<Vec<_>>();
+    assert!(!sample_faults.is_empty());
+    assert!(
+        sample_faults
+            .iter()
+            .all(|event| { diagnostic_field(event, "endpoint") == "sensor:cpu:temperature" })
+    );
     assert_eq!(control.state(), SensorControlState::FirmwareAutoRecovery);
     assert_eq!(ownership.platform().file_contents(cpu_enable()), Some("2"));
     assert_eq!(ownership.platform().file_contents(gpu_enable()), Some("2"));
@@ -1928,6 +2017,61 @@ fn transient_cpu_failure_restores_auto_then_rediscovers_and_fully_rearms() {
             TemperatureCelsius::try_from(low.gpu).unwrap(),
             low.power,
         )
+    );
+
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
+fn shutdown_after_recovery_sample_readiness_is_observable_before_rearming() {
+    let (mut platform, device) = fixture();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script, shutdown) =
+        recovery_control_with_shutdown(armed, authority, vec![frame, frame, frame]);
+
+    assert!(matches!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::Completed(_)
+    ));
+    ownership.delay(Duration::from_secs(2));
+    script.borrow_mut().fail_cpu = true;
+    assert!(matches!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::FirmwareAutoRestored { .. }
+    ));
+    script.borrow_mut().fail_cpu = false;
+    assert_eq!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::AwaitingSecondSample
+    );
+    ownership.delay(Duration::from_secs(2));
+    script.borrow_mut().shutdown_after_sample = Some(shutdown);
+
+    let (result, diagnostic_events) = record_diagnostics(|| control.step(&mut ownership));
+
+    assert!(matches!(
+        result,
+        Err(TransientSensorControlError::ShutdownRequested)
+    ));
+    assert_eq!(diagnostic_events.len(), 2);
+    assert_eq!(
+        diagnostic_field(&diagnostic_events[0], "fault_id"),
+        "shutdown-requested"
+    );
+    assert_eq!(
+        diagnostic_field(&diagnostic_events[1], "from_state"),
+        "firmware-auto"
+    );
+    assert_eq!(
+        diagnostic_field(&diagnostic_events[1], "to_state"),
+        "fault-latched"
     );
 
     ownership.restore_firmware_auto(&device).unwrap();
@@ -2348,10 +2492,20 @@ fn restoration_invalidates_the_arming_receipt_before_sampling_or_output() {
         power: ExternalPower::Connected,
     }]);
 
+    let (result, diagnostic_events) = record_diagnostics(|| {
+        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources)
+    });
     assert!(matches!(
-        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources),
+        result,
         Err(HealthyControlCycleError::StaleArmingReceipt)
     ));
+    let fault = diagnostic_events
+        .iter()
+        .find(|event| {
+            event.get("fault_id").map(|value| value.trim_matches('"')) == Some("device-changed")
+        })
+        .unwrap();
+    assert_eq!(diagnostic_field(fault, "endpoint"), "none");
     assert_eq!(
         (sources.cpu_reads, sources.gpu_reads, sources.power_reads),
         (0, 0, 0)

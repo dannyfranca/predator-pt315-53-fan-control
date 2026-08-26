@@ -4,9 +4,11 @@ use crate::{
     AcerHwmonDevice, AdmittedPolicyAuthority, BoundedIdentityBoundFileAccess, Clock,
     CompletedControlCycle, ControllerOwnership, EmergencyContainmentReport, FanArmingError,
     FirmwareAutoRestorationError, FreshSampleGate, HealthyControl, HealthyControlCycleError,
-    IdentityBoundReadAccess, OwnershipSampleReadiness, RequiredInput, RuntimeLockAccess,
-    SampleSetError, SampleSourceError, SampleSources, ShutdownRequest, ValidatedConfig,
-    arm_both_fans_safely, ownership::FirmwareAutoSafingOutcome, run_healthy_control_cycle,
+    IdentityBoundReadAccess, OwnershipSampleReadiness, RequiredInput, RuntimeFault,
+    RuntimeLockAccess, RuntimeState, RuntimeTransition, SampleSetError, SampleSourceError,
+    SampleSources, ShutdownRequest, ValidatedConfig, arm_both_fans_safely,
+    diagnostics::sample_fault, emit_fault, emit_state_transition,
+    ownership::FirmwareAutoSafingOutcome, run_healthy_control_cycle,
 };
 
 /// Creates replacement CPU/GPU source bindings while Firmware Auto owns both fans.
@@ -233,6 +235,11 @@ where
                     Ok(SensorControlStep::Completed(completed))
                 }
                 Err(HealthyControlCycleError::ShutdownRequested) => {
+                    emit_state_transition(
+                        RuntimeState::CustomControl,
+                        RuntimeState::FaultLatched,
+                        RuntimeTransition::Shutdown,
+                    );
                     self.state = Some(ControlState::Faulted {
                         retained_sources: Some(sources),
                     });
@@ -241,9 +248,19 @@ where
                 Err(error) => {
                     let Some(fault) = recoverable_sensor_cycle_fault(&error).cloned() else {
                         let (_, device) = (*control).into_recovery_parts();
+                        emit_state_transition(
+                            RuntimeState::CustomControl,
+                            RuntimeState::Restoring,
+                            RuntimeTransition::ControlFault,
+                        );
                         return self.latch_control_fault(ownership, device, error, sources);
                     };
                     let (config, device) = (*control).into_recovery_parts();
+                    emit_state_transition(
+                        RuntimeState::CustomControl,
+                        RuntimeState::Restoring,
+                        RuntimeTransition::SensorFault,
+                    );
                     self.restore_for_recovery(ownership, config, device, fault, sources)
                 }
             },
@@ -255,12 +272,24 @@ where
                     mut sources,
                 } = *recovery;
                 if self.shutdown.is_requested() {
+                    emit_fault(RuntimeFault::ShutdownRequested, None);
+                    emit_state_transition(
+                        RuntimeState::FirmwareAuto,
+                        RuntimeState::FaultLatched,
+                        RuntimeTransition::Shutdown,
+                    );
                     self.state = Some(ControlState::Faulted {
                         retained_sources: sources,
                     });
                     return Err(TransientSensorControlError::ShutdownRequested);
                 }
                 if sources.is_none() && !ownership.refresh_firmware_auto_confirmation(&device) {
+                    emit_fault(RuntimeFault::FirmwareAutoUnconfirmed, None);
+                    emit_state_transition(
+                        RuntimeState::FirmwareAuto,
+                        RuntimeState::Restoring,
+                        RuntimeTransition::ControlFault,
+                    );
                     return self.latch_recovery_fault(
                         ownership,
                         device,
@@ -275,6 +304,7 @@ where
                             sources = Some(rediscovered);
                         }
                         Err(source) => {
+                            emit_fault(RuntimeFault::SensorUnavailable, None);
                             self.state = Some(ControlState::Recovering(Box::new(RecoveryState {
                                 config,
                                 device,
@@ -305,6 +335,12 @@ where
                     }
                     Ok(OwnershipSampleReadiness::Ready(sample)) => {
                         if self.shutdown.is_requested() {
+                            emit_fault(RuntimeFault::ShutdownRequested, None);
+                            emit_state_transition(
+                                RuntimeState::FirmwareAuto,
+                                RuntimeState::FaultLatched,
+                                RuntimeTransition::Shutdown,
+                            );
                             self.state = Some(ControlState::Faulted {
                                 retained_sources: sources,
                             });
@@ -329,6 +365,13 @@ where
                                 Ok(SensorControlStep::Rearmed)
                             }
                             Err(error) => {
+                                if !matches!(&error, FanArmingError::RestorationFailed { .. }) {
+                                    emit_state_transition(
+                                        RuntimeState::FirmwareAuto,
+                                        RuntimeState::FaultLatched,
+                                        RuntimeTransition::ControlFault,
+                                    );
+                                }
                                 let retained_sources =
                                     if matches!(&error, FanArmingError::RestorationFailed { .. }) {
                                         sources
@@ -341,15 +384,32 @@ where
                             }
                         }
                     }
-                    Err(fault) if recoverable_sensor_sample_fault(&fault) => self
-                        .restore_for_recovery(
+                    Err(fault) if recoverable_sensor_sample_fault(&fault) => {
+                        let (fault_id, endpoint) = sample_fault(&fault);
+                        emit_fault(fault_id, endpoint);
+                        emit_state_transition(
+                            RuntimeState::FirmwareAuto,
+                            RuntimeState::Restoring,
+                            RuntimeTransition::SensorFault,
+                        );
+                        self.restore_for_recovery(
                             ownership,
                             config,
                             device,
                             fault,
                             sources.expect("sample failure requires installed sources"),
-                        ),
-                    Err(fault) => self.latch_recovery_fault(ownership, device, fault, sources),
+                        )
+                    }
+                    Err(fault) => {
+                        let (fault_id, endpoint) = sample_fault(&fault);
+                        emit_fault(fault_id, endpoint);
+                        emit_state_transition(
+                            RuntimeState::FirmwareAuto,
+                            RuntimeState::Restoring,
+                            RuntimeTransition::ControlFault,
+                        );
+                        self.latch_recovery_fault(ownership, device, fault, sources)
+                    }
                 }
             }
             ControlState::Faulted { retained_sources } => {
@@ -372,6 +432,11 @@ where
     {
         match ownership.restore_or_contain_firmware_auto(&device) {
             FirmwareAutoSafingOutcome::Restored => {
+                emit_state_transition(
+                    RuntimeState::Restoring,
+                    RuntimeState::FirmwareAuto,
+                    RuntimeTransition::RestorationConfirmed,
+                );
                 self.state = Some(ControlState::Recovering(Box::new(RecoveryState {
                     config,
                     device,
@@ -385,6 +450,16 @@ where
                 restoration,
                 containment,
             } => {
+                emit_state_transition(
+                    RuntimeState::Restoring,
+                    RuntimeState::FirmwareAuto,
+                    RuntimeTransition::RestorationConfirmed,
+                );
+                emit_state_transition(
+                    RuntimeState::FirmwareAuto,
+                    RuntimeState::FaultLatched,
+                    RuntimeTransition::RestorationFailed,
+                );
                 drop(sources);
                 self.state = Some(ControlState::Faulted {
                     retained_sources: None,
@@ -399,6 +474,12 @@ where
                 restoration,
                 containment,
             } => {
+                emit_fault(RuntimeFault::ContainmentUnconfirmed, None);
+                emit_state_transition(
+                    RuntimeState::Restoring,
+                    RuntimeState::FaultLatched,
+                    RuntimeTransition::RestorationFailed,
+                );
                 self.state = Some(ControlState::Faulted {
                     retained_sources: Some(sources),
                 });
@@ -423,6 +504,16 @@ where
     {
         match ownership.restore_or_contain_firmware_auto(&device) {
             FirmwareAutoSafingOutcome::Restored => {
+                emit_state_transition(
+                    RuntimeState::Restoring,
+                    RuntimeState::FirmwareAuto,
+                    RuntimeTransition::RestorationConfirmed,
+                );
+                emit_state_transition(
+                    RuntimeState::FirmwareAuto,
+                    RuntimeState::FaultLatched,
+                    RuntimeTransition::ControlFault,
+                );
                 drop(sources);
                 self.state = Some(ControlState::Faulted {
                     retained_sources: None,
@@ -433,6 +524,16 @@ where
                 restoration,
                 containment,
             } => {
+                emit_state_transition(
+                    RuntimeState::Restoring,
+                    RuntimeState::FirmwareAuto,
+                    RuntimeTransition::RestorationConfirmed,
+                );
+                emit_state_transition(
+                    RuntimeState::FirmwareAuto,
+                    RuntimeState::FaultLatched,
+                    RuntimeTransition::ControlFault,
+                );
                 drop(sources);
                 self.state = Some(ControlState::Faulted {
                     retained_sources: None,
@@ -447,6 +548,12 @@ where
                 restoration,
                 containment,
             } => {
+                emit_fault(RuntimeFault::ContainmentUnconfirmed, None);
+                emit_state_transition(
+                    RuntimeState::Restoring,
+                    RuntimeState::FaultLatched,
+                    RuntimeTransition::RestorationFailed,
+                );
                 self.state = Some(ControlState::Faulted {
                     retained_sources: Some(sources),
                 });
@@ -471,6 +578,16 @@ where
     {
         match ownership.restore_or_contain_firmware_auto(&device) {
             FirmwareAutoSafingOutcome::Restored => {
+                emit_state_transition(
+                    RuntimeState::Restoring,
+                    RuntimeState::FirmwareAuto,
+                    RuntimeTransition::RestorationConfirmed,
+                );
+                emit_state_transition(
+                    RuntimeState::FirmwareAuto,
+                    RuntimeState::FaultLatched,
+                    RuntimeTransition::ControlFault,
+                );
                 drop(sources);
                 self.state = Some(ControlState::Faulted {
                     retained_sources: None,
@@ -481,6 +598,16 @@ where
                 restoration,
                 containment,
             } => {
+                emit_state_transition(
+                    RuntimeState::Restoring,
+                    RuntimeState::FirmwareAuto,
+                    RuntimeTransition::RestorationConfirmed,
+                );
+                emit_state_transition(
+                    RuntimeState::FirmwareAuto,
+                    RuntimeState::FaultLatched,
+                    RuntimeTransition::ControlFault,
+                );
                 drop(sources);
                 self.state = Some(ControlState::Faulted {
                     retained_sources: None,
@@ -495,6 +622,12 @@ where
                 restoration,
                 containment,
             } => {
+                emit_fault(RuntimeFault::ContainmentUnconfirmed, None);
+                emit_state_transition(
+                    RuntimeState::Restoring,
+                    RuntimeState::FaultLatched,
+                    RuntimeTransition::RestorationFailed,
+                );
                 self.state = Some(ControlState::Faulted {
                     retained_sources: sources,
                 });

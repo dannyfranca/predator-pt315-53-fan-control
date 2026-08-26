@@ -4,7 +4,8 @@ use crate::{
     AcerHwmonDevice, AcerHwmonDiscoveryError, AdmittedPolicyAuthority, ArmingReadySample,
     BoundedIdentityBoundFileAccess, Clock, CompleteSampleSet, ControllerOwnership,
     EmergencyContainmentReport, EnvelopeValidationError, Fan, FanEndpoints,
-    FirmwareAutoRestorationError, PlatformError, RuntimeLockAccess, ValidatedConfig,
+    FirmwareAutoRestorationError, PlatformError, RuntimeFault, RuntimeLockAccess, RuntimeState,
+    RuntimeTransition, ValidatedConfig, emit_fault, emit_state_transition,
     ownership::FirmwareAutoSafingOutcome,
     restoration::FIRMWARE_AUTO,
     tachometer::{MAXIMUM_PLAUSIBLE_RPM, MINIMUM_PLAUSIBLE_RPM, QualifiedTachometerCalibrations},
@@ -146,6 +147,7 @@ pub enum FanArmingFailure {
     Platform {
         fan: Fan,
         operation: FanArmingOperation,
+        readback: Option<FanArmingReadback>,
         source: PlatformError,
     },
     UnexpectedReadback {
@@ -190,6 +192,7 @@ impl fmt::Display for FanArmingFailure {
                 fan,
                 operation,
                 source,
+                ..
             } => write!(formatter, "{} fan {operation} failed: {source}", fan.name()),
             Self::UnexpectedReadback {
                 fan,
@@ -282,6 +285,7 @@ where
     P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
 {
     let (sample, sample_ownership_id, sample_epoch) = ready_sample.into_parts();
+    let mut entered_arming = false;
     let result = if authority.belongs_to_ownership(ownership.ownership_id()) {
         authority
             .validate_candidate(candidate)
@@ -296,6 +300,12 @@ where
         if sample_epoch != ownership.sampling_epoch() {
             return Err(FanArmingFailure::ObsoleteSampleEpoch);
         }
+        emit_state_transition(
+            RuntimeState::FirmwareAuto,
+            RuntimeState::Arming,
+            RuntimeTransition::TwoFreshSamples,
+        );
+        entered_arming = true;
         let ownership_id = ownership.ownership_id();
         let (platform, custom_epoch) = ownership.begin_custom_transition();
         arm(
@@ -310,26 +320,133 @@ where
     });
 
     match result {
-        Ok(armed) => Ok(armed),
-        Err(reason) => match ownership.restore_or_contain_firmware_auto(device) {
-            FirmwareAutoSafingOutcome::Restored => Err(FanArmingError::Rejected(reason)),
-            FirmwareAutoSafingOutcome::Contained {
-                restoration,
-                containment,
-            } => Err(FanArmingError::Recovered {
-                reason,
-                restoration: Box::new(restoration),
-                containment: Box::new(containment),
-            }),
-            FirmwareAutoSafingOutcome::Critical {
-                restoration,
-                containment,
-            } => Err(FanArmingError::RestorationFailed {
-                reason,
-                restoration: Box::new(restoration),
-                containment: Box::new(containment),
-            }),
-        },
+        Ok(armed) => {
+            emit_state_transition(
+                RuntimeState::Arming,
+                RuntimeState::CustomControl,
+                RuntimeTransition::ArmingConfirmed,
+            );
+            Ok(armed)
+        }
+        Err(reason) => {
+            emit_fault(
+                RuntimeFault::ArmingRejected,
+                arming_failure_endpoint(&reason),
+            );
+            if entered_arming {
+                emit_state_transition(
+                    RuntimeState::Arming,
+                    RuntimeState::Restoring,
+                    RuntimeTransition::ControlFault,
+                );
+            }
+            match ownership.restore_or_contain_firmware_auto(device) {
+                FirmwareAutoSafingOutcome::Restored => {
+                    if entered_arming {
+                        emit_state_transition(
+                            RuntimeState::Restoring,
+                            RuntimeState::FirmwareAuto,
+                            RuntimeTransition::RestorationConfirmed,
+                        );
+                    }
+                    Err(FanArmingError::Rejected(reason))
+                }
+                FirmwareAutoSafingOutcome::Contained {
+                    restoration,
+                    containment,
+                } => {
+                    if entered_arming {
+                        emit_state_transition(
+                            RuntimeState::Restoring,
+                            RuntimeState::FirmwareAuto,
+                            RuntimeTransition::RestorationConfirmed,
+                        );
+                    }
+                    Err(FanArmingError::Recovered {
+                        reason,
+                        restoration: Box::new(restoration),
+                        containment: Box::new(containment),
+                    })
+                }
+                FirmwareAutoSafingOutcome::Critical {
+                    restoration,
+                    containment,
+                } => {
+                    emit_fault(RuntimeFault::ContainmentUnconfirmed, None);
+                    emit_state_transition(
+                        if entered_arming {
+                            RuntimeState::Restoring
+                        } else {
+                            RuntimeState::FirmwareAuto
+                        },
+                        RuntimeState::FaultLatched,
+                        RuntimeTransition::RestorationFailed,
+                    );
+                    Err(FanArmingError::RestorationFailed {
+                        reason,
+                        restoration: Box::new(restoration),
+                        containment: Box::new(containment),
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn arming_failure_endpoint(reason: &FanArmingFailure) -> Option<crate::RuntimeEndpoint> {
+    use crate::RuntimeEndpoint;
+
+    let fan_endpoint = |fan, field| match (fan, field) {
+        (Fan::Cpu, FanArmingReadback::Mode) => RuntimeEndpoint::CpuEnable,
+        (Fan::Cpu, FanArmingReadback::Duty) => RuntimeEndpoint::CpuPwm,
+        (Fan::Gpu, FanArmingReadback::Mode) => RuntimeEndpoint::GpuEnable,
+        (Fan::Gpu, FanArmingReadback::Duty) => RuntimeEndpoint::GpuPwm,
+    };
+    match reason {
+        FanArmingFailure::Platform {
+            fan,
+            operation,
+            readback,
+            ..
+        } => Some(match (fan, operation, readback) {
+            (fan, _, Some(field)) => fan_endpoint(*fan, *field),
+            (Fan::Cpu, FanArmingOperation::ReadTachometer, None) => RuntimeEndpoint::CpuTachometer,
+            (Fan::Gpu, FanArmingOperation::ReadTachometer, None) => RuntimeEndpoint::GpuTachometer,
+            (Fan::Cpu, FanArmingOperation::ConfirmFirmwareAuto, None)
+            | (Fan::Cpu, FanArmingOperation::EnterCustom, None)
+            | (Fan::Cpu, FanArmingOperation::ConfirmCustom, None)
+            | (Fan::Cpu, FanArmingOperation::FinalConfirmCustom, None) => {
+                RuntimeEndpoint::CpuEnable
+            }
+            (Fan::Gpu, FanArmingOperation::ConfirmFirmwareAuto, None)
+            | (Fan::Gpu, FanArmingOperation::EnterCustom, None)
+            | (Fan::Gpu, FanArmingOperation::ConfirmCustom, None)
+            | (Fan::Gpu, FanArmingOperation::FinalConfirmCustom, None) => {
+                RuntimeEndpoint::GpuEnable
+            }
+            (Fan::Cpu, FanArmingOperation::StageMaximum | FanArmingOperation::ReadDuty, None) => {
+                RuntimeEndpoint::CpuPwm
+            }
+            (Fan::Gpu, FanArmingOperation::StageMaximum | FanArmingOperation::ReadDuty, None) => {
+                RuntimeEndpoint::GpuPwm
+            }
+        }),
+        FanArmingFailure::UnexpectedReadback { fan, field, .. } => Some(fan_endpoint(*fan, *field)),
+        FanArmingFailure::InvalidTachometer { fan, .. } => Some(match fan {
+            Fan::Cpu => RuntimeEndpoint::CpuTachometer,
+            Fan::Gpu => RuntimeEndpoint::GpuTachometer,
+        }),
+        FanArmingFailure::TachometerTimeout { .. }
+        | FanArmingFailure::Policy(_)
+        | FanArmingFailure::ForeignOwnershipAuthority
+        | FanArmingFailure::ForeignOwnershipSample
+        | FanArmingFailure::ObsoleteSampleEpoch
+        | FanArmingFailure::SampleFromFuture
+        | FanArmingFailure::StaleSample
+        | FanArmingFailure::DeviceIdentity(_)
+        | FanArmingFailure::DeviceAbi(_)
+        | FanArmingFailure::DeviceChanged
+        | FanArmingFailure::DeadlineOverflow => None,
     }
 }
 
@@ -613,6 +730,7 @@ fn read_tachometer(
         .map_err(|source| FanArmingFailure::Platform {
             fan: identity,
             operation: FanArmingOperation::ReadTachometer,
+            readback: None,
             source,
         })?;
     let value = raw.trim();
@@ -662,6 +780,7 @@ fn confirm(
         .map_err(|source| FanArmingFailure::Platform {
             fan,
             operation,
+            readback: Some(field),
             source,
         })?;
     if actual.trim() != expected {
@@ -706,6 +825,7 @@ fn write(
         .map_err(|source| FanArmingFailure::Platform {
             fan,
             operation,
+            readback: None,
             source,
         })
 }

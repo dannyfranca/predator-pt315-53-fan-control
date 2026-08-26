@@ -5,6 +5,8 @@ use fan_control_core::{
     PlatformErrorKind, PlatformOperation, acquire_controller_ownership, discover_acer_hwmon,
 };
 
+mod support;
+
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
 
