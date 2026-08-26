@@ -1,0 +1,16 @@
+tree 77898ef63ef3f46195b6bf223db7fd1ecf232594
+author Test Signer <test@example.com> 1787723651 +0000
+committer Test Signer <test@example.com> 1787723651 +0000
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ iQEzBAABCgAdFiEEGvO+yTWuZ3t0x4TjF+xfWo2GzRkFAmqOg6kACgkQF+xfWo2G
+ zRmi2wgAlb7Gbi/PBz/YgNQ5UmuuYnYRlKqJcbPPeEhIyYVmI53IxL9DYqjgycHD
+ fqKKiBo9HIx3n+KW5uu0Y6RkIP36X78oNGts6ZaIjWhPDEFONByhthlQNVkjBSqT
+ syMW6/BguDmUM+ypSx/5IxuLIpN50uxYflZ8/lMuAFT5uaN+6EY58Z4S4f0T2J4C
+ Gu7kUbMegNDXTPBAU53Ld4gLsQWbOLypwNLfHBRxaKbmDs2fxRjneuMyrwlJ3HPa
+ U10WXamZyDG10fjcj1jgwoO7NcmXLMcteKkMOT0Z57a+RfV1A+5I6NssjTHE1xvU
+ Ju3rTZVbAZCSQK5la6ClROQTOKd3RQ==
+ =I41a
+ -----END PGP SIGNATURE-----
+
+Fixture source commit
