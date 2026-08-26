@@ -482,7 +482,13 @@ impl TestUnitInstallation {
 
     fn install(&mut self, name: &str, source: &str) {
         let source_path = std::env::temp_dir().join(name);
-        fs::write(&source_path, source).unwrap();
+        let mut source_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&source_path)
+            .unwrap();
+        source_file.write_all(source.as_bytes()).unwrap();
+        source_file.sync_all().unwrap();
         assert!(
             Command::new("sudo")
                 .args(["--non-interactive", "/usr/bin/install", "-m", "0644"])
