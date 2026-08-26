@@ -68,6 +68,8 @@ fn actual_systemd_manager_blocks_sleep_failure_and_restarts_fresh_after_resume()
     assert_actual_sleep_lifecycle(LifecycleCase::Success);
     assert_actual_sleep_lifecycle(LifecycleCase::RestorationFailure);
     assert_actual_sleep_lifecycle(LifecycleCase::ReadinessFailure);
+    assert_actual_sleep_lifecycle(LifecycleCase::TransitioningIntervention);
+    assert_actual_sleep_lifecycle(LifecycleCase::StoppedIntervention);
 }
 
 #[test]
@@ -104,6 +106,8 @@ enum LifecycleCase {
     Success,
     RestorationFailure,
     ReadinessFailure,
+    TransitioningIntervention,
+    StoppedIntervention,
 }
 
 fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
@@ -115,6 +119,8 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
             LifecycleCase::Success => "ok",
             LifecycleCase::RestorationFailure => "restore-fail",
             LifecycleCase::ReadinessFailure => "ready-fail",
+            LifecycleCase::TransitioningIntervention => "transitioning",
+            LifecycleCase::StoppedIntervention => "stopped-intervention",
         }
     );
     let daemon_name = format!("pt31553-sleep-test-daemon-{suffix}.service");
@@ -255,37 +261,46 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
         return;
     }
 
+    if case == LifecycleCase::TransitioningIntervention {
+        fs::write(&ready_delay, "delay readiness").unwrap();
+        let mut intervening_start = systemctl_command(["start", &daemon_name]).spawn().unwrap();
+        wait_for_state(&daemon_name, "activating");
+        fs::remove_file(&ready_delay).unwrap();
+        let _ = systemctl_status(["stop", &target_name]);
+        let _ = intervening_start.wait();
+        wait_for_state(&guard_name, "failed");
+        wait_for_state(&daemon_name, "failed");
+        assert_eq!(unit_property(&daemon_name, "Result"), "start-limit-hit");
+        assert!(Path::new(&marker).is_file());
+        return;
+    }
+
+    if case == LifecycleCase::StoppedIntervention {
+        systemctl(["start", &daemon_name]);
+        systemctl(["stop", &daemon_name]);
+        let _ = systemctl_status(["stop", &target_name]);
+        wait_for_state(&guard_name, "failed");
+        assert_eq!(active_state(&daemon_name), "inactive");
+        assert!(Path::new(&marker).is_file());
+        assert!(!systemctl_status(["start", &daemon_name]).success());
+        wait_for_state(&daemon_name, "failed");
+        assert_eq!(unit_property(&daemon_name, "Result"), "start-limit-hit");
+        return;
+    }
+
     let mut daemon_pids = Vec::new();
-    let mut intervening_pid = None;
     for cycle in 0..3 {
         assert_eq!(active_state(&target_name), "active");
         assert_eq!(active_state(&guard_name), "active");
         assert_eq!(active_state(&daemon_name), "inactive");
 
-        if cycle == 0 {
-            fs::write(&ready_delay, "delay readiness").unwrap();
-            let mut intervening_start = systemctl_command(["start", &daemon_name]).spawn().unwrap();
-            wait_for_state(&daemon_name, "activating");
-            intervening_pid = Some(unit_property(&daemon_name, "MainPID"));
-            fs::remove_file(&ready_delay).unwrap();
-            systemctl(["stop", &target_name]);
-            let _ = intervening_start.wait();
-        } else {
-            if cycle == 1 {
-                wait_for_unit_unloaded(&daemon_name);
-            }
-            systemctl(["stop", &target_name]);
+        if cycle == 1 {
+            wait_for_unit_unloaded(&daemon_name);
         }
+        systemctl(["stop", &target_name]);
         wait_for_state(&guard_name, "inactive");
         wait_for_state(&daemon_name, "active");
         daemon_pids.push(unit_property(&daemon_name, "MainPID"));
-        if cycle == 0 {
-            assert_ne!(
-                daemon_pids.last(),
-                intervening_pid.as_ref(),
-                "resume must replace a daemon started after sleep preparation"
-            );
-        }
 
         if cycle < 2 {
             systemctl(["start", &target_name]);
@@ -303,7 +318,6 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
         &[
             "daemon-cleanup",
             "guard-prepare",
-            "daemon-cleanup",
             "daemon-cleanup",
             "guard-prepare",
             "daemon-cleanup",

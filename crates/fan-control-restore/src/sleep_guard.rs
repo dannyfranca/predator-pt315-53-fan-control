@@ -5,7 +5,7 @@ use std::{
 };
 
 const DAEMON_UNIT: &str = "pt31553-fand.service";
-const MARKER_CONTENT: &[u8] = b"resume\n";
+const MARKER_PREFIX: &str = "resume:";
 const PREPARED_MARKER_CONTENT: &[u8] = b"firmware-auto-confirmed\n";
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 
@@ -25,6 +25,7 @@ pub(crate) enum PlannedStop {
 
 pub(crate) trait DaemonManager {
     fn active_state(&mut self) -> io::Result<DaemonActiveState>;
+    fn invocation_id(&mut self) -> io::Result<String>;
     fn stop(&mut self) -> io::Result<PlannedStop>;
     fn reset_failed(&mut self) -> io::Result<()>;
     fn restart_ready(&mut self) -> io::Result<()>;
@@ -46,6 +47,10 @@ impl DaemonManager for SystemdDaemonManager {
         }
     }
 
+    fn invocation_id(&mut self) -> io::Result<String> {
+        unit_property(&daemon_unit(), "InvocationID")
+    }
+
     fn stop(&mut self) -> io::Result<PlannedStop> {
         let unit = daemon_unit();
         systemctl(&["stop", &unit])?;
@@ -61,16 +66,7 @@ impl DaemonManager for SystemdDaemonManager {
     }
 
     fn reset_failed(&mut self) -> io::Result<()> {
-        let unit = daemon_unit();
-        match unit_property(&unit, "LoadState")?.as_str() {
-            "loaded" => systemctl(&["reset-failed", &unit]),
-            // Garbage collection discards the unit's in-memory failure/start-limit state. A
-            // subsequent start reloads its fragment, so there is nothing left to reset.
-            "not-found" => Ok(()),
-            state => Err(io::Error::other(format!(
-                "{unit} has unsupported load state {state:?}"
-            ))),
-        }
+        systemctl(&["reset-failed", &daemon_unit()])
     }
 
     fn restart_ready(&mut self) -> io::Result<()> {
@@ -86,19 +82,23 @@ pub(crate) fn prepare_sleep(
 ) -> io::Result<()> {
     clear_marker(marker)?;
     clear_marker(prepared_marker)?;
-    let resume_authorized = match manager.active_state()? {
-        DaemonActiveState::Active => manager.stop()? == PlannedStop::Clean,
+    let planned_invocation = match manager.active_state()? {
+        DaemonActiveState::Active => {
+            let invocation = manager.invocation_id()?;
+            validate_invocation_id(&invocation)?;
+            (manager.stop()? == PlannedStop::Clean).then_some(invocation)
+        }
         DaemonActiveState::Transitioning => {
             let _ = manager.stop()?;
-            false
+            None
         }
-        DaemonActiveState::Inactive | DaemonActiveState::Failed => false,
+        DaemonActiveState::Inactive | DaemonActiveState::Failed => None,
     };
 
     restore()?;
     fs::write(prepared_marker, PREPARED_MARKER_CONTENT)?;
-    if resume_authorized {
-        fs::write(marker, MARKER_CONTENT)?;
+    if let Some(invocation) = planned_invocation {
+        fs::write(marker, format!("{MARKER_PREFIX}{invocation}\n"))?;
     }
     Ok(())
 }
@@ -122,15 +122,27 @@ pub(crate) fn resume_after_sleep(
     manager: &mut impl DaemonManager,
     marker: &Path,
 ) -> io::Result<()> {
-    match fs::read(marker) {
-        Ok(content) if content == MARKER_CONTENT => {}
-        Ok(_) => return Err(io::Error::other("invalid sleep-resume marker")),
+    let planned_invocation = match fs::read_to_string(marker) {
+        Ok(content) => parse_resume_marker(&content)?.to_owned(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
-    }
+    };
 
-    match manager.active_state()? {
-        DaemonActiveState::Inactive => {}
+    let reset_planned_state = match manager.active_state()? {
+        DaemonActiveState::Inactive => {
+            let observed = manager.invocation_id()?;
+            if observed.is_empty() {
+                false
+            } else {
+                validate_invocation_id(&observed)?;
+                if observed != planned_invocation {
+                    return Err(io::Error::other(
+                        "daemon invocation changed after sleep preparation; preserving its state",
+                    ));
+                }
+                true
+            }
+        }
         DaemonActiveState::Failed => {
             return Err(io::Error::other(
                 "daemon faulted after sleep preparation; preserving fault latch",
@@ -142,13 +154,32 @@ pub(crate) fn resume_after_sleep(
                     "intervening daemon did not complete a clean stop",
                 ));
             }
+            false
         }
+    };
+    if reset_planned_state {
+        manager.reset_failed()?;
     }
-    manager.reset_failed()?;
     // Restart is deliberate: if another start races resume, systemd must still replace that
     // process rather than accepting it as the fresh post-sleep controller.
     manager.restart_ready()?;
     fs::remove_file(marker)
+}
+
+fn parse_resume_marker(content: &str) -> io::Result<&str> {
+    let invocation = content
+        .strip_prefix(MARKER_PREFIX)
+        .and_then(|content| content.strip_suffix('\n'))
+        .ok_or_else(|| io::Error::other("invalid sleep-resume marker"))?;
+    validate_invocation_id(invocation)?;
+    Ok(invocation)
+}
+
+fn validate_invocation_id(invocation: &str) -> io::Result<()> {
+    if invocation.len() == 32 && invocation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+    Err(io::Error::other("invalid daemon invocation ID"))
 }
 
 fn clear_marker(marker: &Path) -> io::Result<()> {
@@ -199,9 +230,13 @@ mod tests {
         resume_after_sleep,
     };
 
+    const INTERVENING_INVOCATION: &str = "fedcba9876543210fedcba9876543210";
+    const PLANNED_INVOCATION: &str = "0123456789abcdef0123456789abcdef";
+
     #[derive(Default)]
     struct FakeDaemonManager {
         state: Option<io::Result<DaemonActiveState>>,
+        invocation_id: Option<io::Result<String>>,
         stop_result: Option<io::Result<PlannedStop>>,
         start_result: Option<io::Result<()>>,
         calls: Rc<RefCell<Vec<&'static str>>>,
@@ -227,6 +262,13 @@ mod tests {
         fn active_state(&mut self) -> io::Result<DaemonActiveState> {
             self.calls.borrow_mut().push("state");
             self.state.take().unwrap_or(Ok(DaemonActiveState::Inactive))
+        }
+
+        fn invocation_id(&mut self) -> io::Result<String> {
+            self.calls.borrow_mut().push("invocation-id");
+            self.invocation_id
+                .take()
+                .unwrap_or_else(|| Ok(PLANNED_INVOCATION.to_owned()))
         }
 
         fn stop(&mut self) -> io::Result<PlannedStop> {
@@ -260,7 +302,10 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(&*manager.calls.borrow(), &["state", "stop", "restore"]);
+        assert_eq!(
+            &*manager.calls.borrow(),
+            &["state", "invocation-id", "stop", "restore"]
+        );
         assert!(marker.is_file());
         assert!(prepared_marker.is_file());
 
@@ -269,9 +314,11 @@ mod tests {
             &*manager.calls.borrow(),
             &[
                 "state",
+                "invocation-id",
                 "stop",
                 "restore",
                 "state",
+                "invocation-id",
                 "reset-failed",
                 "restart"
             ]
@@ -338,7 +385,10 @@ mod tests {
         assert!(!marker.exists());
         assert!(!prepared_marker.exists());
         resume_after_sleep(&mut manager, &marker).unwrap();
-        assert_eq!(&*manager.calls.borrow(), &["state", "stop"]);
+        assert_eq!(
+            &*manager.calls.borrow(),
+            &["state", "invocation-id", "stop"]
+        );
     }
 
     #[test]
@@ -360,18 +410,24 @@ mod tests {
             all_calls,
             [
                 "state",
+                "invocation-id",
                 "stop",
                 "state",
+                "invocation-id",
                 "reset-failed",
                 "restart",
                 "state",
+                "invocation-id",
                 "stop",
                 "state",
+                "invocation-id",
                 "reset-failed",
                 "restart",
                 "state",
+                "invocation-id",
                 "stop",
                 "state",
+                "invocation-id",
                 "reset-failed",
                 "restart",
             ]
@@ -404,7 +460,10 @@ mod tests {
         prepare_sleep(&mut manager, &marker, &prepared_marker, || Ok(())).unwrap();
         resume_after_sleep(&mut manager, &marker).unwrap();
 
-        assert_eq!(&*manager.calls.borrow(), &["state", "stop"]);
+        assert_eq!(
+            &*manager.calls.borrow(),
+            &["state", "invocation-id", "stop"]
+        );
         assert!(!marker.exists());
     }
 
@@ -422,7 +481,7 @@ mod tests {
 
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "stop", "state", "stop", "reset-failed", "restart"]
+            &["state", "invocation-id", "stop", "state", "stop", "restart"]
         );
         assert!(!marker.exists());
     }
@@ -439,7 +498,10 @@ mod tests {
 
         assert!(resume_after_sleep(&mut manager, &marker).is_err());
 
-        assert_eq!(&*manager.calls.borrow(), &["state", "stop", "state"]);
+        assert_eq!(
+            &*manager.calls.borrow(),
+            &["state", "invocation-id", "stop", "state"]
+        );
         assert!(marker.is_file());
     }
 
@@ -489,8 +551,55 @@ mod tests {
 
         assert_eq!(
             &*manager.calls.borrow(),
-            &["state", "stop", "state", "stop", "reset-failed", "restart"]
+            &["state", "invocation-id", "stop", "state", "stop", "restart"]
         );
+    }
+
+    #[test]
+    fn stopped_intervening_invocation_preserves_its_start_limit_state() {
+        let marker = marker_path("stopped-intervening");
+        let prepared_marker = marker_path("stopped-intervening-prepared");
+        let _cleanup = MarkerCleanup(marker.clone());
+        let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
+        let mut manager = FakeDaemonManager::active();
+        prepare_sleep(&mut manager, &marker, &prepared_marker, || Ok(())).unwrap();
+        manager.state = Some(Ok(DaemonActiveState::Inactive));
+        manager.invocation_id = Some(Ok(INTERVENING_INVOCATION.to_owned()));
+
+        assert!(resume_after_sleep(&mut manager, &marker).is_err());
+
+        assert_eq!(
+            &*manager.calls.borrow(),
+            &["state", "invocation-id", "stop", "state", "invocation-id"]
+        );
+        assert!(marker.is_file());
+    }
+
+    #[test]
+    fn garbage_collected_planned_invocation_restarts_without_resetting_state() {
+        let marker = marker_path("garbage-collected");
+        let prepared_marker = marker_path("garbage-collected-prepared");
+        let _cleanup = MarkerCleanup(marker.clone());
+        let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
+        let mut manager = FakeDaemonManager::active();
+        prepare_sleep(&mut manager, &marker, &prepared_marker, || Ok(())).unwrap();
+        manager.state = Some(Ok(DaemonActiveState::Inactive));
+        manager.invocation_id = Some(Ok(String::new()));
+
+        resume_after_sleep(&mut manager, &marker).unwrap();
+
+        assert_eq!(
+            &*manager.calls.borrow(),
+            &[
+                "state",
+                "invocation-id",
+                "stop",
+                "state",
+                "invocation-id",
+                "restart"
+            ]
+        );
+        assert!(!marker.exists());
     }
 
     #[test]
