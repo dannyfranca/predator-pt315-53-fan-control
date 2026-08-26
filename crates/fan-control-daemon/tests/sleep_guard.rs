@@ -318,12 +318,12 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
         let _ = intervening_start.wait();
         assert_eq!(active_state(&guard_name), "active");
         assert_eq!(active_state(&daemon_name), "inactive");
-        assert!(!Path::new(&marker).exists());
-        assert!(Path::new(&start_gate).is_file());
+        assert!(!privileged_path_exists(Path::new(&marker)));
+        assert!(privileged_path_is_file(Path::new(&start_gate)));
         systemctl(["stop", &target_name]);
         wait_for_state(&guard_name, "inactive");
         assert_eq!(active_state(&daemon_name), "inactive");
-        assert!(!Path::new(&start_gate).exists());
+        assert!(!privileged_path_exists(Path::new(&start_gate)));
         return;
     }
 
@@ -354,12 +354,12 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
         wait_for_state(&guard_name, "failed");
         wait_for_state(&daemon_name, "failed");
         assert!(
-            Path::new(&marker).is_file(),
+            privileged_path_is_file(Path::new(&marker)),
             "failed daemon readiness must preserve resume authorization for retry: evidence={}; log={}",
-            marker_evidence(Path::new(&marker)),
+            privileged_marker_evidence(Path::new(&marker)),
             fs::read_to_string(&log).unwrap()
         );
-        assert!(Path::new(&start_gate).is_file());
+        assert!(privileged_path_is_file(Path::new(&start_gate)));
         return;
     }
 
@@ -435,6 +435,32 @@ fn marker_evidence(marker: &Path) -> String {
             .with_file_name("resume-daemon-start-blocked")
             .is_file()
     )
+}
+
+fn privileged_marker_evidence(marker: &Path) -> String {
+    format!(
+        "resume={},prepared={},gate={}",
+        privileged_path_is_file(marker),
+        privileged_path_is_file(&prepared_marker(marker)),
+        privileged_path_is_file(&marker.with_file_name("resume-daemon-start-blocked"))
+    )
+}
+
+fn privileged_path_exists(path: &Path) -> bool {
+    privileged_path_test("-e", path)
+}
+
+fn privileged_path_is_file(path: &Path) -> bool {
+    privileged_path_test("-f", path)
+}
+
+fn privileged_path_test(operator: &str, path: &Path) -> bool {
+    Command::new("sudo")
+        .args(["--non-interactive", "/usr/bin/test", operator])
+        .arg(path)
+        .status()
+        .unwrap()
+        .success()
 }
 
 struct TestUnitInstallation {
