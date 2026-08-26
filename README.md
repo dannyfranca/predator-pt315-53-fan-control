@@ -7,7 +7,7 @@ support Custom fan control, install a service, or enable one.
 
 - `fan-control-core`: shared library
 - `fan-control-daemon`: future automatic controller
-- `fan-control-restore`: future Firmware Auto restoration tool
+- `fan-control-restore`: independent Firmware Auto restoration tool
 - `fan-control-qualify`: future qualification tool
 
 Build and test every workspace member:
@@ -17,14 +17,19 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-The three executables currently do no hardware or service work. Each exits
-successfully after printing its explicit unqualified/not-configured status:
+Status invocations do no hardware or service work and exit after reporting the
+current source role:
 
 ```console
 cargo run -p fan-control-daemon
-cargo run -p fan-control-restore
+cargo run -p fan-control-restore -- --status
 cargo run -p fan-control-qualify
 ```
+
+`fan-control-restore --restore` is the explicit root service recovery mode. It
+discovers the exact Acer hwmon device, owns the controller lock, requests and
+confirms Firmware Auto for both fans, contains any confirmed-Custom fan at
+maximum if restoration fails, and retries until Auto is confirmed.
 
 ## Project boundary
 

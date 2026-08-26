@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    convert::Infallible,
     path::{Path, PathBuf},
     rc::Rc,
     sync::LazyLock,
@@ -14,10 +15,11 @@ use fan_control_core::{
     OwnershipSampleReadiness, PlatformError, PlatformErrorKind, PlatformOperation,
     RuntimeLockAccess, RuntimeLockError, SampleCapture, SampleSetError, SampleSourceError,
     SampleSources, SensorControlState, SensorControlStep, SensorSourceDiscovery, ServiceAccess,
-    ShutdownController, ShutdownRequest, TemperatureCelsius, TransientSensorControl,
-    TransientSensorControlError, ValidatedConfig, acquire_controller_ownership,
-    admit_policy_authority, arm_both_fans_safely, calculate_fan_outputs, discover_acer_hwmon,
-    run_healthy_control_cycle,
+    ServiceNotification, ServiceNotifier, ShutdownController, ShutdownRequest, TemperatureCelsius,
+    TransientSensorControl, TransientSensorControlError, ValidatedConfig,
+    acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
+    calculate_fan_outputs, discover_acer_hwmon, run_healthy_control_cycle,
+    run_supervised_control_iteration,
 };
 
 mod support;
@@ -284,6 +286,126 @@ fn recovery_control(
 
 fn healthy_control(armed: fan_control_core::ArmedFanControl) -> HealthyControl {
     HealthyControl::from_armed(armed, ShutdownRequest::new())
+}
+
+struct RecordingNotifier(Rc<RefCell<Vec<ServiceNotification>>>);
+
+impl ServiceNotifier for RecordingNotifier {
+    type Error = Infallible;
+
+    fn notify(&mut self, notification: ServiceNotification) -> Result<(), Self::Error> {
+        self.0.borrow_mut().push(notification);
+        Ok(())
+    }
+}
+
+#[test]
+fn supervised_heartbeat_follows_a_real_normal_control_cycle() {
+    let (mut platform, device) = fixture();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let (mut control, _) = recovery_control(
+        armed,
+        authority,
+        vec![Frame {
+            cpu: 70.0,
+            gpu: 65.0,
+            power: ExternalPower::Connected,
+        }],
+    );
+    let notifications = Rc::new(RefCell::new(Vec::new()));
+    let mut heartbeat =
+        fan_control_core::ControlLoopHeartbeat::new(RecordingNotifier(Rc::clone(&notifications)));
+
+    let step = run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat)
+        .expect("a completed real control iteration should notify systemd");
+
+    assert!(matches!(step, SensorControlStep::Completed(_)));
+    assert_eq!(
+        *notifications.borrow(),
+        vec![ServiceNotification::Ready, ServiceNotification::Watchdog]
+    );
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
+fn supervised_heartbeat_tracks_every_successful_recovery_transition_after_readiness() {
+    let (mut platform, device) = fixture();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let low = Frame {
+        cpu: 40.0,
+        gpu: 35.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script) = recovery_control(armed, authority, vec![frame, frame, frame, low]);
+    let notifications = Rc::new(RefCell::new(Vec::new()));
+    let mut heartbeat =
+        fan_control_core::ControlLoopHeartbeat::new(RecordingNotifier(Rc::clone(&notifications)));
+
+    assert!(matches!(
+        run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat).unwrap(),
+        SensorControlStep::Completed(_)
+    ));
+    let mut expected = vec![ServiceNotification::Ready, ServiceNotification::Watchdog];
+
+    ownership.delay(Duration::from_secs(2));
+    script.borrow_mut().fail_cpu = true;
+    assert!(matches!(
+        run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat).unwrap(),
+        SensorControlStep::FirmwareAutoRestored { .. }
+    ));
+    expected.push(ServiceNotification::Watchdog);
+    assert_eq!(*notifications.borrow(), expected);
+
+    script.borrow_mut().fail_cpu = false;
+    script.borrow_mut().fail_rediscovery_once = true;
+    assert!(matches!(
+        run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat).unwrap(),
+        SensorControlStep::AwaitingRediscovery(_)
+    ));
+    expected.push(ServiceNotification::Watchdog);
+    assert_eq!(*notifications.borrow(), expected);
+
+    assert_eq!(
+        run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat).unwrap(),
+        SensorControlStep::AwaitingSecondSample
+    );
+    expected.push(ServiceNotification::Watchdog);
+    assert_eq!(*notifications.borrow(), expected);
+
+    ownership.delay(Duration::from_secs(2));
+    assert_eq!(
+        run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat).unwrap(),
+        SensorControlStep::Rearmed
+    );
+    expected.push(ServiceNotification::Watchdog);
+    assert_eq!(*notifications.borrow(), expected);
+
+    assert!(matches!(
+        run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat).unwrap(),
+        SensorControlStep::Completed(_)
+    ));
+    assert_eq!(
+        *notifications.borrow(),
+        [
+            ServiceNotification::Ready,
+            ServiceNotification::Watchdog,
+            ServiceNotification::Watchdog,
+            ServiceNotification::Watchdog,
+            ServiceNotification::Watchdog,
+            ServiceNotification::Watchdog,
+            ServiceNotification::Watchdog,
+        ]
+    );
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
 }
 
 #[test]

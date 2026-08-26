@@ -1,0 +1,28 @@
+name: systemd lifecycle
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  watchdog-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the supported Rust toolchain
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          rustup override set 1.85.0
+      - name: Exercise watchdog recovery and crash latch under systemd
+        env:
+          PT31553_RUN_SYSTEMD_LIFECYCLE: "1"
+          PT31553_USE_SYSTEM_MANAGER: "1"
+        run: >-
+          cargo test -p fan-control-daemon --test service_supervision
+          actual_systemd_manager_runs_watchdog_cleanup_restart_and_start_limit
+          -- --ignored --exact --nocapture
