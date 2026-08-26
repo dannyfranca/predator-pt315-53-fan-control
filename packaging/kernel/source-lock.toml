@@ -1,0 +1,275 @@
+format = 1
+candidate = "linux-cachyos-gcc-7.1.8-stage-0"
+release_tag = "cachyos-7.1.8-1"
+source_commit = "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
+source_tree = "a51d0ee1eeafc983129ec95f39cde1405e12eb28"
+tag_object = "d5316526b375d031a3adadb41a9fa0ab89e07ef2"
+tag_signer_fingerprint = "E8B9AA39F054E30E8290D492C3C4820857F654FE"
+packaging_commit = "3c399d306eed6497838b246b9dbe73ec2cd1bb2f"
+packaging_tree = "352aa17916bc42e355f51a65576335c3a1a44113"
+source_date_epoch = 1786378335
+signature_verification_epoch = 1786378335
+cpu_target = "x86-64-v4"
+toolchain_image_digest = "1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6"
+patches = []
+
+[[inputs]]
+name = "kernel-source"
+kind = "kernel-source"
+path = "cachyos-7.1.8-1.tar.gz"
+origin = "https://github.com/CachyOS/linux/releases/download/cachyos-7.1.8-1/cachyos-7.1.8-1.tar.gz"
+revision = "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
+sha256 = "6e9269377b882fc61783f2d71246fa831829aa55a606dc7240d4bdde29bfcc3d"
+size = 262198584
+
+[[inputs]]
+name = "kernel-signature"
+kind = "kernel-signature"
+path = "cachyos-7.1.8-1.tar.gz.asc"
+origin = "https://github.com/CachyOS/linux/releases/download/cachyos-7.1.8-1/cachyos-7.1.8-1.tar.gz.asc"
+revision = "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
+sha256 = "a9aeac34a2d2cf5d42dc9540f91dff0229c9140453ad5065e4ff2ed46fe8d52c"
+size = 659
+
+[[inputs]]
+name = "source-commit"
+kind = "source-commit"
+path = "cachyos-7.1.8-1.commit"
+origin = "https://api.github.com/repos/CachyOS/linux/git/commits/7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
+revision = "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
+sha256 = "7c130c920e976deaf8d38c699ccb8b2e17b123eb1ac00d75a8973390bf0bcdc8"
+size = 989
+
+[[inputs]]
+name = "release-tag"
+kind = "release-tag"
+path = "cachyos-7.1.8-1.tag"
+origin = "https://api.github.com/repos/CachyOS/linux/git/tags/d5316526b375d031a3adadb41a9fa0ab89e07ef2"
+revision = "d5316526b375d031a3adadb41a9fa0ab89e07ef2"
+sha256 = "56cfe83010830972201599d29f62d7565bfde8f240bdc827ed1c296fdca4fb70"
+size = 17648
+
+[[inputs]]
+name = "signer-key"
+kind = "signer-key"
+path = "cachyos-release-key.gpg"
+origin = "https://keys.openpgp.org/vks/v1/by-fingerprint/E8B9AA39F054E30E8290D492C3C4820857F654FE"
+revision = "9105908fb13947d83580d291440bb752b2bd859ac89796380c8f68cb98b5ab83"
+sha256 = "9105908fb13947d83580d291440bb752b2bd859ac89796380c8f68cb98b5ab83"
+size = 3115
+
+[[inputs]]
+name = "packaging-snapshot"
+kind = "packaging"
+path = "linux-cachyos-3c399d306eed6497838b246b9dbe73ec2cd1bb2f.tar.gz"
+origin = "https://github.com/CachyOS/linux-cachyos/archive/3c399d306eed6497838b246b9dbe73ec2cd1bb2f.tar.gz"
+revision = "3c399d306eed6497838b246b9dbe73ec2cd1bb2f"
+sha256 = "ee722ffbf703fca8a2f2f755e01d90966461e970d2858e40c72174be5709fa09"
+size = 833087
+
+[[inputs]]
+name = "packaging-commit"
+kind = "packaging-commit"
+path = "linux-cachyos-3c399d306eed6497838b246b9dbe73ec2cd1bb2f.commit"
+origin = "https://api.github.com/repos/CachyOS/linux-cachyos/git/commits/3c399d306eed6497838b246b9dbe73ec2cd1bb2f"
+revision = "3c399d306eed6497838b246b9dbe73ec2cd1bb2f"
+sha256 = "9946ed2af08bfbd44db3872bf390b1929fddd2b5e3a090c0d49db158af67665a"
+size = 942
+
+[[inputs]]
+name = "kernel-config"
+kind = "kernel-config"
+path = "config"
+origin = "https://raw.githubusercontent.com/CachyOS/linux-cachyos/3c399d306eed6497838b246b9dbe73ec2cd1bb2f/linux-cachyos/config"
+revision = "3c399d306eed6497838b246b9dbe73ec2cd1bb2f"
+sha256 = "ef721ae680109993eca463c8847553cf8c2775f6626da4ea9b460f0588b7969b"
+size = 293290
+
+[[inputs]]
+name = "build-environment"
+kind = "build-environment"
+path = "build-environment.toml"
+origin = "repository:packaging/kernel/build-environment.toml"
+revision = "034f78fccc1287acce45118ebeb7ac5c89689aa267eedcd2c507be5ba065c4f7"
+sha256 = "034f78fccc1287acce45118ebeb7ac5c89689aa267eedcd2c507be5ba065c4f7"
+size = 1341
+
+[[inputs]]
+name = "build-wrapper"
+kind = "build-wrapper"
+path = "build-candidate"
+origin = "repository:packaging/kernel/build-candidate"
+revision = "c6e6e47f450514183969127e481317d7b1a3d981603e3ba23dd892e0e09211c4"
+sha256 = "c6e6e47f450514183969127e481317d7b1a3d981603e3ba23dd892e0e09211c4"
+size = 4609
+
+[[inputs]]
+name = "makepkg-config"
+kind = "makepkg-config"
+path = "makepkg.conf"
+origin = "repository:packaging/kernel/makepkg.conf"
+revision = "1c5e4585468e8d54e4e6c8d8f5b43ad321fae0b358aaf0df6a2b1d1415c108ce"
+sha256 = "1c5e4585468e8d54e4e6c8d8f5b43ad321fae0b358aaf0df6a2b1d1415c108ce"
+size = 567
+
+[[inputs]]
+name = "toolchain-image"
+kind = "toolchain-image"
+path = "toolchain-image-manifest.json"
+origin = "oci://docker.io/cachyos/docker-makepkg-v4@sha256:1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6"
+revision = "1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6"
+sha256 = "1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6"
+size = 3656
+
+[[inputs]]
+name = "toolchain-blob-00"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/e082399b15288ef928f43f00ae97d20035c0f7c6b6dda06431463307ecd8e9cf"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:e082399b15288ef928f43f00ae97d20035c0f7c6b6dda06431463307ecd8e9cf"
+revision = "e082399b15288ef928f43f00ae97d20035c0f7c6b6dda06431463307ecd8e9cf"
+sha256 = "e082399b15288ef928f43f00ae97d20035c0f7c6b6dda06431463307ecd8e9cf"
+size = 10681
+
+[[inputs]]
+name = "toolchain-blob-01"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/444f393ce858c4b3035c5cb5e2e6b5b46661dd73311818d48dead4150ac68209"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:444f393ce858c4b3035c5cb5e2e6b5b46661dd73311818d48dead4150ac68209"
+revision = "444f393ce858c4b3035c5cb5e2e6b5b46661dd73311818d48dead4150ac68209"
+sha256 = "444f393ce858c4b3035c5cb5e2e6b5b46661dd73311818d48dead4150ac68209"
+size = 266229441
+
+[[inputs]]
+name = "toolchain-blob-02"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/86584fa290cd875121991e41d307669a30794663283b8ae95a85ea8b6f751987"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:86584fa290cd875121991e41d307669a30794663283b8ae95a85ea8b6f751987"
+revision = "86584fa290cd875121991e41d307669a30794663283b8ae95a85ea8b6f751987"
+sha256 = "86584fa290cd875121991e41d307669a30794663283b8ae95a85ea8b6f751987"
+size = 8950
+
+[[inputs]]
+name = "toolchain-blob-03"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/b1537802803ada2a484f7457b334cb53e67100faf4dc12717fda28d77e1374b2"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:b1537802803ada2a484f7457b334cb53e67100faf4dc12717fda28d77e1374b2"
+revision = "b1537802803ada2a484f7457b334cb53e67100faf4dc12717fda28d77e1374b2"
+sha256 = "b1537802803ada2a484f7457b334cb53e67100faf4dc12717fda28d77e1374b2"
+size = 783
+
+[[inputs]]
+name = "toolchain-blob-04"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/fe0e00473b7bdd42884f51d407b41a7ec1e4fbbe1529b36121c7369207402929"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:fe0e00473b7bdd42884f51d407b41a7ec1e4fbbe1529b36121c7369207402929"
+revision = "fe0e00473b7bdd42884f51d407b41a7ec1e4fbbe1529b36121c7369207402929"
+sha256 = "fe0e00473b7bdd42884f51d407b41a7ec1e4fbbe1529b36121c7369207402929"
+size = 1497
+
+[[inputs]]
+name = "toolchain-blob-05"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/079ec07baeeea2f75c6dcf36db22903391079917fc6fb83f24ea067daae32a78"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:079ec07baeeea2f75c6dcf36db22903391079917fc6fb83f24ea067daae32a78"
+revision = "079ec07baeeea2f75c6dcf36db22903391079917fc6fb83f24ea067daae32a78"
+sha256 = "079ec07baeeea2f75c6dcf36db22903391079917fc6fb83f24ea067daae32a78"
+size = 499
+
+[[inputs]]
+name = "toolchain-blob-06"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/c6e6fcf837cb06a1a1f9f42cbb31ab4f4e6028925ff46de1662f992732b821f9"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:c6e6fcf837cb06a1a1f9f42cbb31ab4f4e6028925ff46de1662f992732b821f9"
+revision = "c6e6fcf837cb06a1a1f9f42cbb31ab4f4e6028925ff46de1662f992732b821f9"
+sha256 = "c6e6fcf837cb06a1a1f9f42cbb31ab4f4e6028925ff46de1662f992732b821f9"
+size = 227
+
+[[inputs]]
+name = "toolchain-blob-07"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/8e80acb13443bc29b1d289a1b4f1b42b5b47ab99bd844e5c45304770c4c11bfb"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:8e80acb13443bc29b1d289a1b4f1b42b5b47ab99bd844e5c45304770c4c11bfb"
+revision = "8e80acb13443bc29b1d289a1b4f1b42b5b47ab99bd844e5c45304770c4c11bfb"
+sha256 = "8e80acb13443bc29b1d289a1b4f1b42b5b47ab99bd844e5c45304770c4c11bfb"
+size = 763
+
+[[inputs]]
+name = "toolchain-blob-08"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/082a05b20a0c99f2f51304b3d9279e5d285c21eaf961dec75a4032cd7d4c679f"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:082a05b20a0c99f2f51304b3d9279e5d285c21eaf961dec75a4032cd7d4c679f"
+revision = "082a05b20a0c99f2f51304b3d9279e5d285c21eaf961dec75a4032cd7d4c679f"
+sha256 = "082a05b20a0c99f2f51304b3d9279e5d285c21eaf961dec75a4032cd7d4c679f"
+size = 772
+
+[[inputs]]
+name = "toolchain-blob-09"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/c42a875dab907ac9125b6dc48f450103ec893647cc6ac7bdea72d4c3832af4de"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:c42a875dab907ac9125b6dc48f450103ec893647cc6ac7bdea72d4c3832af4de"
+revision = "c42a875dab907ac9125b6dc48f450103ec893647cc6ac7bdea72d4c3832af4de"
+sha256 = "c42a875dab907ac9125b6dc48f450103ec893647cc6ac7bdea72d4c3832af4de"
+size = 771
+
+[[inputs]]
+name = "toolchain-blob-10"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/091999b8b9b22c0ccec50c9782474850078b4580ad831366580f8f24ab0ccf2c"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:091999b8b9b22c0ccec50c9782474850078b4580ad831366580f8f24ab0ccf2c"
+revision = "091999b8b9b22c0ccec50c9782474850078b4580ad831366580f8f24ab0ccf2c"
+sha256 = "091999b8b9b22c0ccec50c9782474850078b4580ad831366580f8f24ab0ccf2c"
+size = 234
+
+[[inputs]]
+name = "toolchain-blob-11"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/3b7dc7b203c0dc974947442cb4f8dbea97553449e5caa6024472bb4361e13047"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:3b7dc7b203c0dc974947442cb4f8dbea97553449e5caa6024472bb4361e13047"
+revision = "3b7dc7b203c0dc974947442cb4f8dbea97553449e5caa6024472bb4361e13047"
+sha256 = "3b7dc7b203c0dc974947442cb4f8dbea97553449e5caa6024472bb4361e13047"
+size = 2374242
+
+[[inputs]]
+name = "toolchain-blob-12"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/35221bbdd721157cc5bd111d0145aed9b7cbbbc5c4df90e82dc26ecd6d7e4ff5"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:35221bbdd721157cc5bd111d0145aed9b7cbbbc5c4df90e82dc26ecd6d7e4ff5"
+revision = "35221bbdd721157cc5bd111d0145aed9b7cbbbc5c4df90e82dc26ecd6d7e4ff5"
+sha256 = "35221bbdd721157cc5bd111d0145aed9b7cbbbc5c4df90e82dc26ecd6d7e4ff5"
+size = 646380867
+
+[[inputs]]
+name = "toolchain-blob-13"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/e2830657aa41efefb9346ac8d77a20b866f0225f4a87575bac9bcf0fd6fc14f4"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:e2830657aa41efefb9346ac8d77a20b866f0225f4a87575bac9bcf0fd6fc14f4"
+revision = "e2830657aa41efefb9346ac8d77a20b866f0225f4a87575bac9bcf0fd6fc14f4"
+sha256 = "e2830657aa41efefb9346ac8d77a20b866f0225f4a87575bac9bcf0fd6fc14f4"
+size = 105368974
+
+[[inputs]]
+name = "toolchain-blob-14"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/074a5c44ed5e35266320b862e1d5a95b4d434c6c327ae720b27bcd6f77434fb4"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:074a5c44ed5e35266320b862e1d5a95b4d434c6c327ae720b27bcd6f77434fb4"
+revision = "074a5c44ed5e35266320b862e1d5a95b4d434c6c327ae720b27bcd6f77434fb4"
+sha256 = "074a5c44ed5e35266320b862e1d5a95b4d434c6c327ae720b27bcd6f77434fb4"
+size = 54228
+
+[[inputs]]
+name = "toolchain-blob-15"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/95247dc14b6dc210789b5a6c88b1fac3a075a3e23ace62bee4d8276d06525c7a"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:95247dc14b6dc210789b5a6c88b1fac3a075a3e23ace62bee4d8276d06525c7a"
+revision = "95247dc14b6dc210789b5a6c88b1fac3a075a3e23ace62bee4d8276d06525c7a"
+sha256 = "95247dc14b6dc210789b5a6c88b1fac3a075a3e23ace62bee4d8276d06525c7a"
+size = 2535
+
+[[inputs]]
+name = "toolchain-blob-16"
+kind = "toolchain-blob"
+path = "oci/blobs/sha256/1de5527dab646415b0c2d8c5ebd4fcaf07010255f75c7ae7d242267800a1143b"
+origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256:1de5527dab646415b0c2d8c5ebd4fcaf07010255f75c7ae7d242267800a1143b"
+revision = "1de5527dab646415b0c2d8c5ebd4fcaf07010255f75c7ae7d242267800a1143b"
+sha256 = "1de5527dab646415b0c2d8c5ebd4fcaf07010255f75c7ae7d242267800a1143b"
+size = 93

@@ -1,0 +1,1173 @@
+#!/usr/bin/env python3
+"""Offline verifier for the pinned kernel candidate source bundle."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import tomllib
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
+
+
+HEX40 = re.compile(r"[0-9a-f]{40}\Z")
+HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+NAME = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
+RELEASE = re.compile(r"cachyos-[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\Z")
+FLOATING_PARTS = {"latest", "main", "master", "head", "heads", "trunk"}
+SINGLETON_KINDS = {
+    "kernel-source",
+    "kernel-signature",
+    "source-commit",
+    "release-tag",
+    "signer-key",
+    "packaging",
+    "packaging-commit",
+    "kernel-config",
+    "build-environment",
+    "build-wrapper",
+    "makepkg-config",
+    "toolchain-image",
+}
+KINDS = SINGLETON_KINDS | {"patch", "toolchain-blob"}
+TOP_LEVEL = {
+    "format",
+    "candidate",
+    "release_tag",
+    "source_commit",
+    "source_tree",
+    "tag_object",
+    "tag_signer_fingerprint",
+    "packaging_commit",
+    "packaging_tree",
+    "source_date_epoch",
+    "signature_verification_epoch",
+    "cpu_target",
+    "toolchain_image_digest",
+    "patches",
+    "inputs",
+}
+INPUT_FIELDS = {"name", "kind", "path", "origin", "revision", "sha256", "size"}
+OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+class VerificationError(Exception):
+    pass
+
+
+def fail(message: str) -> None:
+    raise VerificationError(message)
+
+
+def exact_keys(value: dict, expected: set[str], context: str) -> None:
+    extra = set(value) - expected
+    missing = expected - set(value)
+    if missing:
+        fail(f"{context}: missing field(s): {', '.join(sorted(missing))}")
+    if extra:
+        fail(f"{context}: unrecorded field(s): {', '.join(sorted(extra))}")
+
+
+def require_string(value: object, context: str) -> str:
+    if not isinstance(value, str) or not value:
+        fail(f"{context}: expected a non-empty string")
+    return value
+
+
+def require_hash(value: object, pattern: re.Pattern[str], context: str) -> str:
+    text = require_string(value, context)
+    if not pattern.fullmatch(text):
+        fail(f"{context}: expected a lowercase full-length hash")
+    return text
+
+
+def require_oci_digest(value: object, context: str) -> str:
+    text = require_string(value, context)
+    if not text.startswith("sha256:"):
+        fail(f"{context}: expected a sha256 OCI digest")
+    return require_hash(text.removeprefix("sha256:"), HEX64, context)
+
+
+def safe_relative_path(value: object, context: str) -> PurePosixPath:
+    text = require_string(value, context)
+    path = PurePosixPath(text)
+    if path.is_absolute() or path.as_posix() != text or any(part in {"", ".", ".."} for part in path.parts):
+        fail(f"{context}: expected a normalized relative path")
+    return path
+
+
+def read_regular(path: Path, context: str):
+    try:
+        fd = os.open(path, OPEN_FLAGS)
+    except OSError as error:
+        fail(f"{context}: cannot open regular file: {error.strerror}")
+    stream = os.fdopen(fd, "rb")
+    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        stream.close()
+        fail(f"{context}: is not a regular file")
+    return stream
+
+
+def load_toml(stream, context: str) -> dict:
+    try:
+        value = tomllib.load(stream)
+    except tomllib.TOMLDecodeError as error:
+        fail(f"{context}: invalid TOML: {error}")
+    if not isinstance(value, dict):
+        fail(f"{context}: expected a TOML table")
+    return value
+
+
+def load_json(stream, context: str) -> tuple[dict, bytes]:
+    content = stream.read()
+    try:
+        value = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"{context}: invalid JSON: {error}")
+    if not isinstance(value, dict):
+        fail(f"{context}: expected a JSON object")
+    return value, content
+
+
+def load_manifest(path: Path) -> dict:
+    with read_regular(path, "source lock") as stream:
+        value = load_toml(stream, "source lock")
+    exact_keys(value, TOP_LEVEL, "source lock")
+    return value
+
+
+def validate_origin(origin: object, revision: str, sha256: str, release_tag: str, context: str) -> None:
+    value = require_string(origin, context)
+    if value.startswith("repository:"):
+        safe_relative_path(value.removeprefix("repository:"), context)
+        if revision != sha256:
+            fail(f"{context}: repository input revision must equal its SHA-256")
+        return
+    if value.startswith("oci://"):
+        if f"@sha256:{revision}" not in value or any(part in value.lower() for part in (":latest", "/latest")):
+            fail(f"{context}: OCI origin must be pinned by its manifest digest")
+        return
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        fail(f"{context}: origin must be an unauthenticated HTTPS, repository, or OCI origin")
+    if parsed.query or parsed.fragment:
+        fail(f"{context}: origin must not contain a query or fragment")
+    parts = {part.lower() for part in PurePosixPath(parsed.path).parts}
+    if parts & FLOATING_PARTS:
+        fail(f"{context}: floating origin is forbidden")
+    if revision != sha256 and revision not in value and release_tag not in value:
+        fail(f"{context}: origin does not contain its immutable revision")
+
+
+def validate_manifest(lock: dict) -> list[dict]:
+    if type(lock["format"]) is not int or lock["format"] != 1:
+        fail("source lock.format: only format 1 is supported")
+    require_string(lock["candidate"], "source lock.candidate")
+    release_tag = require_string(lock["release_tag"], "source lock.release_tag")
+    if not RELEASE.fullmatch(release_tag):
+        fail("source lock.release_tag: expected an exact CachyOS release tag")
+    source_commit = require_hash(lock["source_commit"], HEX40, "source lock.source_commit")
+    require_hash(lock["source_tree"], HEX40, "source lock.source_tree")
+    tag_object = require_hash(lock["tag_object"], HEX40, "source lock.tag_object")
+    packaging_commit = require_hash(lock["packaging_commit"], HEX40, "source lock.packaging_commit")
+    require_hash(lock["packaging_tree"], HEX40, "source lock.packaging_tree")
+    image_digest = require_hash(lock["toolchain_image_digest"], HEX64, "source lock.toolchain_image_digest")
+    fingerprint = require_string(lock["tag_signer_fingerprint"], "source lock.tag_signer_fingerprint")
+    if not re.fullmatch(r"[0-9A-F]{40}", fingerprint):
+        fail("source lock.tag_signer_fingerprint: expected a full uppercase fingerprint")
+    if type(lock["source_date_epoch"]) is not int or lock["source_date_epoch"] <= 0:
+        fail("source lock.source_date_epoch: expected a positive integer")
+    verification_epoch = lock["signature_verification_epoch"]
+    if type(verification_epoch) is not int or verification_epoch < lock["source_date_epoch"]:
+        fail(
+            "source lock.signature_verification_epoch: expected an integer at or after source_date_epoch"
+        )
+    cpu_target = require_string(lock["cpu_target"], "source lock.cpu_target")
+    if cpu_target != "x86-64-v4":
+        fail("source lock.cpu_target: stage 0 requires x86-64-v4")
+    patches = lock["patches"]
+    if not isinstance(patches, list) or any(not isinstance(item, str) for item in patches):
+        fail("source lock.patches: expected an explicit string array")
+    if patches:
+        fail("source lock.patches: stage 0 requires an empty patch set")
+
+    inputs = lock["inputs"]
+    if not isinstance(inputs, list) or not inputs:
+        fail("source lock.inputs: expected at least one input")
+    names: set[str] = set()
+    paths: set[str] = set()
+    patch_names: set[str] = set()
+    kind_counts = {kind: 0 for kind in SINGLETON_KINDS}
+    expected_revision = {
+        "kernel-source": source_commit,
+        "kernel-signature": source_commit,
+        "source-commit": source_commit,
+        "release-tag": tag_object,
+        "packaging": packaging_commit,
+        "packaging-commit": packaging_commit,
+        "kernel-config": packaging_commit,
+        "toolchain-image": image_digest,
+    }
+    for index, item in enumerate(inputs):
+        context = f"source lock.inputs[{index}]"
+        if not isinstance(item, dict):
+            fail(f"{context}: expected a table")
+        exact_keys(item, INPUT_FIELDS, context)
+        name = require_string(item["name"], f"{context}.name")
+        if not NAME.fullmatch(name) or name in names:
+            fail(f"{context}.name: expected a unique stable identifier")
+        names.add(name)
+        path = safe_relative_path(item["path"], f"{context}.path").as_posix()
+        if path in paths:
+            fail(f"{context}.path: duplicate path")
+        paths.add(path)
+        kind = require_string(item["kind"], f"{context}.kind")
+        if kind not in KINDS:
+            fail(f"{context}.kind: unsupported input kind")
+        if kind in kind_counts:
+            kind_counts[kind] += 1
+        if kind == "patch":
+            patch_names.add(name)
+        sha256 = require_hash(item["sha256"], HEX64, f"{context}.sha256")
+        revision = require_string(item["revision"], f"{context}.revision")
+        required_revision = expected_revision.get(kind, sha256)
+        if revision != required_revision:
+            fail(f"{context}.revision: does not match the identity required for kind {kind}")
+        validate_origin(item["origin"], revision, sha256, release_tag, f"{context}.origin")
+        if type(item["size"]) is not int or item["size"] < 0:
+            fail(f"{context}.size: expected a non-negative integer")
+    invalid_counts = [f"{kind}={count}" for kind, count in kind_counts.items() if count != 1]
+    if invalid_counts:
+        fail(f"source lock.inputs: singleton kind count must be one: {', '.join(sorted(invalid_counts))}")
+    if patches != sorted(set(patches)) or set(patches) != patch_names:
+        fail("source lock.patches: must exactly list sorted patch input names")
+    return inputs
+
+
+class Bundle:
+    """Directory-FD-bound bundle traversal that never follows symlinks."""
+
+    def __init__(self, root: Path):
+        try:
+            self.root_fd = os.open(root, OPEN_FLAGS | os.O_DIRECTORY)
+        except OSError as error:
+            fail(f"input directory: cannot open non-symlink directory: {error.strerror}")
+        self.identities: dict[str, tuple[int, int]] = {}
+        self.directories: set[str] = set()
+        self.writable_paths: set[str] = set()
+        self.verified: dict[str, tuple[int, tuple[int, int]]] = {}
+
+    def close(self) -> None:
+        for descriptor, _identity in self.verified.values():
+            os.close(descriptor)
+        os.close(self.root_fd)
+
+    def discover(self) -> set[str]:
+        self.identities.clear()
+        self.directories.clear()
+        self.writable_paths.clear()
+        if os.fstat(self.root_fd).st_mode & 0o222:
+            self.writable_paths.add(".")
+        seen_identities: dict[tuple[int, int], str] = {}
+
+        def walk(directory_fd: int, prefix: PurePosixPath) -> None:
+            try:
+                names = os.listdir(directory_fd)
+            except OSError as error:
+                fail(f"input directory: cannot list {prefix}: {error.strerror}")
+            for name in names:
+                relative = prefix / name
+                try:
+                    metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                except OSError as error:
+                    fail(f"input directory: cannot inspect {relative}: {error.strerror}")
+                if stat.S_ISLNK(metadata.st_mode):
+                    fail(f"input directory: symlinked input is forbidden: {relative}")
+                if stat.S_ISDIR(metadata.st_mode):
+                    self.directories.add(relative.as_posix())
+                    if metadata.st_mode & 0o222:
+                        self.writable_paths.add(relative.as_posix())
+                    try:
+                        child_fd = os.open(name, OPEN_FLAGS | os.O_DIRECTORY, dir_fd=directory_fd)
+                    except OSError as error:
+                        fail(f"input directory: cannot open directory {relative}: {error.strerror}")
+                    try:
+                        walk(child_fd, relative)
+                    finally:
+                        os.close(child_fd)
+                elif stat.S_ISREG(metadata.st_mode):
+                    if metadata.st_mode & 0o222:
+                        self.writable_paths.add(relative.as_posix())
+                    if metadata.st_nlink != 1:
+                        fail(f"input directory: hard-linked input is forbidden: {relative}")
+                    identity = (metadata.st_dev, metadata.st_ino)
+                    if previous := seen_identities.get(identity):
+                        fail(f"input directory: hard-linked inputs are forbidden: {previous}, {relative}")
+                    seen_identities[identity] = relative.as_posix()
+                    self.identities[relative.as_posix()] = identity
+                else:
+                    fail(f"input directory: special file is forbidden: {relative}")
+
+        walk(self.root_fd, PurePosixPath())
+        return set(self.identities)
+
+    def open_regular(self, relative: str, context: str):
+        if relative in self.verified:
+            descriptor, identity = self.verified[relative]
+            metadata = os.fstat(descriptor)
+            if (metadata.st_dev, metadata.st_ino) != identity:
+                fail(f"{context}: verified input identity changed")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            return os.fdopen(os.dup(descriptor), "rb")
+        parts = PurePosixPath(relative).parts
+        directory_fd = os.dup(self.root_fd)
+        try:
+            for part in parts[:-1]:
+                next_fd = os.open(part, OPEN_FLAGS | os.O_DIRECTORY, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = next_fd
+            fd = os.open(parts[-1], OPEN_FLAGS, dir_fd=directory_fd)
+        except OSError as error:
+            fail(f"{context}: cannot open without following symlinks: {error.strerror}")
+        finally:
+            os.close(directory_fd)
+        stream = os.fdopen(fd, "rb")
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
+            stream.close()
+            fail(f"{context}: is not a regular file")
+        if self.identities.get(relative) != (metadata.st_dev, metadata.st_ino):
+            stream.close()
+            fail(f"{context}: changed during verification")
+        return stream
+
+    def pin(self, relative: str, stream) -> None:
+        metadata = os.fstat(stream.fileno())
+        self.verified[relative] = (
+            os.dup(stream.fileno()),
+            (metadata.st_dev, metadata.st_ino),
+        )
+
+
+def by_kind(inputs: list[dict], kind: str) -> dict:
+    return next(item for item in inputs if item["kind"] == kind)
+
+
+def expected_directory_paths(inputs: list[dict]) -> set[str]:
+    return {
+        parent.as_posix()
+        for item in inputs
+        for parent in PurePosixPath(item["path"]).parents
+        if parent.as_posix() != "."
+    }
+
+
+def verify_hashes(bundle: Bundle, inputs: list[dict]) -> None:
+    expected = {item["path"] for item in inputs}
+    expected_directories = expected_directory_paths(inputs)
+    actual = bundle.discover()
+    if missing := expected - actual:
+        fail(f"input directory: missing input(s): {', '.join(sorted(missing))}")
+    if extra := actual - expected:
+        fail(f"input directory: unrecorded input(s): {', '.join(sorted(extra))}")
+    if extra_directories := bundle.directories - expected_directories:
+        fail(
+            "input directory: unrecorded directory/directories: "
+            + ", ".join(sorted(extra_directories))
+        )
+    if missing_directories := expected_directories - bundle.directories:
+        fail(
+            "input directory: missing directory/directories: "
+            + ", ".join(sorted(missing_directories))
+        )
+    for item in inputs:
+        digest = hashlib.sha256()
+        size = 0
+        with bundle.open_regular(item["path"], f"input {item['name']}") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+            if item["path"] not in bundle.verified:
+                bundle.pin(item["path"], stream)
+        if size != item["size"]:
+            fail(f"input {item['name']}: size changed")
+        if digest.hexdigest() != item["sha256"]:
+            fail(f"input {item['name']}: SHA-256 changed")
+
+
+def verify_pinned_inputs(bundle: Bundle, inputs: list[dict]) -> None:
+    current = bundle.discover()
+    expected = {item["path"] for item in inputs}
+    expected_directories = expected_directory_paths(inputs)
+    if current != expected or bundle.directories != expected_directories:
+        fail("input directory: contents changed during verification")
+    for item in inputs:
+        pinned_identity = bundle.verified[item["path"]][1]
+        if bundle.identities[item["path"]] != pinned_identity:
+            fail(f"input {item['name']}: path identity changed during verification")
+        digest = hashlib.sha256()
+        size = 0
+        with bundle.open_regular(item["path"], f"input {item['name']}") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+        if size != item["size"] or digest.hexdigest() != item["sha256"]:
+            fail(f"input {item['name']}: changed during verification")
+    final = bundle.discover()
+    if final != expected or bundle.directories != expected_directories:
+        fail("input directory: contents changed during final verification")
+    for item in inputs:
+        if bundle.identities[item["path"]] != bundle.verified[item["path"]][1]:
+            fail(f"input {item['name']}: path identity changed during final verification")
+    if bundle.writable_paths:
+        fail(
+            "input directory: verified bundle must be read-only: "
+            + ", ".join(sorted(bundle.writable_paths))
+        )
+
+
+def verify_detached_signature(
+    source,
+    signature,
+    keyring,
+    fingerprint: str,
+    verification_epoch: int,
+    context: str,
+) -> int:
+    verifier = "/usr/bin/gpg"
+    if not Path(verifier).is_file():
+        fail(f"{context}: gpg is required for deterministic offline verification")
+    streams = [source, signature, keyring]
+    try:
+        descriptors = [stream.fileno() for stream in streams]
+        with tempfile.TemporaryDirectory(prefix="source-lock-gnupg-") as home:
+            common = [
+                verifier,
+                "--no-options",
+                "--batch",
+                "--no-tty",
+                "--homedir",
+                home,
+                "--status-fd=1",
+                "--no-auto-key-locate",
+                "--no-auto-key-retrieve",
+                "--no-auto-check-trustdb",
+                "--faked-system-time",
+                f"{verification_epoch}!",
+            ]
+            environment = {
+                "HOME": "/nonexistent",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin",
+            }
+            imported = subprocess.run(
+                [
+                    *common,
+                    "--import-options",
+                    "import-minimal",
+                    "--import",
+                    f"/proc/self/fd/{descriptors[2]}",
+                ],
+                pass_fds=[descriptors[2]],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+            )
+            if imported.returncode != 0:
+                detail = (
+                    imported.stderr.strip().splitlines()[-1]
+                    if imported.stderr.strip()
+                    else "no diagnostic"
+                )
+                fail(f"{context}: gpg key import exited {imported.returncode}: {detail}")
+            result = subprocess.run(
+                [
+                    *common,
+                    "--verify",
+                    f"/proc/self/fd/{descriptors[1]}",
+                    f"/proc/self/fd/{descriptors[0]}",
+                ],
+                pass_fds=descriptors[:2],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+            )
+    finally:
+        for stream in streams:
+            stream.close()
+    status_lines = result.stdout.splitlines()
+    rejected_statuses = {
+        "BADSIG",
+        "ERRSIG",
+        "EXPKEYSIG",
+        "EXPSIG",
+        "KEYEXPIRED",
+        "KEYREVOKED",
+        "NODATA",
+        "NO_PUBKEY",
+        "REVKEYSIG",
+        "SIGEXPIRED",
+    }
+    rejected = []
+    for line in status_lines:
+        parts = line.split(maxsplit=2)
+        if len(parts) >= 2 and parts[0] == "[GNUPG:]" and parts[1] in rejected_statuses:
+            rejected.append(line)
+    valid_lines = [
+        line.split()
+        for line in status_lines
+        if line.startswith(f"[GNUPG:] VALIDSIG {fingerprint} ")
+    ]
+    if result.returncode != 0:
+        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "no diagnostic"
+        fail(f"{context}: gpg exited {result.returncode}: {detail}")
+    if rejected:
+        fail(f"{context}: gpg reported a rejected signature or key status")
+    if len(valid_lines) != 1:
+        fail(f"{context}: gpg did not uniquely validate the pinned fingerprint")
+    try:
+        signature_epoch = int(valid_lines[0][4])
+    except (IndexError, ValueError):
+        fail(f"{context}: gpg returned a malformed authenticated signature time")
+    if signature_epoch <= 0 or signature_epoch > verification_epoch:
+        fail(f"{context}: authenticated signature time is outside the locked verification epoch")
+    return signature_epoch
+
+
+def verify_signatures(bundle: Bundle, lock: dict, inputs: list[dict]) -> list[int]:
+    fingerprint = lock["tag_signer_fingerprint"]
+    signature_epochs = [verify_detached_signature(
+        bundle.open_regular(by_kind(inputs, "kernel-source")["path"], "kernel source"),
+        bundle.open_regular(by_kind(inputs, "kernel-signature")["path"], "kernel signature"),
+        bundle.open_regular(by_kind(inputs, "signer-key")["path"], "signer key"),
+        fingerprint,
+        lock["signature_verification_epoch"],
+        "source signature",
+    )]
+
+    tag_input = by_kind(inputs, "release-tag")
+    with bundle.open_regular(tag_input["path"], "release tag") as stream:
+        tag = stream.read()
+    object_id = hashlib.sha1(b"tag " + str(len(tag)).encode() + b"\0" + tag).hexdigest()
+    if object_id != lock["tag_object"]:
+        fail("release tag: Git object identity does not match source lock")
+    signature_marker = b"-----BEGIN PGP SIGNATURE-----\n"
+    marker_at = tag.find(signature_marker)
+    if marker_at < 0:
+        fail("release tag: missing embedded signature")
+    headers = tag[:marker_at].splitlines()
+    required_headers = [
+        f"object {lock['source_commit']}".encode(),
+        b"type commit",
+        f"tag {lock['release_tag']}".encode(),
+    ]
+    if headers[:3] != required_headers:
+        fail("release tag: tag name, object type, or target commit does not match source lock")
+    memory_streams = []
+    try:
+        for name, content in (("tag-payload", tag[:marker_at]), ("tag-signature", tag[marker_at:])):
+            descriptor = os.memfd_create(name, getattr(os, "MFD_CLOEXEC", 0))
+            os.write(descriptor, content)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            memory_streams.append(os.fdopen(descriptor, "rb"))
+        signature_epochs.append(verify_detached_signature(
+            memory_streams[0],
+            memory_streams[1],
+            bundle.open_regular(by_kind(inputs, "signer-key")["path"], "signer key"),
+            fingerprint,
+            lock["signature_verification_epoch"],
+            "release tag signature",
+        ))
+    except OSError as error:
+        for stream in memory_streams:
+            stream.close()
+        fail(f"release tag: cannot prepare offline signature verification: {error.strerror}")
+    return signature_epochs
+
+
+def verify_commit_object(
+    bundle: Bundle,
+    item: dict,
+    expected_commit: str,
+    expected_tree: str,
+    signer_key: dict,
+    fingerprint: str,
+    verification_epoch: int,
+    context: str,
+) -> tuple[int, int]:
+    with bundle.open_regular(item["path"], context) as stream:
+        commit = stream.read()
+    object_id = hashlib.sha1(b"commit " + str(len(commit)).encode() + b"\0" + commit).hexdigest()
+    if object_id != expected_commit:
+        fail(f"{context}: Git object identity does not match source lock")
+
+    separator = commit.find(b"\n\n")
+    if separator < 0:
+        fail(f"{context}: malformed Git commit object")
+    header_lines = commit[:separator].split(b"\n")
+    if not header_lines or header_lines[0] != f"tree {expected_tree}".encode():
+        fail(f"{context}: tree does not match source lock")
+    committer_lines = [line for line in header_lines if line.startswith(b"committer ")]
+    if len(committer_lines) != 1:
+        fail(f"{context}: expected exactly one committer header")
+    timestamp_match = re.search(rb" ([0-9]+) [+-][0-9]{4}\Z", committer_lines[0])
+    if timestamp_match is None:
+        fail(f"{context}: malformed committer timestamp")
+    committer_timestamp = int(timestamp_match.group(1))
+
+    signature_start = next(
+        (index for index, line in enumerate(header_lines) if line.startswith(b"gpgsig ")),
+        None,
+    )
+    if signature_start is None:
+        fail(f"{context}: missing embedded signature")
+    signature_end = signature_start + 1
+    while signature_end < len(header_lines) and header_lines[signature_end].startswith(b" "):
+        signature_end += 1
+    signature_lines = [header_lines[signature_start].removeprefix(b"gpgsig ")]
+    signature_lines.extend(line[1:] for line in header_lines[signature_start + 1:signature_end])
+    signature = b"\n".join(signature_lines) + b"\n"
+    signed_headers = header_lines[:signature_start] + header_lines[signature_end:]
+    signed_payload = b"\n".join(signed_headers) + commit[separator:]
+
+    memory_streams = []
+    try:
+        for name, content in (("commit-payload", signed_payload), ("commit-signature", signature)):
+            descriptor = os.memfd_create(name, getattr(os, "MFD_CLOEXEC", 0))
+            os.write(descriptor, content)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            memory_streams.append(os.fdopen(descriptor, "rb"))
+        signature_epoch = verify_detached_signature(
+            memory_streams[0],
+            memory_streams[1],
+            bundle.open_regular(signer_key["path"], "signer key"),
+            fingerprint,
+            verification_epoch,
+            f"{context} signature",
+        )
+    except OSError as error:
+        for stream in memory_streams:
+            stream.close()
+        fail(f"{context}: cannot prepare offline signature verification: {error.strerror}")
+    return committer_timestamp, signature_epoch
+
+
+def git_object_id(kind: bytes, content: bytes) -> bytes:
+    header = kind + b" " + str(len(content)).encode() + b"\0"
+    return hashlib.sha1(header + content).digest()
+
+
+def verify_archive_tree(
+    bundle: Bundle,
+    item: dict,
+    expected_root: str,
+    expected_tree: str,
+    context: str,
+) -> None:
+    tree: dict[bytes, object] = {}
+    with bundle.open_regular(item["path"], context) as archive_stream:
+        try:
+            with tarfile.open(fileobj=archive_stream, mode="r:gz") as archive:
+                for member in archive:
+                    path = PurePosixPath(member.name)
+                    if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+                        fail(f"{context}: archive contains an unsafe path")
+                    if path.parts[0] != expected_root:
+                        fail(f"{context}: archive root does not match its immutable identity")
+                    relative = path.parts[1:]
+                    if not relative or member.isdir():
+                        continue
+                    names = [os.fsencode(part) for part in relative]
+                    current = tree
+                    for name in names[:-1]:
+                        existing = current.setdefault(name, {})
+                        if not isinstance(existing, dict):
+                            fail(f"{context}: archive path collides with a file")
+                        current = existing
+                    name = names[-1]
+                    if name in current:
+                        fail(f"{context}: archive contains a duplicate path")
+                    if member.isfile():
+                        extracted = archive.extractfile(member)
+                        if extracted is None:
+                            fail(f"{context}: cannot read archive member")
+                        content = extracted.read()
+                        if len(content) != member.size:
+                            fail(f"{context}: archive member size changed while reading")
+                        mode = b"100755" if member.mode & 0o111 else b"100644"
+                    elif member.issym():
+                        content = os.fsencode(member.linkname)
+                        mode = b"120000"
+                    else:
+                        fail(f"{context}: archive contains an unsupported member type")
+                    current[name] = (mode, git_object_id(b"blob", content))
+        except tarfile.TarError as error:
+            fail(f"{context}: invalid commit-bound archive: {error}")
+
+    def hash_tree(entries: dict[bytes, object]) -> bytes:
+        content = bytearray()
+        ordered = sorted(
+            entries.items(),
+            key=lambda entry: entry[0] + (b"/" if isinstance(entry[1], dict) else b""),
+        )
+        for name, node in ordered:
+            if isinstance(node, dict):
+                mode = b"40000"
+                object_id = hash_tree(node)
+            else:
+                mode, object_id = node
+            content.extend(mode + b" " + name + b"\0" + object_id)
+        return git_object_id(b"tree", bytes(content))
+
+    actual_tree = hash_tree(tree).hex()
+    if actual_tree != expected_tree:
+        fail(f"{context}: expanded Git tree does not match the pinned commit tree")
+
+
+def verify_packaging_config(bundle: Bundle, inputs: list[dict], packaging_commit: str) -> None:
+    package = by_kind(inputs, "packaging")
+    config = by_kind(inputs, "kernel-config")
+    expected_member = f"linux-cachyos-{packaging_commit}/linux-cachyos/config"
+    with bundle.open_regular(package["path"], "packaging snapshot") as archive_stream:
+        try:
+            with tarfile.open(fileobj=archive_stream, mode="r:gz") as archive:
+                member = archive.getmember(expected_member)
+                if not member.isfile():
+                    fail("packaging snapshot: pinned kernel config is not a regular member")
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    fail("packaging snapshot: cannot read pinned kernel config")
+                archived_config = extracted.read()
+        except (KeyError, tarfile.TarError) as error:
+            fail(f"packaging snapshot: invalid commit-bound archive: {error}")
+    with bundle.open_regular(config["path"], "kernel config") as config_stream:
+        if config_stream.read() != archived_config:
+            fail("kernel config: does not match the pinned packaging snapshot")
+
+
+def verify_recipe_sources(bundle: Bundle, lock: dict, inputs: list[dict]) -> None:
+    package = by_kind(inputs, "packaging")
+    member_name = (
+        f"linux-cachyos-{lock['packaging_commit']}/linux-cachyos/PKGBUILD"
+    )
+    with bundle.open_regular(package["path"], "packaging snapshot") as archive_stream:
+        try:
+            with tarfile.open(fileobj=archive_stream, mode="r:gz") as archive:
+                member = archive.getmember(member_name)
+                if not member.isfile() or member.size > 1024 * 1024:
+                    fail("packaging recipe: expected a bounded regular PKGBUILD")
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    fail("packaging recipe: cannot read PKGBUILD")
+                recipe = extracted.read()
+        except (KeyError, tarfile.TarError) as error:
+            fail(f"packaging recipe: missing from commit-bound archive: {error}")
+
+    version = re.fullmatch(r"cachyos-([0-9]+\.[0-9]+)\.([0-9]+)-([0-9]+)", lock["release_tag"])
+    if version is None:
+        fail("packaging recipe: release tag cannot be mapped to recipe version")
+    major, minor, tag_release = (part.encode() for part in version.groups())
+    required_assignments = {
+        b"_major": major,
+        b"_minor": minor,
+        b"_tagrel": tag_release,
+    }
+    for name, expected in required_assignments.items():
+        values = re.findall(rb"(?m)^" + re.escape(name) + rb"=([^\r\n]+)$", recipe)
+        if values != [expected]:
+            fail(f"packaging recipe: {name.decode()} does not match release tag")
+    required_lines = {
+        b"_srcname=cachyos-${_major}.${_minor}-${_tagrel}",
+        b"arch=('x86_64')",
+    }
+    if any(recipe.count(line) != 1 for line in required_lines):
+        fail("packaging recipe: source name or architecture is not uniquely pinned")
+
+    source_block = re.compile(
+        rb"(?m)^source=\(\n"
+        rb"[ \t]+\"https://github\.com/CachyOS/linux/releases/download/\$\{_srcname\}/\$\{_srcname\}\.tar\.gz\"\{,\.asc\}\n"
+        rb"[ \t]+\"config\"\n"
+        rb"\)$"
+    )
+    if len(source_block.findall(recipe)) != 1:
+        fail("packaging recipe: base source set does not exactly map locked inputs")
+    key_block = re.search(rb"(?ms)^validpgpkeys=\((.*?)^\)$", recipe)
+    if key_block is None or lock["tag_signer_fingerprint"].encode() not in key_block.group(1):
+        fail("packaging recipe: source signature key does not include locked signer")
+
+    mutations = [
+        line.strip()
+        for line in recipe.splitlines()
+        if line.lstrip().startswith((b"source=", b"source+="))
+    ]
+    base_mutation = [b"source=("]
+    production_mutations = base_mutation + [
+        b'source+=("${_patchsource}/misc/dkms-clang.patch")',
+        b'source+=("git+https://github.com/cachyos/zfs.git#commit=c681af76c5a6a15caada25eb13090e41218c7831")',
+        b'source+=("https://download.nvidia.com/XFree86/${_nv_open_pkg%"-$_nv_ver"}/${_nv_open_pkg}.tar.xz"',
+        b'source+=("$_autofdo_profile_name")',
+        b"source+=(propeller_cc_profile.txt",
+        b'source+=("git+https://github.com/aravance/r8125.git")',
+        b'source+=("${_patchsource}/sched/0001-bore-cachy.patch");;&',
+        b'source+=("${_patchsource}/sched/0001-prjc-cachy.patch");;',
+        b'source+=("${_patchsource}/misc/0001-hardened.patch");;',
+        b'source+=("${_patchsource}/misc/0001-rt-i915.patch");;',
+    ]
+    if mutations not in (base_mutation, production_mutations):
+        fail("packaging recipe: source mutation program is not recognized for stage 0")
+    if mutations == production_mutations:
+        required_guards = [
+            b'_is_lto_kernel() {\n    [[ "$_use_llvm_lto" = "thin" || "$_use_llvm_lto" = "full"  || "$_use_llvm_lto" = "thin-dist" ]]\n    return $?\n}',
+            b'if _is_lto_kernel; then\n    makedepends+=(clang llvm lld)\n    source+=("${_patchsource}/misc/dkms-clang.patch")',
+            b'if [ "$_build_zfs" = "yes" ]; then\n    makedepends+=(git)\n    source+=("git+https://github.com/cachyos/zfs.git#commit=c681af76c5a6a15caada25eb13090e41218c7831")',
+            b'if [ "$_build_nvidia_open" = "yes" ]; then\n    source+=',
+            b'if [ "$_autofdo" = "yes" ] && [ -n "$_autofdo_profile_name" ]; then',
+            b'if [ "$_propeller" = "yes" ] && [ "$_propeller_profiles" = "yes" ]; then',
+            b'if [ "$_build_r8125" = "yes" ]; then\n    source+=',
+            b'case "$_cpusched" in\n    bore|rt-bore|hardened)',
+        ]
+        if any(fragment not in recipe for fragment in required_guards):
+            fail("packaging recipe: optional sources are not guarded by locked build options")
+
+
+def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> None:
+    environment_input = by_kind(inputs, "build-environment")
+    with bundle.open_regular(environment_input["path"], "build environment") as stream:
+        environment = load_toml(stream, "build environment")
+    environment_fields = {
+        "format", "candidate", "architecture", "cpu_target", "source_date_epoch", "clean_chroot",
+        "pkgbase", "cachy_config", "cpu_scheduler", "makenconfig", "makexconfig", "localmodcfg",
+        "use_current", "cc_harder", "performance_governor", "tcp_bbr3", "hz_ticks", "tickrate",
+        "preempt", "hugepage", "build_nvidia_open", "build_zfs", "build_r8125", "build_debug",
+        "autofdo", "propeller", "use_llvm_lto", "processor_opt", "sync_database",
+        "toolchain_image_digest", "makepkg_config", "build_inputs", "patches",
+        "build_wrapper",
+    }
+    exact_keys(environment, environment_fields, "build environment")
+    if type(environment["format"]) is not int or environment["format"] != 1 or environment["candidate"] != lock["candidate"]:
+        fail("build environment: format or candidate does not match source lock")
+    for field in ("architecture", "cpu_target", "pkgbase", "use_llvm_lto", "processor_opt", "makepkg_config"):
+        require_string(environment[field], f"build environment.{field}")
+    if (
+        environment["architecture"] != "x86_64"
+        or environment["processor_opt"] != "generic_v4"
+        or environment["pkgbase"] != "linux-cachyos-gcc"
+    ):
+        fail("build environment: stage 0 requires the pinned x86_64-v4 processor selection")
+    expected_options = {
+        "cachy_config": True,
+        "cpu_scheduler": "cachyos",
+        "makenconfig": False,
+        "makexconfig": False,
+        "localmodcfg": False,
+        "use_current": False,
+        "cc_harder": True,
+        "performance_governor": False,
+        "tcp_bbr3": False,
+        "hz_ticks": 1000,
+        "tickrate": "full",
+        "preempt": "full",
+        "hugepage": "always",
+        "build_zfs": False,
+        "build_r8125": False,
+        "build_debug": False,
+        "autofdo": False,
+        "propeller": False,
+    }
+    for field, expected in expected_options.items():
+        if type(environment[field]) is not type(expected) or environment[field] != expected:
+            fail(f"build environment.{field}: unexpected stage-0 PKGBUILD option")
+    for field in ("cpu_target", "source_date_epoch", "toolchain_image_digest", "patches"):
+        if environment[field] != lock[field]:
+            fail(f"build environment.{field}: does not match source lock")
+    if environment["clean_chroot"] is not True or environment["sync_database"] is not False:
+        fail("build environment: clean offline build settings are required")
+    if environment["build_nvidia_open"] is not False or environment["use_llvm_lto"] != "none":
+        fail("build environment: stage 0 must not select unrecorded NVIDIA or LLVM patch inputs")
+    if not isinstance(environment["build_inputs"], list) or any(
+        not isinstance(item, str) for item in environment["build_inputs"]
+    ):
+        fail("build environment.build_inputs: expected an explicit string array")
+    if environment["makepkg_config"] != by_kind(inputs, "makepkg-config")["path"]:
+        fail("build environment.makepkg_config: does not select the locked makepkg config")
+    if environment["build_wrapper"] != by_kind(inputs, "build-wrapper")["path"]:
+        fail("build environment.build_wrapper: does not select the locked build wrapper")
+    excluded = {
+        by_kind(inputs, kind)["name"]
+        for kind in (
+            "kernel-signature",
+            "source-commit",
+            "release-tag",
+            "signer-key",
+            "packaging-commit",
+            "build-environment",
+        )
+    }
+    expected_build_inputs = sorted(item["name"] for item in inputs if item["name"] not in excluded)
+    if environment["build_inputs"] != expected_build_inputs:
+        fail("build environment.build_inputs: does not exactly list selected build inputs")
+
+    wrapper_input = by_kind(inputs, "build-wrapper")
+    with bundle.open_regular(wrapper_input["path"], "build wrapper") as stream:
+        try:
+            wrapper = stream.read().decode("utf-8")
+        except UnicodeDecodeError:
+            fail("build wrapper: expected UTF-8 shell source")
+    exports = dict(re.findall(r"^\s*export ([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)$", wrapper, re.MULTILINE))
+    expected_exports = {
+        "SOURCE_DATE_EPOCH": str(lock["source_date_epoch"]),
+        "SRCDEST": "/work/source-cache",
+        "PKGDEST": "$SOURCE_LOCK_OUTPUT",
+        "_cachy_config": "yes",
+        "_cpusched": environment["cpu_scheduler"],
+        "_makenconfig": "no",
+        "_makexconfig": "no",
+        "_localmodcfg": "no",
+        "_use_current": "no",
+        "_cc_harder": "yes",
+        "_per_gov": "no",
+        "_tcp_bbr3": "no",
+        "_HZ_ticks": str(environment["hz_ticks"]),
+        "_tickrate": environment["tickrate"],
+        "_preempt": environment["preempt"],
+        "_hugepage": environment["hugepage"],
+        "_processor_opt": environment["processor_opt"],
+        "_use_llvm_lto": environment["use_llvm_lto"],
+        "_use_lto_suffix": "no",
+        "_use_gcc_suffix": "yes",
+        "_use_kcfi": "no",
+        "_build_zfs": "no",
+        "_build_nvidia_open": "no",
+        "_build_r8125": "no",
+        "_build_debug": "no",
+        "_autofdo": "no",
+        "_propeller": "no",
+    }
+    if exports != expected_exports:
+        fail("build wrapper: exported PKGBUILD variables do not exactly match build metadata")
+    expected_toolchain = (
+        "docker.io/cachyos/docker-makepkg-v4@sha256:"
+        + lock["toolchain_image_digest"]
+    )
+    required_fragments = {
+        f'toolchain_origin="{expected_toolchain}"': "does not record the locked toolchain origin",
+        f'toolchain="docker.io/library/source-lock@sha256:{lock["toolchain_image_digest"]}"': "does not execute the imported manifest digest",
+        f'packaging="{by_kind(inputs, "packaging")["path"]}"': "does not select the locked packaging snapshot",
+        "unset CI GITHUB_RUN_ID": "does not clear ambient CI controls",
+        'ln -s /bundle/cachyos-7.1.8-1.tar.gz "$package_root/source-cache/cachyos-7.1.8-1.tar.gz"': "does not stage the locked source archive",
+        'ln -s /bundle/config "$package_root/source-cache/config"': "does not stage the locked kernel config",
+        'exec makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --skippgpcheck --skipchecksums --noconfirm --cleanbuild "$@"': "makepkg invocation does not consume the locked configuration",
+        '--root "$work_root/podman-root"': "does not isolate Podman image storage",
+        '--runroot "$work_root/podman-runroot"': "does not isolate Podman runtime storage",
+        "--storage-driver=overlay": "does not select an explicit ephemeral storage driver",
+        'podman "${podman_storage[@]}" pull --quiet "oci:$image_layout:source-lock"': "does not import the verified offline OCI layout",
+        'podman "${podman_storage[@]}" run --rm --pull=never --network=none --read-only': "does not enforce an offline read-only container",
+        "--userns=keep-id:uid=1000,gid=1000": "does not map the pinned non-root toolchain user",
+        '--entrypoint /bundle/build-candidate': "does not re-enter the locked wrapper inside the container",
+    }
+    for fragment, message in required_fragments.items():
+        if fragment not in wrapper:
+            fail(f"build wrapper: {message}")
+
+    toolchain_input = by_kind(inputs, "toolchain-image")
+    with bundle.open_regular(toolchain_input["path"], "toolchain image manifest") as stream:
+        toolchain, raw_manifest = load_json(stream, "toolchain image manifest")
+    manifest_digest = hashlib.sha256(raw_manifest).hexdigest()
+    if manifest_digest != lock["toolchain_image_digest"]:
+        fail("toolchain image manifest: bytes do not match the pinned OCI manifest digest")
+    exact_keys(toolchain, {"schemaVersion", "mediaType", "config", "layers"}, "toolchain image manifest")
+    if type(toolchain["schemaVersion"]) is not int or toolchain["schemaVersion"] != 2:
+        fail("toolchain image manifest.schemaVersion: expected Docker schema 2")
+    if toolchain["mediaType"] != "application/vnd.docker.distribution.manifest.v2+json":
+        fail("toolchain image manifest.mediaType: unexpected manifest media type")
+    config = toolchain["config"]
+    if not isinstance(config, dict):
+        fail("toolchain image manifest.config: expected an object")
+    exact_keys(config, {"mediaType", "size", "digest"}, "toolchain image manifest.config")
+    if config["mediaType"] != "application/vnd.docker.container.image.v1+json":
+        fail("toolchain image manifest.config: unexpected config media type")
+    require_oci_digest(config["digest"], "toolchain image manifest.config.digest")
+    if type(config["size"]) is not int or config["size"] <= 0:
+        fail("toolchain image manifest.config.size: expected a positive integer")
+    if not isinstance(toolchain["layers"], list) or not toolchain["layers"]:
+        fail("toolchain image manifest.layers: expected a non-empty array")
+    seen_layers: set[str] = set()
+    descriptors = [config, *toolchain["layers"]]
+    for index, layer in enumerate(toolchain["layers"]):
+        if not isinstance(layer, dict):
+            fail(f"toolchain image manifest.layers[{index}]: expected an object")
+        context = f"toolchain image manifest.layers[{index}]"
+        exact_keys(layer, {"mediaType", "digest", "size"}, context)
+        if layer["mediaType"] != "application/vnd.docker.image.rootfs.diff.tar.gzip":
+            fail(f"{context}.mediaType: unexpected layer media type")
+        digest = require_oci_digest(layer["digest"], f"{context}.digest")
+        if digest in seen_layers or type(layer["size"]) is not int or layer["size"] <= 0:
+            fail(f"{context}: duplicate digest or invalid size")
+        seen_layers.add(digest)
+    blob_inputs = [item for item in inputs if item["kind"] == "toolchain-blob"]
+    expected_blobs = {
+        require_oci_digest(descriptor["digest"], "toolchain image blob digest"): descriptor["size"]
+        for descriptor in descriptors
+    }
+    actual_blobs = {item["sha256"]: item for item in blob_inputs}
+    if set(actual_blobs) != set(expected_blobs) or len(actual_blobs) != len(blob_inputs):
+        fail("toolchain image: blob inputs do not exactly match the manifest")
+    for digest, size in expected_blobs.items():
+        item = actual_blobs[digest]
+        if item["size"] != size or item["revision"] != digest:
+            fail("toolchain image: blob size or revision does not match the manifest")
+        if item["path"] != f"oci/blobs/sha256/{digest}":
+            fail("toolchain image: blob path is not an OCI-layout digest path")
+
+    config_digest = require_oci_digest(config["digest"], "toolchain image manifest.config.digest")
+    config_input = actual_blobs[config_digest]
+    with bundle.open_regular(config_input["path"], "toolchain image config") as stream:
+        image_config, _raw_config = load_json(stream, "toolchain image config")
+    if image_config.get("os") != "linux" or image_config.get("architecture") != "amd64":
+        fail("toolchain image config: stage 0 requires linux/amd64")
+
+
+def build_from_verified_snapshot(bundle: Bundle, inputs: list[dict], build_args: list[str]) -> int:
+    wrapper = by_kind(inputs, "build-wrapper")["path"]
+    with tempfile.TemporaryDirectory(prefix="source-lock-verified-") as temporary:
+        snapshot = Path(temporary) / "bundle"
+        snapshot.mkdir(mode=0o700)
+        directories: set[Path] = {snapshot}
+        for item in inputs:
+            target = snapshot.joinpath(*PurePosixPath(item["path"]).parts)
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directories.update([target.parent, *target.parent.parents])
+            with bundle.open_regular(item["path"], f"input {item['name']}") as source:
+                with target.open("xb") as destination:
+                    shutil.copyfileobj(source, destination, 1024 * 1024)
+            digest = hashlib.sha256()
+            size = 0
+            with target.open("rb") as snapshot_stream:
+                while chunk := snapshot_stream.read(1024 * 1024):
+                    digest.update(chunk)
+                    size += len(chunk)
+            if size != item["size"] or digest.hexdigest() != item["sha256"]:
+                fail(f"verified snapshot input {item['name']}: changed during handoff")
+            target.chmod(0o555 if item["path"] == wrapper else 0o444)
+        for directory in sorted(
+            (path for path in directories if path == snapshot or snapshot in path.parents),
+            key=lambda path: len(path.parts),
+            reverse=True,
+        ):
+            directory.chmod(0o555)
+
+        environment = {
+            "HOME": os.environ.get("HOME", "/nonexistent"),
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        }
+        for name in ("LC_ALL", "SOURCE_LOCK_OUTPUT", "TMPDIR", "XDG_RUNTIME_DIR"):
+            if value := os.environ.get(name):
+                environment[name] = value
+        config_home = Path(temporary) / "config"
+        config_home.mkdir(mode=0o700)
+        environment["XDG_CONFIG_HOME"] = str(config_home)
+        environment["SOURCE_LOCK_BUNDLE"] = str(snapshot)
+        command = ["/bin/bash", str(snapshot / wrapper), *build_args]
+        print(f"source lock verified: {len(inputs)} immutable inputs")
+        result = subprocess.run(command, env=environment, check=False)
+        return result.returncode
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lock", type=Path, default=Path("packaging/kernel/source-lock.toml"))
+    parser.add_argument("--inputs", type=Path, required=True)
+    parser.add_argument(
+        "--exec-verified",
+        action="store_true",
+        help="run the locked build wrapper from a verifier-owned immutable snapshot",
+    )
+    parser.add_argument("build_args", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    bundle = None
+    try:
+        if args.build_args and not args.exec_verified:
+            fail("build arguments require --exec-verified")
+        lock = load_manifest(args.lock)
+        inputs = validate_manifest(lock)
+        bundle = Bundle(args.inputs)
+        verify_hashes(bundle, inputs)
+        signature_epochs = verify_signatures(bundle, lock, inputs)
+        signer_key = by_kind(inputs, "signer-key")
+        _, source_commit_signature_epoch = verify_commit_object(
+            bundle,
+            by_kind(inputs, "source-commit"),
+            lock["source_commit"],
+            lock["source_tree"],
+            signer_key,
+            lock["tag_signer_fingerprint"],
+            lock["signature_verification_epoch"],
+            "source commit",
+        )
+        signature_epochs.append(source_commit_signature_epoch)
+        packaging_timestamp, packaging_commit_signature_epoch = verify_commit_object(
+            bundle,
+            by_kind(inputs, "packaging-commit"),
+            lock["packaging_commit"],
+            lock["packaging_tree"],
+            signer_key,
+            lock["tag_signer_fingerprint"],
+            lock["signature_verification_epoch"],
+            "packaging commit",
+        )
+        signature_epochs.append(packaging_commit_signature_epoch)
+        if max(signature_epochs) != lock["signature_verification_epoch"]:
+            fail(
+                "source lock.signature_verification_epoch: does not match latest authenticated signature time "
+                f"({max(signature_epochs)})"
+            )
+        if lock["source_date_epoch"] != packaging_timestamp:
+            fail("source lock.source_date_epoch: does not match signed packaging commit time")
+        verify_archive_tree(
+            bundle,
+            by_kind(inputs, "kernel-source"),
+            lock["release_tag"],
+            lock["source_tree"],
+            "kernel source",
+        )
+        verify_archive_tree(
+            bundle,
+            by_kind(inputs, "packaging"),
+            f"linux-cachyos-{lock['packaging_commit']}",
+            lock["packaging_tree"],
+            "packaging snapshot",
+        )
+        verify_packaging_config(bundle, inputs, lock["packaging_commit"])
+        verify_recipe_sources(bundle, lock, inputs)
+        verify_build_metadata(bundle, lock, inputs)
+        verify_pinned_inputs(bundle, inputs)
+        if args.exec_verified:
+            build_args = args.build_args[1:] if args.build_args[:1] == ["--"] else args.build_args
+            if build_args not in ([], ["--verifysource"]):
+                fail("verified build arguments: only --verifysource is allowed")
+            return build_from_verified_snapshot(bundle, inputs, build_args)
+        print(f"source lock verified: {len(inputs)} immutable inputs")
+    except VerificationError as error:
+        print(f"source lock verification failed: {error}", file=sys.stderr)
+        return 1
+    finally:
+        if bundle is not None:
+            bundle.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

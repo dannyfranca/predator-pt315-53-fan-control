@@ -1,0 +1,2 @@
+crates/fan-control-core/tests/fixtures/source-lock-gpg/*.commit -whitespace
+packaging/kernel/*.commit -whitespace
