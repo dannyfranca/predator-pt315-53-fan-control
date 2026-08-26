@@ -17,6 +17,12 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+Run the complete offline simulated-fault qualification gate without host hardware or services:
+
+```console
+cargo test -p fan-control-core --test simulated_fault_orderings
+```
+
 Status invocations do no hardware or service work and exit after reporting the
 current source role:
 
