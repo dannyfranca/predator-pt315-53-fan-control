@@ -17,6 +17,7 @@ mod diagnostics;
 mod envelope;
 mod evidence;
 mod external_power;
+mod matched_workload;
 mod nvidia_gpu;
 mod output;
 mod ownership;
@@ -90,6 +91,14 @@ pub use evidence::{
     parse_evidence_v1, parse_evidence_v2, write_evidence_atomically,
 };
 pub use external_power::observe_external_power;
+pub use matched_workload::{
+    AMBIENT_COMPARABILITY_MILLICELSIUS, CapturedMatchedWorkloadStartingConditions,
+    MINIMUM_MATCHED_WORKLOAD_SAMPLES, MatchedWorkloadClass, MatchedWorkloadEnvironment,
+    MatchedWorkloadFanRestoration, MatchedWorkloadObservation, MatchedWorkloadPlan,
+    MatchedWorkloadPlanError, MatchedWorkloadReport, MatchedWorkloadStartingConditions,
+    STARTING_TEMPERATURE_COMPARABILITY_MILLICELSIUS, THERMAL_COMPARISON_MARGIN_MILLICELSIUS,
+    THERMAL_SLOPE_LIMIT_MILLICELSIUS_PER_MINUTE, run_matched_custom_workload,
+};
 pub use nvidia_gpu::{
     NvidiaGpuSampleError, NvidiaGpuSelector, NvidiaGpuSelectorError, NvidiaGpuSelectorKind,
     NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, sample_nvidia_gpu,

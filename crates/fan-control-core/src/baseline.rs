@@ -588,6 +588,7 @@ where
         completed_at,
         starting_conditions_captured_at,
         workload_started_at,
+        baseline_binding_sha256: None,
         workload: workload_is_valid.then_some(workload),
         samples,
         commands: Vec::new(),
