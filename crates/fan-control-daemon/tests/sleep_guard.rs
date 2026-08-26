@@ -62,7 +62,34 @@ fn sleep_guard_confirms_auto_before_sleep_and_uses_a_fresh_process_after_resume(
         "/usr/bin/pt31553-fan-restore --restore-after-failed-sleep-guard"
     );
     assert_eq!(directives["Service"]["TimeoutStopSec"], "infinity");
-    assert!(!directives["Service"].contains_key("RuntimeDirectory"));
+    assert_eq!(
+        directives["Service"]["RuntimeDirectory"],
+        "pt31553-fan-control pt31553-fan-sleep-guard"
+    );
+    assert_eq!(directives["Service"]["RuntimeDirectoryMode"], "0700");
+    assert_eq!(directives["Service"]["RuntimeDirectoryPreserve"], "yes");
+    assert_eq!(directives["Service"]["UMask"], "0077");
+    assert_eq!(directives["Service"]["NoNewPrivileges"], "yes");
+    assert_eq!(directives["Service"]["CapabilityBoundingSet"], "");
+    assert_eq!(directives["Service"]["PrivateTmp"], "yes");
+    assert_eq!(directives["Service"]["PrivateDevices"], "yes");
+    assert_eq!(directives["Service"]["ProtectSystem"], "strict");
+    assert_eq!(directives["Service"]["ProtectHome"], "yes");
+    assert_eq!(directives["Service"]["ProtectHostname"], "yes");
+    assert_eq!(directives["Service"]["ProtectClock"], "yes");
+    assert_eq!(directives["Service"]["ProtectKernelLogs"], "yes");
+    assert_eq!(directives["Service"]["ProtectControlGroups"], "yes");
+    assert_eq!(directives["Service"]["ProtectKernelModules"], "yes");
+    assert_eq!(directives["Service"]["RestrictAddressFamilies"], "AF_UNIX");
+    assert_eq!(directives["Service"]["RestrictRealtime"], "yes");
+    assert_eq!(directives["Service"]["RestrictSUIDSGID"], "yes");
+    assert_eq!(directives["Service"]["LockPersonality"], "yes");
+    assert_eq!(directives["Service"]["MemoryDenyWriteExecute"], "yes");
+    assert_eq!(directives["Service"]["SystemCallArchitectures"], "native");
+    assert_eq!(
+        directives["Service"]["ReadWritePaths"],
+        "/sys/class/hwmon /run/pt31553-fan-control /run/pt31553-fan-sleep-guard"
+    );
 }
 
 #[test]
@@ -268,6 +295,17 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
     };
     let guard = UNIT
         .replace("Before=sleep.target", "")
+        .replace(
+            "RuntimeDirectory=pt31553-fan-control pt31553-fan-sleep-guard",
+            &format!("RuntimeDirectory={runtime_directory}"),
+        )
+        // The lifecycle probe uses host-visible /tmp files for synchronization and evidence.
+        // Production hardening remains covered by the separate unit-directive assertions.
+        .replace("PrivateTmp=yes", "PrivateTmp=no")
+        .replace(
+            "ReadWritePaths=/sys/class/hwmon /run/pt31553-fan-control /run/pt31553-fan-sleep-guard",
+            &format!("ReadWritePaths=/sys/class/hwmon /run/{runtime_directory} /tmp"),
+        )
         .replace(
             "ExecStart=/usr/bin/pt31553-fan-restore --prepare-sleep",
             &format!(

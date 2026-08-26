@@ -12,6 +12,7 @@ Type=notify
 NotifyAccess=main
 RuntimeDirectory=pt31553-fan-control
 RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 ExecStart=/usr/bin/pt31553-fand
 ExecStopPost=/usr/bin/pt31553-fan-restore --restore
 WatchdogSec=6s
@@ -38,3 +39,8 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 ReadWritePaths=/sys/class/hwmon /run/pt31553-fan-control
+
+[Install]
+WantedBy=multi-user.target
+# Enabling Custom control must also install the required guard on every system sleep path.
+Also=pt31553-fan-sleep-guard.service

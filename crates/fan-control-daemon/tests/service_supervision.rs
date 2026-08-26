@@ -14,6 +14,8 @@ use std::{
 use fan_control_core::{ServiceNotification, ServiceNotifier, SystemdNotifier};
 
 const UNIT: &str = include_str!("../../../systemd/pt31553-fand.service");
+const SLEEP_GUARD_UNIT: &str = include_str!("../../../systemd/pt31553-fan-sleep-guard.service");
+const INSTALL_PRESET: &str = include_str!("../../../systemd/90-pt31553-fan-control.preset");
 const PROBE_ROLE: &str = "PT31553_LIFECYCLE_PROBE_ROLE";
 const PROBE_BEHAVIOR: &str = "PT31553_LIFECYCLE_PROBE_BEHAVIOR";
 const PROBE_LOG: &str = "PT31553_LIFECYCLE_PROBE_LOG";
@@ -38,6 +40,7 @@ fn daemon_unit_encodes_the_watchdog_cleanup_and_bounded_crash_contract() {
         "pt31553-fan-control"
     );
     assert_eq!(directives["Service"]["RuntimeDirectoryMode"], "0700");
+    assert_eq!(directives["Service"]["RuntimeDirectoryPreserve"], "yes");
     assert_eq!(directives["Service"]["UMask"], "0077");
     assert_eq!(directives["Service"]["NoNewPrivileges"], "yes");
     assert_eq!(directives["Service"]["CapabilityBoundingSet"], "");
@@ -55,6 +58,101 @@ fn daemon_unit_encodes_the_watchdog_cleanup_and_bounded_crash_contract() {
         directives["Service"]["ExecStopPost"],
         "/usr/bin/pt31553-fan-restore --restore"
     );
+}
+
+#[test]
+fn installation_keeps_both_units_disabled_until_the_daemon_is_explicitly_enabled() {
+    let directives = parse_unit(UNIT);
+
+    assert_eq!(directives["Install"]["WantedBy"], "multi-user.target");
+    assert_eq!(
+        directives["Install"]["Also"],
+        "pt31553-fan-sleep-guard.service"
+    );
+    assert_eq!(
+        INSTALL_PRESET.lines().collect::<Vec<_>>(),
+        [
+            "disable pt31553-fand.service",
+            "disable pt31553-fan-sleep-guard.service",
+        ]
+    );
+    assert!(!INSTALL_PRESET.contains("enable "));
+    assert!(!INSTALL_PRESET.contains("start "));
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "pt31553-systemd-install-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let unit_directory = root.join("usr/lib/systemd/system");
+    let preset_directory = root.join("usr/lib/systemd/system-preset");
+    fs::create_dir_all(&unit_directory).unwrap();
+    fs::create_dir_all(&preset_directory).unwrap();
+    fs::write(unit_directory.join("pt31553-fand.service"), UNIT).unwrap();
+    fs::write(
+        unit_directory.join("pt31553-fan-sleep-guard.service"),
+        SLEEP_GUARD_UNIT,
+    )
+    .unwrap();
+    fs::write(
+        preset_directory.join("90-pt31553-fan-control.preset"),
+        INSTALL_PRESET,
+    )
+    .unwrap();
+
+    assert!(
+        Command::new("systemctl")
+            .arg(format!("--root={}", root.display()))
+            .arg("preset-all")
+            .status()
+            .unwrap()
+            .success()
+    );
+    for unit in ["pt31553-fand.service", "pt31553-fan-sleep-guard.service"] {
+        let output = Command::new("systemctl")
+            .arg(format!("--root={}", root.display()))
+            .args(["is-enabled", unit])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "disabled\n");
+    }
+    assert!(
+        !root
+            .join("etc/systemd/system/multi-user.target.wants/pt31553-fand.service")
+            .exists()
+    );
+    assert!(
+        !root
+            .join("etc/systemd/system/sleep.target.requires/pt31553-fan-sleep-guard.service")
+            .exists()
+    );
+
+    assert!(
+        Command::new("systemctl")
+            .arg(format!("--root={}", root.display()))
+            .args(["enable", "pt31553-fand.service"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        fs::symlink_metadata(
+            root.join("etc/systemd/system/multi-user.target.wants/pt31553-fand.service")
+        )
+        .unwrap()
+        .file_type()
+        .is_symlink()
+    );
+    assert!(
+        fs::symlink_metadata(
+            root.join("etc/systemd/system/sleep.target.requires/pt31553-fan-sleep-guard.service")
+        )
+        .unwrap()
+        .file_type()
+        .is_symlink()
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
