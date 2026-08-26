@@ -14,6 +14,7 @@ pub(crate) enum DaemonActiveState {
     Active,
     Inactive,
     Failed,
+    Transitioning,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -38,6 +39,7 @@ impl DaemonManager for SystemdDaemonManager {
             "active" => Ok(DaemonActiveState::Active),
             "inactive" => Ok(DaemonActiveState::Inactive),
             "failed" => Ok(DaemonActiveState::Failed),
+            "activating" | "deactivating" => Ok(DaemonActiveState::Transitioning),
             state => Err(io::Error::other(format!(
                 "{unit} has transitional or unsupported state {state:?}"
             ))),
@@ -100,7 +102,7 @@ pub(crate) fn restore_after_failed_guard(
     restore: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
     match fs::read(prepared_marker) {
-        Ok(content) if content == PREPARED_MARKER_CONTENT => Ok(()),
+        Ok(content) if content == PREPARED_MARKER_CONTENT => fs::remove_file(prepared_marker),
         Ok(_) => restore(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => restore(),
         Err(error) => {
@@ -128,7 +130,7 @@ pub(crate) fn resume_after_sleep(
                 "daemon faulted after sleep preparation; preserving fault latch",
             ));
         }
-        DaemonActiveState::Active => {
+        DaemonActiveState::Active | DaemonActiveState::Transitioning => {
             if manager.stop()? != PlannedStop::Clean {
                 return Err(io::Error::other(
                     "intervening daemon did not complete a clean stop",
@@ -441,6 +443,25 @@ mod tests {
         .unwrap();
 
         assert!(calls.borrow().is_empty());
+        assert!(!prepared_marker.exists());
+    }
+
+    #[test]
+    fn transitioning_daemon_is_serialized_through_stop_before_fresh_restart() {
+        let marker = marker_path("transitioning");
+        let prepared_marker = marker_path("transitioning-prepared");
+        let _cleanup = MarkerCleanup(marker.clone());
+        let _prepared_cleanup = MarkerCleanup(prepared_marker.clone());
+        let mut manager = FakeDaemonManager::active();
+        prepare_sleep(&mut manager, &marker, &prepared_marker, || Ok(())).unwrap();
+        manager.state = Some(Ok(DaemonActiveState::Transitioning));
+
+        resume_after_sleep(&mut manager, &marker).unwrap();
+
+        assert_eq!(
+            &*manager.calls.borrow(),
+            &["state", "stop", "state", "stop", "reset-failed", "restart"]
+        );
     }
 
     #[test]

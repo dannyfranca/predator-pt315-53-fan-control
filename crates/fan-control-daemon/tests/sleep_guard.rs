@@ -13,6 +13,8 @@ use fan_control_core::{ServiceNotification, ServiceNotifier, SystemdNotifier};
 
 const UNIT: &str = include_str!("../../../systemd/pt31553-fan-sleep-guard.service");
 const PROBE_LOG: &str = "PT31553_SLEEP_PROBE_LOG";
+const PROBE_READY_BLOCK: &str = "PT31553_SLEEP_PROBE_READY_BLOCK";
+const PROBE_READY_DELAY: &str = "PT31553_SLEEP_PROBE_READY_DELAY";
 const PROBE_ROLE: &str = "PT31553_SLEEP_PROBE_ROLE";
 const RUN_SYSTEMD_LIFECYCLE: &str = "PT31553_RUN_SYSTEMD_LIFECYCLE";
 const SLEEP_HELPER: &str = "PT31553_SLEEP_HELPER";
@@ -53,6 +55,7 @@ fn sleep_guard_confirms_auto_before_sleep_and_uses_a_fresh_process_after_resume(
         "pt31553-fan-sleep-guard"
     );
     assert_eq!(directives["Service"]["RuntimeDirectoryMode"], "0700");
+    assert_eq!(directives["Service"]["RuntimeDirectoryPreserve"], "yes");
 }
 
 #[test]
@@ -62,8 +65,9 @@ fn actual_systemd_manager_blocks_sleep_failure_and_restarts_fresh_after_resume()
         return;
     }
 
-    assert_actual_sleep_lifecycle(true);
-    assert_actual_sleep_lifecycle(false);
+    assert_actual_sleep_lifecycle(LifecycleCase::Success);
+    assert_actual_sleep_lifecycle(LifecycleCase::RestorationFailure);
+    assert_actual_sleep_lifecycle(LifecycleCase::ReadinessFailure);
 }
 
 #[test]
@@ -76,6 +80,13 @@ fn sleep_guard_command_probe() {
     match role.as_str() {
         "daemon-ready" => {
             append_probe_log(&log, &format!("{role}:{}", std::process::id()));
+            if probe_flag_exists(PROBE_READY_BLOCK) {
+                thread::sleep(Duration::from_secs(60));
+                return;
+            }
+            if probe_flag_exists(PROBE_READY_DELAY) {
+                thread::sleep(Duration::from_millis(500));
+            }
             let mut notifier = SystemdNotifier::from_environment().unwrap();
             notifier.notify(ServiceNotification::Ready).unwrap();
             thread::sleep(Duration::from_secs(60));
@@ -84,11 +95,27 @@ fn sleep_guard_command_probe() {
     }
 }
 
-fn assert_actual_sleep_lifecycle(restoration_succeeds: bool) {
+fn probe_flag_exists(variable: &str) -> bool {
+    std::env::var_os(variable).is_some_and(|path| Path::new(&path).is_file())
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LifecycleCase {
+    Success,
+    RestorationFailure,
+    ReadinessFailure,
+}
+
+fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
+    let restoration_succeeds = case != LifecycleCase::RestorationFailure;
     let suffix = format!(
         "{}-{}",
         std::process::id(),
-        if restoration_succeeds { "ok" } else { "fail" }
+        match case {
+            LifecycleCase::Success => "ok",
+            LifecycleCase::RestorationFailure => "restore-fail",
+            LifecycleCase::ReadinessFailure => "ready-fail",
+        }
     );
     let daemon_name = format!("pt31553-sleep-test-daemon-{suffix}.service");
     let guard_name = format!("pt31553-sleep-test-guard-{suffix}.service");
@@ -110,15 +137,23 @@ fn assert_actual_sleep_lifecycle(restoration_succeeds: bool) {
     fs::write(&log, "").unwrap();
     fs::set_permissions(&log, fs::Permissions::from_mode(0o666)).unwrap();
     installation.remove_after(&log);
+    let ready_delay = PathBuf::from("/tmp").join(format!("pt31553-sleep-test-{suffix}-delay"));
+    let ready_block = PathBuf::from("/tmp").join(format!("pt31553-sleep-test-{suffix}-block"));
+    installation.remove_after(&ready_delay);
+    installation.remove_after(&ready_block);
     let probe = |role: &str| {
         format!(
-            "/usr/bin/env {PROBE_ROLE}={role} {PROBE_LOG}={} {} --exact sleep_guard_command_probe --nocapture",
+            "/usr/bin/env {PROBE_ROLE}={role} {PROBE_LOG}={} {PROBE_READY_DELAY}={} {PROBE_READY_BLOCK}={} {} --exact sleep_guard_command_probe --nocapture",
             log.display(),
+            ready_delay.display(),
+            ready_block.display(),
             probe_path.display()
         )
     };
     let runtime_directory = format!("pt31553-sleep-test-{suffix}");
     let marker = format!("/run/{runtime_directory}/resume-daemon");
+    installation.remove_after(Path::new(&marker));
+    installation.remove_runtime_directory_after(Path::new("/run").join(&runtime_directory));
     let helper = |command: &str, recovery: Option<&str>, event: Option<&str>| {
         let recovery = recovery
             .map(|value| format!(" PT31553_TEST_RECOVERY={value}"))
@@ -207,6 +242,19 @@ fn assert_actual_sleep_lifecycle(restoration_succeeds: bool) {
 
     let target_start = systemctl_status(["start", &target_name]);
     assert!(target_start.success());
+
+    if case == LifecycleCase::ReadinessFailure {
+        fs::write(&ready_block, "block readiness").unwrap();
+        let _ = systemctl_status(["stop", &target_name]);
+        wait_for_state(&guard_name, "failed");
+        wait_for_state(&daemon_name, "failed");
+        assert!(
+            Path::new(&marker).is_file(),
+            "failed daemon readiness must preserve resume authorization for retry"
+        );
+        return;
+    }
+
     let mut daemon_pids = Vec::new();
     let mut intervening_pid = None;
     for cycle in 0..3 {
@@ -215,10 +263,16 @@ fn assert_actual_sleep_lifecycle(restoration_succeeds: bool) {
         assert_eq!(active_state(&daemon_name), "inactive");
 
         if cycle == 0 {
-            systemctl(["start", &daemon_name]);
+            fs::write(&ready_delay, "delay readiness").unwrap();
+            let mut intervening_start = systemctl_command(["start", &daemon_name]).spawn().unwrap();
+            wait_for_state(&daemon_name, "activating");
             intervening_pid = Some(unit_property(&daemon_name, "MainPID"));
+            fs::remove_file(&ready_delay).unwrap();
+            systemctl(["stop", &target_name]);
+            let _ = intervening_start.wait();
+        } else {
+            systemctl(["stop", &target_name]);
         }
-        systemctl(["stop", &target_name]);
         wait_for_state(&guard_name, "inactive");
         wait_for_state(&daemon_name, "active");
         daemon_pids.push(unit_property(&daemon_name, "MainPID"));
@@ -284,6 +338,7 @@ struct TestUnitInstallation {
     names: Vec<String>,
     sources: Vec<PathBuf>,
     installed_files: Vec<PathBuf>,
+    runtime_directories: Vec<PathBuf>,
 }
 
 impl TestUnitInstallation {
@@ -292,6 +347,7 @@ impl TestUnitInstallation {
             names: names.into_iter().collect(),
             sources: Vec::new(),
             installed_files: Vec::new(),
+            runtime_directories: Vec::new(),
         }
     }
 
@@ -326,6 +382,10 @@ impl TestUnitInstallation {
     fn remove_after(&mut self, path: &Path) {
         self.installed_files.push(path.to_owned());
     }
+
+    fn remove_runtime_directory_after(&mut self, path: PathBuf) {
+        self.runtime_directories.push(path);
+    }
 }
 
 impl Drop for TestUnitInstallation {
@@ -344,6 +404,12 @@ impl Drop for TestUnitInstallation {
         for path in &self.installed_files {
             let _ = Command::new("sudo")
                 .args(["--non-interactive", "/usr/bin/rm", "-f", "--"])
+                .arg(path)
+                .status();
+        }
+        for path in &self.runtime_directories {
+            let _ = Command::new("sudo")
+                .args(["--non-interactive", "/usr/bin/rmdir", "--"])
                 .arg(path)
                 .status();
         }
@@ -397,7 +463,7 @@ fn unit_property(name: &str, property: &str) -> String {
 }
 
 fn wait_for_state(name: &str, expected: &str) {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(6);
     loop {
         let observed = active_state(name);
         if observed == expected {
