@@ -329,7 +329,8 @@ fn assert_actual_sleep_lifecycle(case: LifecycleCase) {
         let mut target_start = systemctl_command(["start", &target_name]).spawn().unwrap();
         wait_for_log(&log, "guard-containment");
         assert!(target_start.try_wait().unwrap().is_none());
-        assert_eq!(active_state(&target_name), "activating");
+        // A target remains inactive while its required guard's start job is still running.
+        assert_eq!(active_state(&target_name), "inactive");
         assert_eq!(active_state(&guard_name), "activating");
         assert_eq!(active_state(&daemon_name), "inactive");
         systemctl(["stop", &target_name]);
