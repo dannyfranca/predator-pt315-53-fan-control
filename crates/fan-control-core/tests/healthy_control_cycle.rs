@@ -1830,11 +1830,88 @@ fn control_path_fault_classes_restore_auto_and_permanently_latch() {
                 .iter()
                 .all(|operation| !is_pwm_write(operation))
         );
+        let faulted_marker = ownership.platform().operations().len();
         assert!(matches!(
             control.step(&mut ownership),
             Err(TransientSensorControlError::Faulted)
         ));
+        assert!(
+            ownership.platform().operations()[faulted_marker..]
+                .iter()
+                .all(|operation| !is_pwm_write(operation))
+        );
         assert_eq!(script.borrow().rediscoveries, 0);
+
+        ownership.release().unwrap();
+    }
+}
+
+#[test]
+fn tachometer_faults_restore_auto_and_permanently_latch_runtime_control() {
+    for (interference, expected_fan) in [
+        (RuntimeInterference::CpuTachometerZero, Fan::Cpu),
+        (RuntimeInterference::GpuTachometerOutOfBand, Fan::Gpu),
+    ] {
+        let (platform, device) = fixture();
+        let injection = Rc::new(Cell::new(RuntimeInterference::None));
+        let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
+        let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+        let (authority, armed) = arm_with_authority(&mut ownership, &device);
+        let frame = Frame {
+            cpu: 60.0,
+            gpu: 55.0,
+            power: ExternalPower::Connected,
+        };
+        let (mut control, _) = recovery_control(armed, authority, vec![frame; 4]);
+        injection.set(interference);
+        for _ in 0..3 {
+            assert!(matches!(
+                control.step(&mut ownership).unwrap(),
+                SensorControlStep::Completed(_)
+            ));
+        }
+        let marker = ownership.platform().operations().len();
+
+        let Err(TransientSensorControlError::ControlLatched { fault }) =
+            control.step(&mut ownership)
+        else {
+            panic!("{interference:?} must permanently latch runtime control")
+        };
+        assert!(matches!(
+            fault,
+            HealthyControlCycleError::TachometerOutOfBand { fan, .. } if fan == expected_fan
+        ));
+        assert_eq!(control.state(), SensorControlState::Faulted);
+        assert_eq!(
+            ownership.platform().inner.file_contents(cpu_enable()),
+            Some("2")
+        );
+        assert_eq!(
+            ownership.platform().inner.file_contents(gpu_enable()),
+            Some("2")
+        );
+        let operations = &ownership.platform().operations()[marker..];
+        operations
+            .iter()
+            .position(|operation| {
+                matches!(
+                    operation,
+                    PlatformOperation::Write { path, contents }
+                        if (path == cpu_enable() || path == gpu_enable()) && contents == "2"
+                )
+            })
+            .expect("a tachometer latch must begin Firmware Auto restoration");
+        assert!(operations.iter().all(|operation| !is_pwm_write(operation)));
+        let faulted_marker = ownership.platform().operations().len();
+        assert!(matches!(
+            control.step(&mut ownership),
+            Err(TransientSensorControlError::Faulted)
+        ));
+        assert!(
+            ownership.platform().operations()[faulted_marker..]
+                .iter()
+                .all(|operation| !is_pwm_write(operation))
+        );
 
         ownership.release().unwrap();
     }
@@ -2345,6 +2422,71 @@ fn failed_rearming_restoration_retains_sensor_bindings() {
     ownership.restore_firmware_auto(&device).unwrap();
     drop(control);
     assert_eq!(*drop_observations.borrow(), vec![true]);
+    ownership.release().unwrap();
+}
+
+#[test]
+fn rejected_rearming_drops_sensor_bindings_and_permanently_latches() {
+    let (platform, device) = fixture();
+    let interference = Rc::new(Cell::new(RuntimeInterference::None));
+    let mut platform = InterferingPlatform::new(platform, Rc::clone(&interference));
+    let auto_confirmed = platform.firmware_auto_confirmation();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, armed) = arm_with_authority(&mut ownership, &device);
+    let frame = Frame {
+        cpu: 70.0,
+        gpu: 65.0,
+        power: ExternalPower::Connected,
+    };
+    let (mut control, script) = recovery_control(armed, authority, vec![frame, frame]);
+    script.borrow_mut().fail_cpu = true;
+    control.step(&mut ownership).unwrap();
+    script.borrow_mut().fail_cpu = false;
+    assert_eq!(
+        control.step(&mut ownership).unwrap(),
+        SensorControlStep::AwaitingSecondSample
+    );
+    let drop_observations = Rc::new(RefCell::new(Vec::new()));
+    script.borrow_mut().source_drop_probe =
+        Some((Rc::clone(&auto_confirmed), Rc::clone(&drop_observations)));
+    ownership.delay(Duration::from_secs(2));
+    auto_confirmed.set(false);
+    interference.set(RuntimeInterference::MakeEndpointWorldWritable);
+    let marker = ownership.platform().operations().len();
+
+    assert!(matches!(
+        control.step(&mut ownership),
+        Err(TransientSensorControlError::Rearming(
+            fan_control_core::FanArmingError::Rejected(
+                fan_control_core::FanArmingFailure::DeviceAbi(
+                    fan_control_core::AcerHwmonDiscoveryError::InvalidPermissions { path, .. }
+                )
+            )
+        )) if path == cpu_enable()
+    ));
+    assert_eq!(
+        interference.get(),
+        RuntimeInterference::None,
+        "the injected CPU-enable permission fault must be consumed"
+    );
+    assert_eq!(control.state(), SensorControlState::Faulted);
+    assert_eq!(*drop_observations.borrow(), vec![true]);
+    assert!(
+        ownership.platform().operations()[marker..]
+            .iter()
+            .all(|operation| !is_pwm_write(operation))
+    );
+    let faulted_marker = ownership.platform().operations().len();
+    assert!(matches!(
+        control.step(&mut ownership),
+        Err(TransientSensorControlError::Faulted)
+    ));
+    assert!(
+        ownership.platform().operations()[faulted_marker..]
+            .iter()
+            .all(|operation| !is_pwm_write(operation))
+    );
+
     ownership.release().unwrap();
 }
 
