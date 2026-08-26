@@ -230,8 +230,7 @@ pub(crate) fn resume_after_sleep(
     // process rather than accepting it as the fresh post-sleep controller.
     clear_marker(&start_gate)?;
     if let Err(error) = manager.restart_ready() {
-        fs::write(&start_gate, START_GATE_CONTENT)?;
-        return Err(error);
+        return contain_failed_resume(manager, &start_gate, &prepared_marker, error);
     }
     if let Err(error) = fs::remove_file(marker) {
         return contain_failed_resume(manager, &start_gate, &prepared_marker, error);
@@ -645,7 +644,8 @@ mod tests {
                 "reset-planned",
                 "state",
                 "invocation-id",
-                "restart"
+                "restart",
+                "stop"
             ]
         );
         let recovery_calls = Rc::new(RefCell::new(Vec::new()));
