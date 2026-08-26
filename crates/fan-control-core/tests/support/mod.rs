@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
 use fan_control_core::{
-    CompatibilityDeclarationV1, CompatibilityObservation, EvidenceCompleteness, FanWriteBackend,
-    ObservedFanAbi, ValidatedConfig, parse_compatibility_v1, parse_config_v1, validate_config_v1,
+    CompatibilityDeclarationV1, CompatibilityObservation, EvidenceCompleteness, EvidenceRecord,
+    EvidenceTimestamp, FanCalibrationEvidence, FanCommandEvidence, FanControlField,
+    FanWriteBackend, ObservedFanAbi, ValidatedConfig, parse_compatibility_v1, parse_config_v1,
+    validate_config_v1,
 };
 use sha2::{Digest, Sha256};
 
@@ -171,4 +173,52 @@ pub fn matching_record(policy: &str) -> String {
 
 pub fn sha256(source: &str) -> String {
     format!("{:x}", Sha256::digest(source.as_bytes()))
+}
+
+pub fn bind_record_to_calibration_protocol(
+    record: &mut EvidenceRecord,
+    calibration: &FanCalibrationEvidence,
+) {
+    let checkpoint =
+        serde_json::to_value(calibration.protocol_checkpoint.as_ref().unwrap()).unwrap();
+    let events = checkpoint["events"].as_array().unwrap();
+    let mut observed_times = Vec::new();
+    let mut commands = Vec::new();
+    for event in events {
+        let event = &event["observation"];
+        let observation = &event["observation"];
+        if let Some(commanded_at) = observation["commanded_at_monotonic_millis"].as_u64() {
+            observed_times.push(commanded_at);
+            commands.push(FanCommandEvidence {
+                timestamp: EvidenceTimestamp {
+                    monotonic_millis: commanded_at,
+                    wall_unix_millis: record.started_at.wall_unix_millis,
+                },
+                fan: calibration.fan,
+                field: FanControlField::Pwm,
+                value: event["step"]["pwm_value"].as_u64().unwrap() as u32,
+            });
+        }
+        observed_times.extend(
+            observation["samples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|sample| sample["monotonic_millis"].as_u64().unwrap()),
+        );
+    }
+    let first = *observed_times.iter().min().unwrap();
+    let last = *observed_times.iter().max().unwrap();
+    record.started_at.monotonic_millis = record.started_at.monotonic_millis.min(first);
+    record.completed_at.monotonic_millis = last + 3;
+    record.commands = commands;
+    for attempt in &mut record.restoration_attempts {
+        attempt.timestamp.monotonic_millis = last + 1;
+    }
+    record
+        .state_transitions
+        .last_mut()
+        .unwrap()
+        .timestamp
+        .monotonic_millis = last + 2;
 }

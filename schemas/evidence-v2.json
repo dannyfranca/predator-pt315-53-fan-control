@@ -64,6 +64,7 @@
     },
     "calibration": {
       "type": "array",
+      "maxItems": 1,
       "items": { "$ref": "#/$defs/calibration" }
     },
     "thermal_summary": {
@@ -75,6 +76,22 @@
     "outcome": { "$ref": "#/$defs/outcome" }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": { "stage": { "const": "fan-calibration" } },
+        "required": ["stage"]
+      },
+      "then": {
+        "properties": {
+          "calibration": { "minItems": 1, "maxItems": 1 },
+          "outcome": {
+            "properties": { "status": { "const": "passed" } },
+            "required": ["status"]
+          }
+        }
+      },
+      "else": { "properties": { "calibration": { "maxItems": 0 } } }
+    },
     {
       "if": {
         "properties": {
@@ -607,28 +624,229 @@
       },
       "required": ["fan", "enable_readback", "outcome"]
     },
+    "calibrationReadbackSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["monotonic_millis", "selected_enable_readback", "selected_pwm_readback", "other_enable_readback", "other_pwm_readback", "selected_rpm"],
+      "properties": {
+        "monotonic_millis": { "type": "integer", "minimum": 0 },
+        "selected_enable_readback": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "selected_pwm_readback": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "other_enable_readback": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "other_pwm_readback": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "selected_rpm": {
+          "anyOf": [
+            { "type": "integer", "minimum": 100, "maximum": 20000 },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "calibrationStep": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "pwm_value"],
+          "properties": {
+            "kind": { "const": "revalidate-both-at-maximum" },
+            "pwm_value": { "const": 255 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "duty_basis_points", "pwm_value"],
+          "properties": {
+            "kind": { "enum": ["sweep", "capture-anchor"] },
+            "duty_basis_points": { "$ref": "#/$defs/basisPoints" },
+            "pwm_value": { "type": "integer", "minimum": 0, "maximum": 255 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "attempt", "pwm_value"],
+          "properties": {
+            "kind": { "const": "transition-to-maximum" },
+            "attempt": { "type": "integer", "minimum": 1, "maximum": 5 },
+            "pwm_value": { "type": "integer", "minimum": 0, "maximum": 255 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "attempt", "duty_basis_points", "pwm_value"],
+          "properties": {
+            "kind": { "const": "transition-to-floor" },
+            "attempt": { "type": "integer", "minimum": 1, "maximum": 5 },
+            "duty_basis_points": { "$ref": "#/$defs/basisPoints" },
+            "pwm_value": { "type": "integer", "minimum": 0, "maximum": 255 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "duty_basis_points", "pwm_value", "required_duration_millis"],
+          "properties": {
+            "kind": { "const": "hold-floor" },
+            "duty_basis_points": { "$ref": "#/$defs/basisPoints" },
+            "pwm_value": { "type": "integer", "minimum": 0, "maximum": 255 },
+            "required_duration_millis": { "const": 900000 }
+          }
+        }
+      ]
+    },
+    "calibrationLevelObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commanded_at_monotonic_millis", "samples", "stall_observed", "unexplained_rpm_collapse_observed"],
+      "properties": {
+        "commanded_at_monotonic_millis": { "type": "integer", "minimum": 0 },
+        "samples": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/calibrationReadbackSample" } },
+        "stall_observed": { "type": "boolean" },
+        "unexplained_rpm_collapse_observed": { "type": "boolean" }
+      }
+    },
+    "calibrationHoldObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["samples", "stall_observed", "unexplained_rpm_collapse_observed"],
+      "properties": {
+        "samples": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/calibrationReadbackSample" } },
+        "stall_observed": { "type": "boolean" },
+        "unexplained_rpm_collapse_observed": { "type": "boolean" }
+      }
+    },
+    "calibrationCheckpointEvent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "observation"],
+          "properties": {
+            "kind": { "const": "level" },
+            "observation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["step", "observation"],
+              "properties": {
+                "step": { "$ref": "#/$defs/calibrationStep" },
+                "observation": { "$ref": "#/$defs/calibrationLevelObservation" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "observation"],
+          "properties": {
+            "kind": { "const": "hold" },
+            "observation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["step", "observation"],
+              "properties": {
+                "step": { "$ref": "#/$defs/calibrationStep" },
+                "observation": { "$ref": "#/$defs/calibrationHoldObservation" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "calibrationCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "fan", "failed", "events"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "fan": { "$ref": "#/$defs/fan" },
+        "failed": { "const": false },
+        "events": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/calibrationCheckpointEvent" } }
+      }
+    },
     "calibration": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["fan", "floor_basis_points", "response_deadline_millis", "anchors"],
+      "required": ["fan", "floor_basis_points", "slowest_response_millis", "protocol_checkpoint", "response_deadline_millis", "anchors"],
       "properties": {
         "fan": { "$ref": "#/$defs/fan" },
-        "floor_basis_points": { "$ref": "#/$defs/basisPoints" },
-        "response_deadline_millis": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "floor_basis_points": { "enum": [4000, 5000, 6000, 7000] },
+        "slowest_response_millis": { "type": "integer", "minimum": 1000, "maximum": 10000 },
+        "protocol_checkpoint": {
+          "$ref": "#/$defs/calibrationCheckpoint",
+          "$comment": "The complete checkpoint is replayed and compared with this calibration by parse_evidence_v2."
+        },
+        "response_deadline_millis": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "$comment": "Must equal min(slowest_response_millis + 2000, 10000); enforced by parse_evidence_v2."
+        },
         "anchors": {
           "type": "array",
-          "minItems": 1,
+          "minItems": 4,
+          "maxItems": 4,
+          "$comment": "Adjacent median_rpm ordering is a semantic invariant enforced by parse_evidence_v2; JSON Schema cannot compare sibling numeric values.",
           "items": {
             "type": "object",
             "additionalProperties": false,
             "required": ["duty_basis_points", "median_rpm"],
             "properties": {
               "duty_basis_points": { "$ref": "#/$defs/basisPoints" },
-              "median_rpm": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+              "median_rpm": { "type": "integer", "minimum": 100, "maximum": 20000 }
             }
           }
         }
-      }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "floor_basis_points": { "const": 4000 },
+            "anchors": { "prefixItems": [
+            { "properties": { "duty_basis_points": { "const": 4000 } } },
+            { "properties": { "duty_basis_points": { "const": 5750 } } },
+            { "properties": { "duty_basis_points": { "const": 7500 } } },
+            { "properties": { "duty_basis_points": { "const": 10000 } } }
+          ] } },
+          "required": ["floor_basis_points", "anchors"]
+        },
+        {
+          "properties": {
+            "floor_basis_points": { "const": 5000 },
+            "anchors": { "prefixItems": [
+            { "properties": { "duty_basis_points": { "const": 5000 } } },
+            { "properties": { "duty_basis_points": { "const": 6250 } } },
+            { "properties": { "duty_basis_points": { "const": 7500 } } },
+            { "properties": { "duty_basis_points": { "const": 10000 } } }
+          ] } },
+          "required": ["floor_basis_points", "anchors"]
+        },
+        {
+          "properties": {
+            "floor_basis_points": { "const": 6000 },
+            "anchors": { "prefixItems": [
+            { "properties": { "duty_basis_points": { "const": 6000 } } },
+            { "properties": { "duty_basis_points": { "const": 6750 } } },
+            { "properties": { "duty_basis_points": { "const": 7500 } } },
+            { "properties": { "duty_basis_points": { "const": 10000 } } }
+          ] } },
+          "required": ["floor_basis_points", "anchors"]
+        },
+        {
+          "properties": {
+            "floor_basis_points": { "const": 7000 },
+            "anchors": { "prefixItems": [
+            { "properties": { "duty_basis_points": { "const": 7000 } } },
+            { "properties": { "duty_basis_points": { "const": 7250 } } },
+            { "properties": { "duty_basis_points": { "const": 7500 } } },
+            { "properties": { "duty_basis_points": { "const": 10000 } } }
+          ] } },
+          "required": ["floor_basis_points", "anchors"]
+        }
+      ]
     },
     "thermalSummary": {
       "type": "object",
