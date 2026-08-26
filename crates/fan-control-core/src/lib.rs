@@ -19,6 +19,7 @@ mod output;
 mod ownership;
 mod platform;
 mod policy;
+mod preflight;
 mod restoration;
 mod sampling;
 mod sensor_recovery;
@@ -85,6 +86,10 @@ pub use platform::{
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
     HysteresisError, MonotonicTime, MonotonicTimeError,
+};
+pub use preflight::{
+    PreflightArtifact, PreflightCheck, PreflightCheckResult, PreflightEnvironment, PreflightInputs,
+    PreflightReport, PreflightRequirements, run_read_only_preflight,
 };
 pub use restoration::{
     EmergencyContainmentReport, EmergencyFanStatus, FanModeFailure, FanRestorationStatus,

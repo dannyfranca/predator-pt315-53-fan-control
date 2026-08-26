@@ -238,21 +238,18 @@ pub fn admit_compatibility(
     declaration: &CompatibilityDeclarationV1,
     observations: &[CompatibilityObservation],
 ) -> Result<AdmittedCompatibility, CompatibilityAdmissionError> {
-    if let Err(CompatibilityDeclarationError::Unsafe { field, .. }) =
-        validate_declaration(declaration)
-    {
-        return Err(CompatibilityAdmissionError::UnsafeDeclaration { field });
-    }
+    check_platform_compatibility(declaration, observations)?;
+    check_trust_compatibility(declaration, observations)?;
+    check_fan_abi_compatibility(declaration, observations)?;
+    Ok(AdmittedCompatibility(()))
+}
 
-    let observation = match observations {
-        [] => return Err(CompatibilityAdmissionError::MissingObservation),
-        [observation] => observation,
-        observations => {
-            return Err(CompatibilityAdmissionError::AmbiguousObservations {
-                count: observations.len(),
-            });
-        }
-    };
+/// Validates the exact qualified hardware, kernel, and module identities.
+pub(crate) fn check_platform_compatibility(
+    declaration: &CompatibilityDeclarationV1,
+    observations: &[CompatibilityObservation],
+) -> Result<(), CompatibilityAdmissionError> {
+    let observation = unique_observation(declaration, observations)?;
 
     require_equal(
         "hardware.dmi_product_name",
@@ -323,8 +320,15 @@ pub fn admit_compatibility(
         "module.provenance",
         &declaration.module.provenance,
         &observation.module.provenance,
-    )?;
+    )
+}
 
+/// Validates Secure Boot plus the pinned kernel and module trust observations.
+pub(crate) fn check_trust_compatibility(
+    declaration: &CompatibilityDeclarationV1,
+    observations: &[CompatibilityObservation],
+) -> Result<(), CompatibilityAdmissionError> {
+    let observation = unique_observation(declaration, observations)?;
     if !observation.secure_boot_enabled {
         return Err(CompatibilityAdmissionError::Untrusted {
             field: "secure_boot.enabled",
@@ -340,7 +344,15 @@ pub fn admit_compatibility(
             field: "secure_boot.module_signature_trusted",
         });
     }
+    Ok(())
+}
 
+/// Validates the observed fan-write capability, backend, and exact two-fan ABI evidence.
+pub(crate) fn check_fan_abi_compatibility(
+    declaration: &CompatibilityDeclarationV1,
+    observations: &[CompatibilityObservation],
+) -> Result<(), CompatibilityAdmissionError> {
+    let observation = unique_observation(declaration, observations)?;
     if observation.capability_evidence_completeness != EvidenceCompleteness::Complete {
         return Err(CompatibilityAdmissionError::IncompleteEvidence {
             field: "fan_control.capabilities",
@@ -384,8 +396,26 @@ pub fn admit_compatibility(
             field: "fan_control.endpoints",
         });
     }
+    Ok(())
+}
 
-    Ok(AdmittedCompatibility(()))
+fn unique_observation<'a>(
+    declaration: &CompatibilityDeclarationV1,
+    observations: &'a [CompatibilityObservation],
+) -> Result<&'a CompatibilityObservation, CompatibilityAdmissionError> {
+    if let Err(CompatibilityDeclarationError::Unsafe { field, .. }) =
+        validate_declaration(declaration)
+    {
+        return Err(CompatibilityAdmissionError::UnsafeDeclaration { field });
+    }
+
+    match observations {
+        [] => Err(CompatibilityAdmissionError::MissingObservation),
+        [observation] => Ok(observation),
+        observations => Err(CompatibilityAdmissionError::AmbiguousObservations {
+            count: observations.len(),
+        }),
+    }
 }
 
 pub(crate) fn validate_declaration(
