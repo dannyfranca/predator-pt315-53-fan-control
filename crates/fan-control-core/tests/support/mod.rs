@@ -48,7 +48,10 @@ pub fn record_diagnostics<R>(action: impl FnOnce() -> R) -> (R, Vec<BTreeMap<Str
     // Keep callsites enabled for the lifetime of this integration-test process. Otherwise another
     // test thread with no subscriber can globally cache the callsite as disabled mid-capture.
     DIAGNOSTIC_CAPTURE_SUBSCRIBER.call_once(|| {
-        tracing::subscriber::set_global_default(tracing_subscriber::registry()).unwrap();
+        // Aggregate qualifier targets compile several existing suites, each with its own private
+        // copy of this support module. The first copy installs the process-global subscriber; the
+        // remaining copies can safely share it.
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
     });
     // Tracing's callsite interest cache is process-global. Keep thread-local test subscribers from
     // invalidating one another while Rust's test harness runs capture assertions in parallel.

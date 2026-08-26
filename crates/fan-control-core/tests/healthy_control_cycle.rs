@@ -2328,7 +2328,18 @@ fn failed_rearming_restoration_retains_sensor_bindings() {
             fan_control_core::FanArmingError::RestorationFailed { .. }
         ))
     ));
+    assert_eq!(control.state(), SensorControlState::Faulted);
     assert!(drop_observations.borrow().is_empty());
+    let marker = ownership.platform().operations().len();
+    assert!(matches!(
+        control.step(&mut ownership),
+        Err(TransientSensorControlError::Faulted)
+    ));
+    assert!(
+        ownership.platform().operations()[marker..]
+            .iter()
+            .all(|operation| !is_pwm_write(operation))
+    );
 
     interference.set(RuntimeInterference::None);
     ownership.restore_firmware_auto(&device).unwrap();
