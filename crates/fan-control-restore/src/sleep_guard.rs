@@ -1,6 +1,6 @@
 use std::{
     fs, io,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::Path,
     process::{Command, Output},
 };
@@ -279,10 +279,14 @@ fn ensure_marker_directory(marker: &Path) -> io::Result<()> {
     match fs::create_dir(directory) {
         Ok(()) => fs::set_permissions(directory, fs::Permissions::from_mode(0o700)),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let metadata = fs::metadata(directory)?;
-            if !metadata.is_dir() || metadata.permissions().mode() & 0o777 != 0o700 {
+            let metadata = fs::symlink_metadata(directory)?;
+            let effective_uid = fs::metadata("/proc/self")?.uid();
+            if !metadata.is_dir()
+                || metadata.uid() != effective_uid
+                || metadata.permissions().mode() & 0o777 != 0o700
+            {
                 return Err(io::Error::other(
-                    "sleep marker directory is not a private directory",
+                    "sleep marker directory is not private and process-owned",
                 ));
             }
             Ok(())
@@ -361,7 +365,7 @@ mod tests {
     use std::{
         cell::RefCell,
         fs, io,
-        os::unix::fs::{MetadataExt, PermissionsExt},
+        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
         path::PathBuf,
         rc::Rc,
     };
@@ -480,6 +484,46 @@ mod tests {
 
         assert_eq!(fs::metadata(directory).unwrap().mode() & 0o777, 0o700);
         assert!(prepared_marker.is_file());
+    }
+
+    #[test]
+    fn preparation_rejects_a_symlinked_marker_directory() {
+        let target = std::env::temp_dir().join(format!(
+            "pt31553-sleep-guard-symlink-target-{}",
+            std::process::id()
+        ));
+        let directory = std::env::temp_dir().join(format!(
+            "pt31553-sleep-guard-symlink-{}",
+            std::process::id()
+        ));
+        let _target_cleanup = DirectoryCleanup(target.clone());
+        let _link_cleanup = FileCleanup(directory.clone());
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&target, &directory).unwrap();
+        let marker = directory.join("resume-daemon");
+        let prepared_marker = directory.join("resume-daemon-prepared");
+        let mut manager = FakeDaemonManager::inactive();
+
+        assert!(prepare_sleep(&mut manager, &marker, &prepared_marker, || Ok(())).is_err());
+        assert!(manager.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn preparation_rejects_a_non_private_marker_directory() {
+        let directory = std::env::temp_dir().join(format!(
+            "pt31553-sleep-guard-public-directory-{}",
+            std::process::id()
+        ));
+        let _directory_cleanup = DirectoryCleanup(directory.clone());
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o750)).unwrap();
+        let marker = directory.join("resume-daemon");
+        let prepared_marker = directory.join("resume-daemon-prepared");
+        let mut manager = FakeDaemonManager::inactive();
+
+        assert!(prepare_sleep(&mut manager, &marker, &prepared_marker, || Ok(())).is_err());
+        assert!(manager.calls.borrow().is_empty());
     }
 
     #[test]
@@ -1027,6 +1071,14 @@ mod tests {
     impl Drop for DirectoryCleanup {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct FileCleanup(PathBuf);
+
+    impl Drop for FileCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
         }
     }
 }
