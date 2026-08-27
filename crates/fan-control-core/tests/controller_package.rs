@@ -76,6 +76,26 @@ fn source_metadata_is_exact_and_reproducible() {
     ));
     assert!(srcinfo.contains(&format!("archive/{SOURCE_COMMIT}.tar.gz")));
     assert!(srcinfo.contains(SOURCE_SHA256));
+    assert!(
+        srcinfo
+            .lines()
+            .any(|line| line.trim() == "options = !debug")
+    );
+    let output = Command::new("/bin/bash")
+        .args([
+            "-c",
+            "set -euo pipefail; source \"$1\"; test \"${#options[@]}\" -eq 1; test \"${options[0]}\" = '!debug'",
+            "package-metadata-test",
+        ])
+        .arg(package.join("PKGBUILD"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let dependencies = srcinfo
         .lines()
         .filter_map(|line| line.trim().strip_prefix("depends = "))
@@ -188,6 +208,7 @@ fn prepare_hardens_reused_source_ancestors() {
     assert_eq!(mode(&srcdir), 0o755);
     assert_eq!(mode(&source_root), 0o755);
     assert_eq!(mode(&nested_crate), 0o755);
+    assert_eq!(mode(nested_crate.join("target")), 0o755);
 
     fs::remove_dir_all(root).unwrap();
 }

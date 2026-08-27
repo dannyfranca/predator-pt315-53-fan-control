@@ -2,13 +2,14 @@
 
 pkgname=pt31553-fan-control
 pkgver=0.1.0
-pkgrel=4
+pkgrel=5
 pkgdesc='Fail-closed PT315-53 fan controller and qualification suite'
 arch=('x86_64')
 url='https://github.com/dannyfranca/predator-pt315-53-fan-control'
 license=('MIT')
 depends=('bash' 'coreutils' 'gcc-libs' 'glibc' 'glmark2' 'stress-ng' 'systemd')
 makedepends=('cargo')
+options=('!debug')
 backup=('etc/pt31553-fan-control/config.toml')
 _commit='590c4ea728a47f7d8ea5b6f68b90c509022867eb'
 source=(
@@ -38,6 +39,10 @@ build() {
 check() {
   umask 0022
   cd "predator-pt315-53-fan-control-$_commit"
+  # The ownership tests intentionally reject group-writable ancestors. Create
+  # their package-local fixture parent explicitly instead of inheriting a build
+  # host's directory-creation policy.
+  install -d -m 0755 crates/fan-control-core/target
   RUSTFLAGS="${RUSTFLAGS:-} -C debug-assertions=yes" cargo test --frozen --workspace
 }
 
