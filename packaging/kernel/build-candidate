@@ -13,6 +13,7 @@ fi
 toolchain_origin="docker.io/cachyos/docker-makepkg-v4@sha256:1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6"
 toolchain="docker.io/library/source-lock@sha256:1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6"
 packaging="linux-cachyos-3c399d306eed6497838b246b9dbe73ec2cd1bb2f.tar.gz"
+telemetry_patch="0001-acer-wmi-add-pt31553-telemetry.patch"
 
 if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
     : "${SOURCE_LOCK_OUTPUT:?container output mount is required}"
@@ -90,6 +91,8 @@ mkdir "$package_root/source-cache"
 ln -s /bundle/cachyos-7.1.8-1.tar.gz "$package_root/source-cache/cachyos-7.1.8-1.tar.gz"
 ln -s /bundle/cachyos-7.1.8-1.tar.gz.asc "$package_root/source-cache/cachyos-7.1.8-1.tar.gz.asc"
 ln -s /bundle/config "$package_root/source-cache/config"
+ln -s "/bundle/patches/$telemetry_patch" "$package_root/source-cache/$telemetry_patch"
+printf '\nsource+=("%s")\nb2sums+=("SKIP")\n' "$telemetry_patch" >>"$package_root/PKGBUILD"
 
 printf '{"imageLayoutVersion":"1.0.0"}\n' >"$image_layout/oci-layout"
 printf '{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","digest":"sha256:1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6","size":3656,"annotations":{"org.opencontainers.image.ref.name":"source-lock"}}]}\n' >"$image_layout/index.json"

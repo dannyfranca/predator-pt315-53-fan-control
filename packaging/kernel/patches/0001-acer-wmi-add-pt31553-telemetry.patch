@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Danny Franca <dannyfranca@users.noreply.github.com>
+Date: Thu, 27 Aug 2026 03:30:00 -0300
+Subject: [PATCH] platform/x86: acer-wmi: admit PT315-53 telemetry
+
+SPDX-License-Identifier: GPL-2.0-only
+Upstream-Repository: https://github.com/CachyOS/linux
+Upstream-Revision: 7a84732fd5e4350c1312fd0ed0c72ffa139fb766
+Upstream-Path: drivers/platform/x86/acer-wmi.c
+
+Match the exact Predator PT315-53 / Civic_TLS identity for Predator-v4
+sensor discovery. Keep PWM disabled until the separate write-capability
+qualification is complete.
+---
+ drivers/platform/x86/acer-wmi.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/drivers/platform/x86/acer-wmi.c b/drivers/platform/x86/acer-wmi.c
+index 18ecb6c2af95..5b9b1cbd7824 100644
+--- a/drivers/platform/x86/acer-wmi.c
++++ b/drivers/platform/x86/acer-wmi.c
+@@ -482,6 +482,10 @@ static struct quirk_entry quirk_acer_predator_pt14_51 = {
+ 	.pwm = 1,
+ };
+ 
++static struct quirk_entry quirk_acer_predator_pt315_53 = {
++	.predator_v4 = 1,
++};
++
+ static struct quirk_entry quirk_acer_predator_v4 = {
+ 	.predator_v4 = 1,
+ };
+@@ -671,6 +675,16 @@ static const struct dmi_system_id acer_quirks[] __initconst = {
+ 		},
+ 		.driver_data = &quirk_acer_predator_ph315_53,
+ 	},
++	{
++		.callback = dmi_matched,
++		.ident = "Acer Predator PT315-53 (Civic_TLS)",
++		.matches = {
++			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Acer"),
++			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Predator PT315-53"),
++			DMI_EXACT_MATCH(DMI_BOARD_NAME, "Civic_TLS"),
++		},
++		.driver_data = &quirk_acer_predator_pt315_53,
++	},
+ 	{
+ 		.callback = dmi_matched,
+ 		.ident = "Acer Predator PHN16-71",
+-- 
+2.51.0

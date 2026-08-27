@@ -135,7 +135,7 @@ validpgpkeys=(
 
         let environment = format!(
             r#"format = 1
-candidate = "test-candidate"
+candidate = "linux-cachyos-gcc-7.1.8-stage-0"
 architecture = "x86_64"
 cpu_target = "x86-64-v4"
 source_date_epoch = 1787723651
@@ -309,7 +309,7 @@ patches = []
             &lock,
             format!(
                 r#"format = 1
-candidate = "test-candidate"
+candidate = "linux-cachyos-gcc-7.1.8-stage-0"
 release_tag = "cachyos-7.1.8-1"
 source_commit = "{SOURCE_COMMIT}"
 source_tree = "{source_tree}"
@@ -611,6 +611,79 @@ fn failure_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn pinned_acer_wmi_contexts() -> Vec<u8> {
+    let mut lines = (1..=680)
+        .map(|line| format!("/* pinned fixture line {line} */\n"))
+        .collect::<Vec<_>>();
+    for (line, content) in [
+        (482, "\t.pwm = 1,\n"),
+        (483, "};\n"),
+        (484, "\n"),
+        (
+            485,
+            "static struct quirk_entry quirk_acer_predator_v4 = {\n",
+        ),
+        (486, "\t.predator_v4 = 1,\n"),
+        (487, "};\n"),
+        (671, "\t\t},\n"),
+        (672, "\t\t.driver_data = &quirk_acer_predator_ph315_53,\n"),
+        (673, "\t},\n"),
+        (674, "\t{\n"),
+        (675, "\t\t.callback = dmi_matched,\n"),
+        (676, "\t\t.ident = \"Acer Predator PHN16-71\",\n"),
+    ] {
+        lines[line - 1] = content.to_owned();
+    }
+    lines.concat().into_bytes()
+}
+
+fn validate_telemetry_patch(patch: &[u8], source: &[u8]) -> Output {
+    let root = std::env::temp_dir().join(format!(
+        "fan-control-telemetry-patch-{}-{}",
+        std::process::id(),
+        NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&root).expect("create telemetry patch fixture");
+    let patch_path = root.join("telemetry.patch");
+    let source_path = root.join("acer-wmi.c");
+    fs::write(&patch_path, patch).expect("write telemetry patch fixture");
+    fs::write(&source_path, source).expect("write acer-wmi fixture");
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            "import pathlib,runpy,sys; m=runpy.run_path(sys.argv[1], run_name='telemetry_patch_test'); m['validate_telemetry_patch'](pathlib.Path(sys.argv[2]).read_bytes(), pathlib.Path(sys.argv[3]).read_bytes())",
+        ])
+        .arg(verifier())
+        .arg(&patch_path)
+        .arg(&source_path)
+        .output()
+        .expect("run telemetry patch validator");
+    fs::remove_dir_all(root).expect("remove telemetry patch fixture");
+    output
+}
+
+fn validate_patch_wrapper(wrapper: &[u8]) -> Output {
+    let root = std::env::temp_dir().join(format!(
+        "fan-control-patch-wrapper-{}-{}",
+        std::process::id(),
+        NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&root).expect("create patch wrapper fixture");
+    let wrapper_path = root.join("build-candidate");
+    fs::write(&wrapper_path, wrapper).expect("write patch wrapper fixture");
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            "import pathlib,runpy,sys; m=runpy.run_path(sys.argv[1], run_name='patch_wrapper_test'); m['verify_patch_wrapper'](pathlib.Path(sys.argv[2]).read_text())",
+        ])
+        .arg(verifier())
+        .arg(&wrapper_path)
+        .output()
+        .expect("run patch wrapper validator");
+    fs::remove_dir_all(root).expect("remove patch wrapper fixture");
+    output
+}
+
 #[cfg(unix)]
 #[test]
 fn accepts_a_complete_read_only_bundle_without_modifying_it() {
@@ -636,15 +709,40 @@ fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
     let bundle = root.join("bundle");
     let output = root.join("output");
     let bin = root.join("bin");
+    let kernel_root = root.join("kernel");
     let archive_root = root
         .join("archive")
         .join("linux-cachyos-3c399d306eed6497838b246b9dbe73ec2cd1bb2f")
         .join("linux-cachyos");
     fs::create_dir_all(bundle.join("oci/blobs/sha256")).expect("create bundle OCI tree");
+    fs::create_dir_all(bundle.join("patches")).expect("create bundle patch directory");
     fs::create_dir_all(&output).expect("create output directory");
     fs::create_dir_all(&bin).expect("create fake command directory");
     fs::create_dir_all(&archive_root).expect("create packaging tree");
-    fs::write(archive_root.join("PKGBUILD"), "pkgname=test\n").expect("write PKGBUILD");
+    fs::create_dir_all(kernel_root.join("drivers/platform/x86"))
+        .expect("create kernel source tree");
+    fs::write(
+        kernel_root.join("drivers/platform/x86/acer-wmi.c"),
+        pinned_acer_wmi_contexts(),
+    )
+    .expect("write pinned acer-wmi fixture");
+    fs::write(
+        archive_root.join("PKGBUILD"),
+        r#"pkgname=test
+source=()
+b2sums=()
+prepare() {
+    cd "$TEST_KERNEL_ROOT"
+    local patch src
+    for patch in "${source[@]}"; do
+        src="${patch##*/}"
+        [[ $src = *.patch ]] || continue
+        patch -Np1 < "$TEST_BUNDLE/patches/$src"
+    done
+}
+"#,
+    )
+    .expect("write PKGBUILD");
     let packaging = bundle.join("linux-cachyos-3c399d306eed6497838b246b9dbe73ec2cd1bb2f.tar.gz");
     let archive_status = Command::new("tar")
         .args(["-czf"])
@@ -665,6 +763,12 @@ fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
     ] {
         fs::write(bundle.join(path), content).expect("write executor bundle input");
     }
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packaging/kernel/patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
+        bundle.join("patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
+    )
+    .expect("stage locked telemetry patch");
 
     let podman_log = root.join("podman.log");
     let makepkg_log = root.join("makepkg.log");
@@ -688,12 +792,23 @@ if [[ "$args" == *" pull --quiet oci:"* ]]; then
     exit 0
 fi
 if [[ "$args" == *" run --rm --pull=never --network=none --read-only "* ]]; then
+    package_root=""
+    for arg in "$@"; do
+        if [[ "$arg" == type=bind,src=*,dst=/work,rw=true ]]; then
+            package_root="${arg#type=bind,src=}"
+            package_root="${package_root%,dst=/work,rw=true}"
+        fi
+    done
+    [[ -n "$package_root" ]]
     env -i PATH="$TEST_BIN:/usr/bin:/bin" \
         SOURCE_LOCK_INSIDE=1 \
         SOURCE_LOCK_BUNDLE="$TEST_BUNDLE" \
         SOURCE_LOCK_OUTPUT="$TEST_OUTPUT" \
+        TEST_BUNDLE="$TEST_BUNDLE" \
+        TEST_KERNEL_ROOT="$TEST_KERNEL_ROOT" \
         TEST_MAKEPKG_LOG="$TEST_MAKEPKG_LOG" \
-        /bin/bash "$TEST_WRAPPER" --verifysource
+        TEST_PACKAGE_ROOT="$package_root" \
+        /bin/bash "$TEST_WRAPPER"
     exit $?
 fi
 exit 97
@@ -707,6 +822,11 @@ exit 97
 set -euo pipefail
 printf 'args=%s\n' "$*" >"$TEST_MAKEPKG_LOG"
 env | /usr/bin/sort >>"$TEST_MAKEPKG_LOG"
+[[ "$(readlink "$TEST_PACKAGE_ROOT/source-cache/0001-acer-wmi-add-pt31553-telemetry.patch")" == "/bundle/patches/0001-acer-wmi-add-pt31553-telemetry.patch" ]]
+source "$TEST_PACKAGE_ROOT/PKGBUILD"
+[[ "${source[*]}" == "0001-acer-wmi-add-pt31553-telemetry.patch" ]]
+[[ "${b2sums[*]}" == "SKIP" ]]
+prepare
 "#,
     )
     .expect("write fake makepkg");
@@ -718,13 +838,13 @@ env | /usr/bin/sort >>"$TEST_MAKEPKG_LOG"
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let run = Command::new("/bin/bash")
         .arg(&wrapper)
-        .arg("--verifysource")
         .env("PATH", &path)
         .env("SOURCE_LOCK_BUNDLE", &bundle)
         .env("SOURCE_LOCK_OUTPUT", &output)
         .env("TEST_BIN", &bin)
         .env("TEST_BUNDLE", &bundle)
         .env("TEST_OUTPUT", &output)
+        .env("TEST_KERNEL_ROOT", &kernel_root)
         .env("TEST_WRAPPER", &wrapper)
         .env("TEST_PODMAN_LOG", &podman_log)
         .env("TEST_MAKEPKG_LOG", &makepkg_log)
@@ -739,12 +859,15 @@ env | /usr/bin/sort >>"$TEST_MAKEPKG_LOG"
     assert!(podman.contains("dst=/bundle,ro=true"));
     assert!(podman.contains("--entrypoint /bundle/build-candidate"));
     let makepkg = fs::read_to_string(&makepkg_log).expect("read fake makepkg log");
-    assert!(
-        makepkg.contains("--skippgpcheck --skipchecksums --noconfirm --cleanbuild --verifysource")
-    );
+    assert!(makepkg.contains("--skippgpcheck --skipchecksums --noconfirm --cleanbuild"));
+    assert!(!makepkg.contains("--verifysource"));
     assert!(makepkg.contains("SOURCE_DATE_EPOCH=1786378335"));
     assert!(makepkg.contains("_processor_opt=generic_v4"));
     assert!(makepkg.contains("_cpusched=cachyos"));
+    let patched_source = fs::read_to_string(kernel_root.join("drivers/platform/x86/acer-wmi.c"))
+        .expect("read patched acer-wmi fixture");
+    assert!(patched_source.contains("Predator PT315-53"));
+    assert!(patched_source.contains("DMI_EXACT_MATCH(DMI_BOARD_NAME, \"Civic_TLS\")"));
 
     let missing_output = root.join("missing-output");
     let rejected = Command::new("/bin/bash")
@@ -820,6 +943,20 @@ fn rejects_duplicate_malformed_and_incomplete_manifests() {
 }
 
 #[test]
+fn rejects_downgrading_the_stage_one_candidate_to_an_empty_patch_set() {
+    let fixture = Fixture::new();
+    fixture.replace_lock(
+        "candidate = \"linux-cachyos-gcc-7.1.8-stage-0\"",
+        "candidate = \"linux-cachyos-gcc-7.1.8-stage-1-telemetry\"",
+    );
+
+    let output = fixture.verify();
+
+    assert!(!output.status.success());
+    assert!(failure_text(&output).contains("does not match the selected qualification stage"));
+}
+
+#[test]
 fn rejects_patch_inputs_not_exactly_listed_by_the_patch_set() {
     let fixture = Fixture::new();
     let patch = b"diff --git a/a b/a\n";
@@ -841,7 +978,7 @@ fn rejects_patch_inputs_not_exactly_listed_by_the_patch_set() {
 
 #[cfg(unix)]
 #[test]
-fn rejects_a_non_empty_patch_set_until_staging_is_defined() {
+fn rejects_any_patch_outside_the_selected_qualification_stage() {
     let fixture = Fixture::new();
     let patch = b"diff --git a/a b/a\n";
     fs::write(fixture.inputs.join("fixture.patch"), patch).expect("write patch input");
@@ -883,7 +1020,55 @@ fn rejects_a_non_empty_patch_set_until_staging_is_defined() {
     let output = fixture.verify();
 
     assert!(!output.status.success());
-    assert!(failure_text(&output).contains("stage 0 requires an empty patch set"));
+    assert!(failure_text(&output).contains("does not match the selected qualification stage"));
+}
+
+#[test]
+fn validates_the_locked_telemetry_patch_against_pinned_source_contexts() {
+    let patch = fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packaging/kernel/patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
+    )
+    .expect("read locked telemetry patch");
+    let source = pinned_acer_wmi_contexts();
+
+    let accepted = validate_telemetry_patch(&patch, &source);
+    assert!(accepted.status.success(), "{}", failure_text(&accepted));
+
+    let mut shifted_source = b"/* unexpected leading line */\n".to_vec();
+    shifted_source.extend_from_slice(&source);
+    let shifted = validate_telemetry_patch(&patch, &shifted_source);
+    assert!(!shifted.status.success());
+    assert!(failure_text(&shifted).contains("does not apply exactly"));
+
+    let patch_text = String::from_utf8(patch).expect("UTF-8 telemetry patch");
+    let pwm_patch = patch_text.replacen("+\t.predator_v4 = 1,", "+\t.pwm = 1,", 1);
+    let pwm = validate_telemetry_patch(pwm_patch.as_bytes(), &source);
+    assert!(!pwm.status.success());
+    assert!(failure_text(&pwm).contains("locked stage-1 source change"));
+
+    let moved_patch = patch_text.replacen("@@ -482,6 +482,10", "@@ -485,6 +485,10", 1);
+    let moved = validate_telemetry_patch(moved_patch.as_bytes(), &source);
+    assert!(!moved.status.success());
+    assert!(failure_text(&moved).contains("locked stage-1 source change"));
+}
+
+#[test]
+fn patch_wrapper_allows_only_the_exact_recipe_mutation() {
+    let wrapper = fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/build-candidate"),
+    )
+    .expect("read locked build wrapper");
+    let accepted = validate_patch_wrapper(&wrapper);
+    assert!(accepted.status.success(), "{}", failure_text(&accepted));
+
+    let mut extra_mutation = wrapper;
+    extra_mutation.extend_from_slice(
+        b"recipe=\"$package_root/PKG\"\"BUILD\"\nprintf 'source+=(evil.patch)\\n' >>\"$recipe\"\n",
+    );
+    let rejected = validate_patch_wrapper(&extra_mutation);
+    assert!(!rejected.status.success());
+    assert!(failure_text(&rejected).contains("locked stage-1 mutation program"));
 }
 
 #[test]
@@ -972,7 +1157,7 @@ fn rejects_toolchain_manifest_bytes_changed_under_the_pinned_digest() {
 #[test]
 fn rejects_a_coherent_non_amd64_toolchain_image() {
     let fixture = Fixture::new_with_architecture("arm64");
-    assert!(failure_text(&fixture.verify()).contains("stage 0 requires linux/amd64"));
+    assert!(failure_text(&fixture.verify()).contains("candidate requires linux/amd64"));
 }
 
 #[test]
@@ -1002,7 +1187,7 @@ fn rejects_build_metadata_or_wrapper_options_that_drift() {
     fs::write(&path, &after).expect("change CPU target");
     cpu_target.replace_lock(&sha(&before), &sha(after.as_bytes()));
     cpu_target.replace_lock("cpu_target = \"x86-64-v4\"", "cpu_target = \"x86-64\"");
-    assert!(failure_text(&cpu_target.verify()).contains("stage 0 requires x86-64-v4"));
+    assert!(failure_text(&cpu_target.verify()).contains("candidate requires x86-64-v4"));
 
     let environment = Fixture::new();
     let path = environment.inputs.join("build-environment.toml");
@@ -1223,6 +1408,7 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
         "build-environment",
         "build-wrapper",
         "makepkg-config",
+        "patch",
         "toolchain-image",
         "toolchain-blob",
     ] {
@@ -1237,7 +1423,8 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
     );
     let digest = sha(&manifest);
     assert!(lock.contains(&format!("toolchain_image_digest = \"{digest}\"")));
-    assert!(lock.contains("patches = []"));
+    assert!(lock.contains("candidate = \"linux-cachyos-gcc-7.1.8-stage-1-telemetry\""));
+    assert!(lock.contains("patches = [\"pt31553-telemetry\"]"));
 
     let parsed: toml::Value = toml::from_str(&lock).expect("parse checked-in lock");
     let inputs = parsed["inputs"].as_array().expect("lock inputs");
@@ -1252,6 +1439,10 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
         ("build-environment", root.join("build-environment.toml")),
         ("build-wrapper", root.join("build-candidate")),
         ("makepkg-config", root.join("makepkg.conf")),
+        (
+            "pt31553-telemetry",
+            root.join("patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
+        ),
         (
             "toolchain-image",
             root.join("toolchain-image-manifest.json"),
@@ -1309,4 +1500,32 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
         parsed["release_tag"].as_str().expect("locked release tag")
     );
     assert!(tag.starts_with(expected_tag_headers.as_bytes()));
+
+    let patch = fs::read_to_string(root.join("patches/0001-acer-wmi-add-pt31553-telemetry.patch"))
+        .expect("read telemetry patch");
+    let additions = patch
+        .lines()
+        .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+        .collect::<Vec<_>>();
+    assert!(additions.contains(&"+\t\t\tDMI_EXACT_MATCH(DMI_SYS_VENDOR, \"Acer\"),"));
+    assert!(
+        additions.contains(&"+\t\t\tDMI_EXACT_MATCH(DMI_PRODUCT_NAME, \"Predator PT315-53\"),")
+    );
+    assert!(additions.contains(&"+\t\t\tDMI_EXACT_MATCH(DMI_BOARD_NAME, \"Civic_TLS\"),"));
+    assert!(additions.contains(&"+\t.predator_v4 = 1,"));
+    for forbidden in [".pwm", "force_caps", "ec_raw_mode", "wmi_evaluate_method"] {
+        assert!(
+            additions.iter().all(|line| !line.contains(forbidden)),
+            "telemetry additions contain forbidden capability {forbidden}"
+        );
+    }
+
+    let environment = fs::read_to_string(root.join("build-environment.toml"))
+        .expect("read checked-in build environment");
+    assert!(environment.contains("patches = [\"pt31553-telemetry\"]"));
+    assert!(environment.contains("\"pt31553-telemetry\""));
+    let wrapper =
+        fs::read_to_string(root.join("build-candidate")).expect("read checked-in build wrapper");
+    assert!(wrapper.contains("/bundle/patches/$telemetry_patch"));
+    assert!(wrapper.contains("source+=(\"%s\")"));
 }

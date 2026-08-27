@@ -1,5 +1,5 @@
 format = 1
-candidate = "linux-cachyos-gcc-7.1.8-stage-0"
+candidate = "linux-cachyos-gcc-7.1.8-stage-1-telemetry"
 release_tag = "cachyos-7.1.8-1"
 source_commit = "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
 source_tree = "a51d0ee1eeafc983129ec95f39cde1405e12eb28"
@@ -11,7 +11,7 @@ source_date_epoch = 1786378335
 signature_verification_epoch = 1786378335
 cpu_target = "x86-64-v4"
 toolchain_image_digest = "1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6"
-patches = []
+patches = ["pt31553-telemetry"]
 
 [[inputs]]
 name = "kernel-source"
@@ -86,22 +86,31 @@ sha256 = "ef721ae680109993eca463c8847553cf8c2775f6626da4ea9b460f0588b7969b"
 size = 293290
 
 [[inputs]]
+name = "pt31553-telemetry"
+kind = "patch"
+path = "patches/0001-acer-wmi-add-pt31553-telemetry.patch"
+origin = "repository:packaging/kernel/patches/0001-acer-wmi-add-pt31553-telemetry.patch"
+revision = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9cab052b63"
+sha256 = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9cab052b63"
+size = 1691
+
+[[inputs]]
 name = "build-environment"
 kind = "build-environment"
 path = "build-environment.toml"
 origin = "repository:packaging/kernel/build-environment.toml"
-revision = "034f78fccc1287acce45118ebeb7ac5c89689aa267eedcd2c507be5ba065c4f7"
-sha256 = "034f78fccc1287acce45118ebeb7ac5c89689aa267eedcd2c507be5ba065c4f7"
-size = 1341
+revision = "72bfb845ddcc9ae6a761c0bc5429dfb5377f6c9700c6e05f1659de28a4203947"
+sha256 = "72bfb845ddcc9ae6a761c0bc5429dfb5377f6c9700c6e05f1659de28a4203947"
+size = 1393
 
 [[inputs]]
 name = "build-wrapper"
 kind = "build-wrapper"
 path = "build-candidate"
 origin = "repository:packaging/kernel/build-candidate"
-revision = "c6e6e47f450514183969127e481317d7b1a3d981603e3ba23dd892e0e09211c4"
-sha256 = "c6e6e47f450514183969127e481317d7b1a3d981603e3ba23dd892e0e09211c4"
-size = 4609
+revision = "3bb8d560afa8e15665abcbfd954d407311eadb1b2d63384fa718f17a6404e3b7"
+sha256 = "3bb8d560afa8e15665abcbfd954d407311eadb1b2d63384fa718f17a6404e3b7"
+size = 4848
 
 [[inputs]]
 name = "makepkg-config"

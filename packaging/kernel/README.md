@@ -1,14 +1,15 @@
 # Kernel source lock
 
-`source-lock.toml` is the complete input allowlist for the stage-0 `linux-cachyos-gcc` candidate. It pins:
+`source-lock.toml` is the complete input allowlist for the stage-1 telemetry
+`linux-cachyos-gcc` candidate. It pins:
 
 - the signed CachyOS tag, signed target commit/tree, release archive, detached archive signature, signer key, and authenticated signature-time policy;
 - the signed CachyOS packaging commit/tree and the exact config contained by that snapshot;
 - the machine-readable build environment, executable PKGBUILD-variable wrapper, and `makepkg.conf`;
 - the raw, digest-addressed CachyOS v4 OCI manifest plus every referenced config/layer blob;
-- the complete patch set (empty for stage 0).
+- the single GPL-2.0-only PT315-53 telemetry patch.
 
-Copy the eight tracked inputs into a disposable bundle:
+Copy the tracked metadata and patch inputs into a disposable bundle:
 
 ```sh
 cp packaging/kernel/build-environment.toml /bundle/
@@ -19,6 +20,8 @@ cp packaging/kernel/cachyos-7.1.8-1.tag /bundle/
 cp packaging/kernel/cachyos-7.1.8-1.commit /bundle/
 cp packaging/kernel/linux-cachyos-3c399d306eed6497838b246b9dbe73ec2cd1bb2f.commit /bundle/
 cp packaging/kernel/trust/cachyos-release-key.gpg /bundle/
+mkdir -p /bundle/patches
+cp packaging/kernel/patches/0001-acer-wmi-add-pt31553-telemetry.patch /bundle/patches/
 ```
 
 Fetch the four upstream source inputs at their exact `origin` paths: release archive, detached archive signature, packaging archive, and `config`. Populate `/bundle/oci/blobs/sha256/` with the OCI config and every compressed layer blob recorded by the manifest; each blob's immutable registry URL, digest, path, and size is recorded in the lock. Keep every recorded filename and do not leave registry metadata or other files in the bundle.
@@ -35,4 +38,11 @@ The verifier hashes every allowlisted regular file through retained directory-bo
 
 `--exec-verified` copies only bytes held by the verifier's pinned descriptors into a private read-only snapshot and runs the locked executor from that snapshot, so a pathname replacement after verification cannot cross the handoff into the build. `build-candidate` is a low-level deterministic executor, not an authentication boundary: invoking it directly is explicitly unverified. Only a successful `verify-source-lock --exec-verified` run constitutes the verified handoff.
 
-The wrapper reconstructs a temporary OCI layout from the verified manifest and blobs, imports it into disposable Podman root/runroot storage, and executes that exact manifest digest using `--pull=never`, no network, and a read-only container root. It extracts only the pinned packaging snapshot into a disposable work directory; clears ambient CI controls; exposes the verified source/config through a writable cache of read-only symlinks; writes packages only to the output mount; and explicitly selects CachyOS's default scheduler, GCC, `generic_v4`, no NVIDIA/ZFS/R8125 module build, and no external patches. The verifier accepts only a full build or `--verifysource`; arbitrary `makepkg` flags are rejected. `makepkg`'s inconsistent snapshot checksum array is bypassed only after the source-lock verifier has authenticated and hashed every input. The wrapper never uses the caller's checkout or host `makepkg`. This stage requires an empty patch set; a later stage must add an explicit staging/application mapping before non-empty patch inputs can verify.
+The scope gate accepts exactly one Linux change: an exact `Acer` / `Predator
+PT315-53` / `Civic_TLS` DMI entry selecting a `.predator_v4 = 1` quirk. It
+rejects deletions, other files or models, `.pwm`, forced capabilities, raw EC/WMI
+access, and every unrelated kernel change. The gate also applies both hunks in
+memory to the authenticated pinned `acer-wmi.c`; context drift fails before a
+build starts.
+
+The wrapper reconstructs a temporary OCI layout from the verified manifest and blobs, imports it into disposable Podman root/runroot storage, and executes that exact manifest digest using `--pull=never`, no network, and a read-only container root. It extracts only the pinned packaging snapshot into a disposable work directory; clears ambient CI controls; exposes the verified source/config/telemetry patch through a writable cache of read-only symlinks; adds only that patch to the authenticated recipe; writes packages only to the output mount; and explicitly selects CachyOS's default scheduler, GCC, `generic_v4`, and no NVIDIA/ZFS/R8125 module build. The verifier accepts only a full build or `--verifysource`; arbitrary `makepkg` flags are rejected. `makepkg`'s inconsistent snapshot checksum array is bypassed only after the source-lock verifier has authenticated and hashed every input. The wrapper never uses the caller's checkout or host `makepkg`.
