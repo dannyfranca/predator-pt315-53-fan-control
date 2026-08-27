@@ -38,6 +38,14 @@ stop_fixed_workload() {
       wait "$pid" 2>/dev/null || true
     fi
   done
+  # Also cover the tiny interval after Bash has registered a background job
+  # but before its PID has been assigned to the corresponding variable.
+  while read -r pid; do
+    if [[ -n $pid ]]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done < <(jobs -pr)
   CPU_WORKLOAD_PID=
   GPU_WORKLOAD_PID=
 }
@@ -54,7 +62,6 @@ wait_for_fixed_workload() {
   if [[ ${#pids[@]} -eq 0 ]]; then
     return 1
   fi
-  trap 'stop_fixed_workload; exit 0' HUP INT TERM
   if wait -n "${pids[@]}"; then
     # Every fixed load is intentionally unbounded; a clean child exit is also
     # an incomplete workload and must fail after its sibling is contained.
@@ -65,3 +72,7 @@ wait_for_fixed_workload() {
   stop_fixed_workload
   return "$status"
 }
+
+# Installed while this helper is sourced, before any entrypoint can spawn a
+# workload child. Individual entrypoints may replace it with a stricter trap.
+trap 'stop_fixed_workload; exit 0' HUP INT TERM

@@ -1,4 +1,7 @@
-use std::{path::PathBuf, process::Command};
+use std::{
+    path::PathBuf,
+    process::{Command, Stdio},
+};
 
 fn workload_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../qualification/workloads")
@@ -39,4 +42,25 @@ fn workload_helper_contains_surviving_children_after_an_early_exit() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn workload_helper_contains_a_child_before_its_pid_is_recorded() {
+    let output = Command::new("/bin/bash")
+        .args([
+            "-c",
+            "set -u; source \"$1\"; /usr/bin/sleep 30 & child=$!; printf '%s\\n' \"$child\"; kill -TERM $$",
+            "workload-startup-signal-test",
+        ])
+        .arg(workload_root().join("common"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let child = String::from_utf8(output.stdout).unwrap();
+    let status = Command::new("/bin/kill")
+        .args(["-0", child.trim()])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!status.success(), "startup child survived wrapper termination");
 }
