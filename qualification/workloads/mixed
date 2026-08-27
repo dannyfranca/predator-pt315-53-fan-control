@@ -6,6 +6,7 @@ source "$workload_dir/common"
 require_fixed_workload "$@"
 
 ACTIVE_WORKLOAD_PID=
+TRANSITION_GENERATION=0
 
 stop_active_segment() {
   local pid
@@ -36,22 +37,34 @@ enter_idle() {
   ACTIVE_WORKLOAD_PID=$!
 }
 
-trap start_load USR1
-trap enter_idle USR2
+transition_to_load() {
+  start_load
+  TRANSITION_GENERATION=$((TRANSITION_GENERATION + 1))
+}
+
+transition_to_idle() {
+  enter_idle
+  TRANSITION_GENERATION=$((TRANSITION_GENERATION + 1))
+}
+
+trap transition_to_load USR1
+trap transition_to_idle USR2
 trap 'stop_active_segment; exit 0' HUP INT TERM
 
 # The endurance harness sends SIGUSR1 for load segments and SIGUSR2 for idle
 # segments. The canonical schedule begins under load.
 start_load
 while true; do
-  if wait "$ACTIVE_WORKLOAD_PID"; then
+  waited_pid=$ACTIVE_WORKLOAD_PID
+  waited_generation=$TRANSITION_GENERATION
+  if wait "$waited_pid"; then
     status=1
   else
     status=$?
   fi
-  # A handled transition signal interrupts wait after its trap has replaced
-  # ACTIVE_WORKLOAD_PID. Continue with that new, tracked segment process.
-  if [[ $status -gt 128 ]]; then
+  # A transition trap replaces the segment and advances the generation. Any
+  # child failure without that explicit marker must remain visible.
+  if [[ $TRANSITION_GENERATION -ne $waited_generation ]]; then
     continue
   fi
   stop_active_segment

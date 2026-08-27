@@ -110,7 +110,8 @@ fn mixed_contains_a_segment_signaled_before_its_pid_is_recorded() {
     )
     .unwrap();
 
-    let output = Command::new(directory.join("mixed"))
+    let output = Command::new("/usr/bin/bash")
+        .arg(directory.join("mixed"))
         .arg("--fixed")
         .env("BASH_ENV", &bash_env)
         .env("MIXED_START_MARKER", &marker)
@@ -132,5 +133,28 @@ fn mixed_contains_a_segment_signaled_before_its_pid_is_recorded() {
         !status.success(),
         "mixed startup child survived termination"
     );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn mixed_propagates_a_signaled_segment_failure_without_busy_looping() {
+    let directory = scratch_directory("mixed-segment-failure");
+    fs::copy(workload_root().join("common"), directory.join("common")).unwrap();
+    fs::copy(workload_root().join("mixed"), directory.join("mixed")).unwrap();
+    write_executable(
+        &directory.join("combined"),
+        "#!/usr/bin/bash\nkill -TERM $$\n",
+    );
+
+    let status = Command::new("/usr/bin/timeout")
+        .args([
+            "2",
+            "/usr/bin/bash",
+            directory.join("mixed").to_str().unwrap(),
+            "--fixed",
+        ])
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(143));
     fs::remove_dir_all(directory).unwrap();
 }
