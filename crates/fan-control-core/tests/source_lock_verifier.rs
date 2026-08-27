@@ -526,6 +526,10 @@ if [[ ! -d "${SOURCE_LOCK_OUTPUT:-}" ]]; then
     exit 0
 fi
 
+cp "$SOURCE_LOCK_BUNDLE/makepkg.conf" "$SOURCE_LOCK_OUTPUT/makepkg.conf"
+cp "$SOURCE_LOCK_BUNDLE/source-lock.toml" "$SOURCE_LOCK_OUTPUT/source-lock.toml"
+exit 0
+
 toolchain_origin="docker.io/cachyos/docker-makepkg-v4@sha256:{IMAGE_DIGEST}"
 toolchain="docker.io/library/source-lock@sha256:{IMAGE_DIGEST}"
 packaging="packaging.tar.gz"
@@ -780,7 +784,7 @@ inputs=[{'kind':kind} for kind in ['signer-key','source-commit','packaging-commi
 class FakeBundle:
  def __init__(self, _path): pass
  def close(self): pass
-g['load_manifest']=lambda _path: lock
+g['load_manifest']=lambda _path: (lock,b'locked manifest')
 g['validate_manifest']=lambda _lock: inputs
 g['Bundle']=FakeBundle
 g['verify_hashes']=lambda *_args: None
@@ -792,7 +796,7 @@ g['verify_recipe_sources']=lambda *_args: None
 g['verify_patch_scope']=lambda *_args: None
 g['verify_build_metadata']=lambda *_args: None
 g['verify_pinned_inputs']=lambda *_args: None
-g['build_from_verified_snapshot']=lambda _bundle,_inputs,args: print('handoff:'+','.join(args)) or 0
+g['build_from_verified_snapshot']=lambda _bundle,_inputs,args,_lock_bytes: print('handoff:'+','.join(args)) or 0
 sys.argv=['verify-source-lock','--inputs','unused','--exec-verified','--',option]
 raise SystemExit(m['main']())
 "#,
@@ -827,6 +831,30 @@ fn validate_patch_wrapper(wrapper: &[u8], candidate: &str) -> Output {
     output
 }
 
+fn validate_checked_in_build_metadata() -> Output {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel");
+    Command::new("python3")
+        .args([
+            "-c",
+            r#"import io,pathlib,runpy,sys
+m=runpy.run_path(sys.argv[1], run_name='checked_in_build_metadata_test')
+root=pathlib.Path(sys.argv[2])
+lock,_raw=m['load_manifest'](root/'source-lock.toml')
+inputs=m['validate_manifest'](lock)
+class CheckedInBundle:
+ def open_regular(self,path,_context):
+  candidate=root/path
+  if candidate.is_file(): return candidate.open('rb')
+  return io.BytesIO(b'{"os":"linux","architecture":"amd64"}')
+m['verify_build_metadata'](CheckedInBundle(),lock,inputs)
+"#,
+        ])
+        .arg(verifier())
+        .arg(root)
+        .output()
+        .expect("validate checked-in build metadata")
+}
+
 fn validate_checked_in_stage_two_manifest(mutation: &str) -> Output {
     let lock =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/source-lock.toml");
@@ -845,12 +873,16 @@ elif mutation=='duplicate':
     duplicate=copy.deepcopy(tools[0]); duplicate['name']='build-tool-bc-duplicate'; duplicate['path']='build-tools/duplicate.pkg.tar.zst'; lock['inputs'].append(duplicate)
 elif mutation=='altered':
     tools[0]['sha256']='0'*64
+elif mutation=='nvidia-missing':
+    lock['inputs']=[item for item in lock['inputs'] if item['name']!='nvidia-open-source']
+elif mutation=='nvidia-altered':
+    next(item for item in lock['inputs'] if item['name']=='nvidia-patch-dsc')['revision']='1'*40
 elif mutation=='stage-one':
-    lock['candidate']='linux-cachyos-gcc-7.1.8-stage-1-telemetry'; lock['patches']=['pt31553-telemetry']; lock['inputs']=[item for item in lock['inputs'] if item['name']!='pt31553-pwm']
+    lock['candidate']='linux-cachyos-gcc-7.1.8-stage-1-telemetry'; lock['patches']=['pt31553-telemetry']; lock['inputs']=[item for item in lock['inputs'] if item['name']!='pt31553-pwm' and not item['kind'].startswith('nvidia-')]
 elif mutation=='reverse-patches':
     lock['patches']=list(reversed(lock['patches']))
 elif mutation=='stage-zero':
-    lock['candidate']='linux-cachyos-gcc-7.1.8-stage-0'; lock['patches']=[]; lock['inputs']=[item for item in lock['inputs'] if item['kind']!='patch']
+    lock['candidate']='linux-cachyos-gcc-7.1.8-stage-0'; lock['patches']=[]; lock['inputs']=[item for item in lock['inputs'] if item['kind']!='patch' and not item['kind'].startswith('nvidia-')]
 m['validate_manifest'](lock)
 "#,
         ])
@@ -944,7 +976,7 @@ bundle=m['Bundle'](pathlib.Path(sys.argv[2]))
 try:
  m['verify_hashes'](bundle, inputs)
  m['verify_pinned_inputs'](bundle, inputs)
- raise SystemExit(m['build_from_verified_snapshot'](bundle, inputs, ['--compile-pwm']))
+ raise SystemExit(m['build_from_verified_snapshot'](bundle, inputs, ['--compile-pwm'], b'locked manifest'))
 except m['VerificationError'] as error:
  print(error, file=sys.stderr); raise SystemExit(1)
 finally:
@@ -998,6 +1030,7 @@ fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
         .join("linux-cachyos");
     fs::create_dir_all(bundle.join("oci/blobs/sha256")).expect("create bundle OCI tree");
     fs::create_dir_all(bundle.join("patches")).expect("create bundle patch directory");
+    fs::create_dir_all(bundle.join("nvidia")).expect("create NVIDIA patch directory");
     fs::create_dir_all(&output).expect("create output directory");
     fs::create_dir_all(&bin).expect("create fake command directory");
     fs::create_dir_all(&archive_root).expect("create packaging tree");
@@ -1010,15 +1043,29 @@ fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
     .expect("write pinned acer-wmi fixture");
     fs::write(
         archive_root.join("PKGBUILD"),
-        r#"pkgname=test
-source=()
-b2sums=()
+        r#"_pkgsuffix=cachyos-gcc
+pkgbase="linux-$_pkgsuffix"
+pkgver=7.1.8
+_kernuname="${pkgver}-${_pkgsuffix}"
+_nv_ver=610.57.04
+_nv_open_pkg="NVIDIA-kernel-module-source-${_nv_ver}"
+source=("cachyos-7.1.8-1.tar.gz" "cachyos-7.1.8-1.tar.gz.asc" "config")
+b2sums=("SKIP" "SKIP" "SKIP")
+if [[ "${_build_nvidia_open:-no}" == yes ]]; then
+    source+=("${_nv_open_pkg}.tar.xz"
+        "0002-fix-dsc-correct-RC-parameter-tables-to-match-VESA-DS.patch"
+        "0004-fix-dp-add-Bigscreen-Beyond-VR-headset-to-WAR-databa.patch")
+    b2sums+=("SKIP")
+fi
+pkgname=("$pkgbase" "$pkgbase-headers")
+[[ "${_build_nvidia_open:-no}" == yes ]] && pkgname+=("$pkgbase-nvidia-open")
 prepare() {
     cd "$TEST_KERNEL_ROOT"
     local patch src
     for patch in "${source[@]}"; do
         src="${patch##*/}"
         [[ $src = *.patch ]] || continue
+        [[ $src = 0001-acer-* || $src = 0002-acer-* ]] || continue
         patch -Np1 < "$TEST_BUNDLE/patches/$src"
     done
 }
@@ -1045,15 +1092,36 @@ prepare() {
     ] {
         fs::write(bundle.join(path), content).expect("write executor bundle input");
     }
+    fs::write(
+        bundle.join("NVIDIA-kernel-module-source-610.57.04.tar.xz"),
+        "nvidia-source",
+    )
+    .expect("stage locked NVIDIA source");
+    for patch in [
+        "0002-fix-dsc-correct-RC-parameter-tables-to-match-VESA-DS.patch",
+        "0004-fix-dp-add-Bigscreen-Beyond-VR-headset-to-WAR-databa.patch",
+    ] {
+        fs::write(bundle.join("nvidia").join(patch), "nvidia-patch")
+            .expect("stage locked NVIDIA patch");
+    }
+    let checked_in_kernel = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel");
     fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../packaging/kernel/patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
+        checked_in_kernel.join("source-lock.toml"),
+        bundle.join("source-lock.toml"),
+    )
+    .expect("stage source lock");
+    fs::copy(
+        checked_in_kernel.join("build-environment.toml"),
+        bundle.join("build-environment.toml"),
+    )
+    .expect("stage build environment");
+    fs::copy(
+        checked_in_kernel.join("patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
         bundle.join("patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
     )
     .expect("stage locked telemetry patch");
     fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../packaging/kernel/patches/0002-acer-wmi-enable-pt31553-pwm.patch"),
+        checked_in_kernel.join("patches/0002-acer-wmi-enable-pt31553-pwm.patch"),
         bundle.join("patches/0002-acer-wmi-enable-pt31553-pwm.patch"),
     )
     .expect("stage locked PWM patch");
@@ -1095,8 +1163,11 @@ if [[ "$args" == *" run --rm --pull=never --network=none --read-only "* ]]; then
         TEST_BUNDLE="$TEST_BUNDLE" \
         TEST_KERNEL_ROOT="$TEST_KERNEL_ROOT" \
         TEST_MAKEPKG_LOG="$TEST_MAKEPKG_LOG" \
+        TEST_OUTPUT="$TEST_OUTPUT" \
+        TEST_PACKAGE_MUTATION="${TEST_PACKAGE_MUTATION:-}" \
         TEST_PACKAGE_ROOT="$package_root" \
-        /bin/bash "$TEST_WRAPPER"
+        TEST_WRAPPER="$TEST_WRAPPER" \
+        /bin/bash -c 'cd "$TEST_PACKAGE_ROOT"; exec /bin/bash "$TEST_WRAPPER"'
     exit $?
 fi
 exit 97
@@ -1108,37 +1179,126 @@ exit 97
         &fake_makepkg,
         r#"#!/usr/bin/env bash
 set -euo pipefail
+if [[ " $* " == *" --printsrcinfo "* ]]; then
+    printf 'pkgbase = linux-cachyos-pt31553\n'
+    exit 0
+fi
+if [[ " $* " == *" --packagelist "* ]]; then
+    case "${TEST_PACKAGE_MUTATION:-}" in
+        packagelist-fails)
+            printf '%s\n' \
+                "$TEST_OUTPUT/linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst" \
+                "$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst" \
+                "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-610.57.04-1-x86_64.pkg.tar.zst"
+            exit 42
+            ;;
+        reordered-plan)
+            printf '%s\n' \
+                "$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst" \
+                "$TEST_OUTPUT/linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst" \
+                "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-610.57.04-1-x86_64.pkg.tar.zst"
+            exit 0
+            ;;
+        outside-plan)
+            printf '%s\n' \
+                "/tmp/outside-linux-cachyos-pt31553.pkg.tar.zst" \
+                "$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst" \
+                "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-610.57.04-1-x86_64.pkg.tar.zst"
+            exit 0
+            ;;
+        mismatched-plan)
+            printf '%s\n' \
+                "$TEST_OUTPUT/linux-cachyos-pt31553-wrong-7.1.8-1-x86_64.pkg.tar.zst" \
+                "$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst" \
+                "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-610.57.04-1-x86_64.pkg.tar.zst"
+            exit 0
+            ;;
+    esac
+    printf '%s\n' \
+        "$TEST_OUTPUT/linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst" \
+        "$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst" \
+        "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-610.57.04-1-x86_64.pkg.tar.zst"
+    exit 0
+fi
 printf 'args=%s\n' "$*" >"$TEST_MAKEPKG_LOG"
 env | /usr/bin/sort >>"$TEST_MAKEPKG_LOG"
+if [[ "${TEST_PACKAGE_MUTATION:-}" == fail-build ]]; then
+    printf 'simulated package build failure\n' >&2
+    exit 42
+fi
 [[ "$(readlink "$TEST_PACKAGE_ROOT/source-cache/0001-acer-wmi-add-pt31553-telemetry.patch")" == "/bundle/patches/0001-acer-wmi-add-pt31553-telemetry.patch" ]]
 [[ "$(readlink "$TEST_PACKAGE_ROOT/source-cache/0002-acer-wmi-enable-pt31553-pwm.patch")" == "/bundle/patches/0002-acer-wmi-enable-pt31553-pwm.patch" ]]
+[[ "$(readlink "$TEST_PACKAGE_ROOT/source-cache/NVIDIA-kernel-module-source-610.57.04.tar.xz")" == "/bundle/NVIDIA-kernel-module-source-610.57.04.tar.xz" ]]
+for patch in \
+    0002-fix-dsc-correct-RC-parameter-tables-to-match-VESA-DS.patch \
+    0004-fix-dp-add-Bigscreen-Beyond-VR-headset-to-WAR-databa.patch; do
+    cached=$(readlink "$TEST_PACKAGE_ROOT/source-cache/$patch")
+    [[ "$cached" == "/bundle/nvidia/$patch" ]]
+    /usr/bin/cat "$TEST_BUNDLE/${cached#/bundle/}" >/dev/null
+done
 source "$TEST_PACKAGE_ROOT/PKGBUILD"
-[[ "${source[*]}" == "0001-acer-wmi-add-pt31553-telemetry.patch 0002-acer-wmi-enable-pt31553-pwm.patch" ]]
-[[ "${b2sums[*]}" == "SKIP SKIP" ]]
-prepare
+[[ "$pkgbase" == linux-cachyos-pt31553 ]]
+[[ "$_kernuname" == 7.1.8-cachyos-pt31553 ]]
+declare -p pkgname | grep -Fq 'linux-cachyos-pt31553-nvidia-open'
+declare -p source | grep -Fq 'NVIDIA-kernel-module-source-610.57.04.tar.xz'
+declare -p source | grep -Fq '0001-acer-wmi-add-pt31553-telemetry.patch'
+declare -p source | grep -Fq '0002-acer-wmi-enable-pt31553-pwm.patch'
+[[ -n "${TEST_PACKAGE_MUTATION:-}" ]] || prepare
+printf 'pkgname = linux-cachyos-pt31553\n' \
+    >"$TEST_OUTPUT/linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst"
+printf 'pkgname = linux-cachyos-pt31553-headers\n' \
+    >"$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst"
+package_name=linux-cachyos-pt31553-nvidia-open
+[[ "${TEST_PACKAGE_MUTATION:-}" != wrong-metadata ]] || package_name=linux-cachyos
+printf 'pkgname = %s\n' "$package_name" \
+    >"$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-610.57.04-1-x86_64.pkg.tar.zst"
+if [[ "${TEST_PACKAGE_MUTATION:-}" == extra-package ]]; then
+    printf 'pkgname = unexpected\n' \
+        >"$TEST_OUTPUT/unexpected-1-1-x86_64.pkg.tar.zst"
+fi
 "#,
     )
     .expect("write fake makepkg");
+    let fake_bsdtar = bin.join("bsdtar");
+    fs::write(
+        &fake_bsdtar,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+entry="$3"
+if [[ "$entry" == .PKGINFO ]]; then
+    /usr/bin/cat "$2"
+else
+    printf '%s evidence from %s\n' "$entry" "$(/usr/bin/cat "$2")"
+fi
+"#,
+    )
+    .expect("write fake bsdtar");
     fs::set_permissions(&fake_podman, fs::Permissions::from_mode(0o755))
         .expect("make fake podman executable");
     fs::set_permissions(&fake_makepkg, fs::Permissions::from_mode(0o755))
         .expect("make fake makepkg executable");
+    fs::set_permissions(&fake_bsdtar, fs::Permissions::from_mode(0o755))
+        .expect("make fake bsdtar executable");
 
     let path = format!("{}:/usr/bin:/bin", bin.display());
-    let run = Command::new("/bin/bash")
-        .arg(&wrapper)
-        .env("PATH", &path)
-        .env("SOURCE_LOCK_BUNDLE", &bundle)
-        .env("SOURCE_LOCK_OUTPUT", &output)
-        .env("TEST_BIN", &bin)
-        .env("TEST_BUNDLE", &bundle)
-        .env("TEST_OUTPUT", &output)
-        .env("TEST_KERNEL_ROOT", &kernel_root)
-        .env("TEST_WRAPPER", &wrapper)
-        .env("TEST_PODMAN_LOG", &podman_log)
-        .env("TEST_MAKEPKG_LOG", &makepkg_log)
-        .output()
-        .expect("run checked-in executor");
+    let run_executor = |run_output: &Path, mutation: &str| {
+        Command::new("/bin/bash")
+            .arg(&wrapper)
+            .env("PATH", &path)
+            .env("SOURCE_LOCK_BUNDLE", &bundle)
+            .env("SOURCE_LOCK_OUTPUT", run_output)
+            .env("TEST_BIN", &bin)
+            .env("TEST_BUNDLE", &bundle)
+            .env("TEST_OUTPUT", run_output)
+            .env("TEST_KERNEL_ROOT", &kernel_root)
+            .env("TEST_WRAPPER", &wrapper)
+            .env("TEST_PODMAN_LOG", &podman_log)
+            .env("TEST_MAKEPKG_LOG", &makepkg_log)
+            .env("TEST_PACKAGE_MUTATION", mutation)
+            .output()
+            .expect("run checked-in executor")
+    };
+    let run = run_executor(&output, "");
     assert!(
         run.status.success(),
         "stdout: {}\nstderr: {}",
@@ -1158,11 +1318,84 @@ prepare
     assert!(makepkg.contains("SOURCE_DATE_EPOCH=1786378335"));
     assert!(makepkg.contains("_processor_opt=generic_v4"));
     assert!(makepkg.contains("_cpusched=cachyos"));
+    assert!(makepkg.contains("_build_nvidia_open=yes"));
+    for package_name in [
+        "linux-cachyos-pt31553",
+        "linux-cachyos-pt31553-headers",
+        "linux-cachyos-pt31553-nvidia-open",
+    ] {
+        let evidence = output.join("packages").join(package_name);
+        for entry in [".BUILDINFO", ".MTREE", ".PKGINFO"] {
+            assert!(
+                evidence.join(entry).is_file(),
+                "missing {package_name}/{entry}"
+            );
+        }
+    }
+    assert_eq!(
+        fs::read_to_string(output.join("SHA256SUMS"))
+            .expect("read package checksums")
+            .lines()
+            .count(),
+        3
+    );
+    for evidence in [
+        "build-environment.toml",
+        "build.log",
+        "package-set.SRCINFO",
+        "SHA256SUMS",
+        "source-lock.toml",
+    ] {
+        assert!(output.join(evidence).is_file(), "missing {evidence}");
+    }
     let patched_source = fs::read_to_string(kernel_root.join("drivers/platform/x86/acer-wmi.c"))
         .expect("read patched acer-wmi fixture");
     assert!(patched_source.contains("Predator PT315-53"));
     assert!(patched_source.contains("DMI_EXACT_MATCH(DMI_BOARD_NAME, \"Civic_TLS\")"));
     assert!(patched_source.contains("\t.pwm = 1,"));
+
+    for (case, mutation, expected_failure) in [
+        (
+            "failed-build",
+            "fail-build",
+            "simulated package build failure",
+        ),
+        ("extra-package", "extra-package", ""),
+        ("wrong-metadata", "wrong-metadata", ""),
+        ("package-list-failure", "packagelist-fails", ""),
+        ("reordered-plan", "reordered-plan", ""),
+        ("outside-plan", "outside-plan", ""),
+        ("mismatched-plan", "mismatched-plan", ""),
+    ] {
+        let rejected_output = root.join(case);
+        fs::create_dir(&rejected_output).expect("create rejected output directory");
+        let rejected = run_executor(&rejected_output, mutation);
+        assert!(!rejected.status.success(), "{case} unexpectedly succeeded");
+        if !expected_failure.is_empty() {
+            let diagnostics = format!(
+                "{}{}",
+                String::from_utf8_lossy(&rejected.stdout),
+                failure_text(&rejected)
+            );
+            assert!(diagnostics.contains(expected_failure), "{diagnostics}");
+        }
+        assert!(
+            !rejected_output.join("SHA256SUMS").exists(),
+            "{case} retained completed package hashes"
+        );
+        assert!(
+            !rejected_output.join("packages").exists(),
+            "{case} retained completed package metadata"
+        );
+    }
+
+    let stale_output = root.join("stale-output");
+    fs::create_dir(&stale_output).expect("create stale output directory");
+    fs::write(stale_output.join("stale.pkg.tar.zst"), "stale").expect("write stale package output");
+    let stale = run_executor(&stale_output, "");
+    assert!(!stale.status.success());
+    assert!(failure_text(&stale).contains("output directory must be empty"));
+    assert!(!stale_output.join("SHA256SUMS").exists());
 
     let missing_output = root.join("missing-output");
     let rejected = Command::new("/bin/bash")
@@ -1364,6 +1597,11 @@ fn stage_two_manifest_requires_the_one_exact_build_tool() {
         ("missing", "require exactly the pinned bc package"),
         ("duplicate", "require exactly the pinned bc package"),
         ("altered", "bc package identity is not exact"),
+        ("nvidia-missing", "package-set identities are not exact"),
+        (
+            "nvidia-altered",
+            "origin does not contain its immutable revision",
+        ),
         (
             "reverse-patches",
             "does not match the selected qualification stage",
@@ -1372,7 +1610,11 @@ fn stage_two_manifest_requires_the_one_exact_build_tool() {
     ] {
         let rejected = validate_checked_in_stage_two_manifest(mutation);
         assert!(!rejected.status.success(), "{mutation} unexpectedly passed");
-        assert!(failure_text(&rejected).contains(expected), "{mutation}");
+        assert!(
+            failure_text(&rejected).contains(expected),
+            "{mutation}: {}",
+            failure_text(&rejected)
+        );
     }
 }
 
@@ -1613,55 +1855,51 @@ fn patch_wrapper_allows_only_the_exact_recipe_mutation() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/build-candidate"),
     )
     .expect("read locked build wrapper");
-    let accepted = validate_patch_wrapper(&wrapper, "linux-cachyos-gcc-7.1.8-stage-2-pwm");
+    let accepted = validate_patch_wrapper(&wrapper, "linux-cachyos-pt31553-7.1.8-1-package-set");
     assert!(accepted.status.success(), "{}", failure_text(&accepted));
 
     let mut extra_mutation = wrapper;
     extra_mutation.extend_from_slice(
         b"recipe=\"$package_root/PKG\"\"BUILD\"\nprintf 'source+=(evil.patch)\\n' >>\"$recipe\"\n",
     );
-    let rejected = validate_patch_wrapper(&extra_mutation, "linux-cachyos-gcc-7.1.8-stage-2-pwm");
+    let rejected =
+        validate_patch_wrapper(&extra_mutation, "linux-cachyos-pt31553-7.1.8-1-package-set");
     assert!(!rejected.status.success());
-    assert!(failure_text(&rejected).contains("locked stage-2 mutation program"));
+    assert!(failure_text(&rejected).contains("locked package-set mutation program"));
 }
 
 #[test]
-fn preserves_the_exact_stage_one_wrapper_contract() {
-    let wrapper = fs::read_to_string(
+fn package_wrapper_preserves_the_exact_package_set_contract() {
+    let package_wrapper = fs::read(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/build-candidate"),
     )
-    .expect("read Stage-2 wrapper");
-    let stage_one = wrapper
-        .replace("--compile-pwm", "--compile-telemetry")
-        .replace("pwm-compile", "telemetry-compile")
-        .replace(
-            "pwm_patch=\"0002-acer-wmi-enable-pt31553-pwm.patch\"\n",
-            "",
-        )
-        .replace(
-            concat!(
-                "        rm -f -- \"$SOURCE_LOCK_OUTPUT/acer-wmi.o\" \\\n",
-                "            \"$SOURCE_LOCK_OUTPUT/acer-wmi.o.sha256\"\n"
-            ),
-            "",
-        )
-        .replace(
-            "        patch --directory \"$source_root\" -Np1 \\\n            <\"$SOURCE_LOCK_BUNDLE/patches/$pwm_patch\"\n",
-            "",
-        )
-        .replace(
-            "ln -s \"/bundle/patches/$pwm_patch\" \"$package_root/source-cache/$pwm_patch\"\n",
-            "",
-        )
-        .replace(
-            "printf '\\nsource+=(\"%s\" \"%s\")\\nb2sums+=(\"SKIP\" \"SKIP\")\\n' \\\n    \"$telemetry_patch\" \"$pwm_patch\" >>\"$package_root/PKGBUILD\"",
-            "printf '\\nsource+=(\"%s\")\\nb2sums+=(\"SKIP\")\\n' \"$telemetry_patch\" >>\"$package_root/PKGBUILD\"",
-        );
+    .expect("read package-set wrapper");
     let accepted = validate_patch_wrapper(
-        stage_one.as_bytes(),
-        "linux-cachyos-gcc-7.1.8-stage-1-telemetry",
+        &package_wrapper,
+        "linux-cachyos-pt31553-7.1.8-1-package-set",
     );
     assert!(accepted.status.success(), "{}", failure_text(&accepted));
+
+    let metadata = validate_checked_in_build_metadata();
+    assert!(metadata.status.success(), "{}", failure_text(&metadata));
+}
+
+#[test]
+fn stage_one_wrapper_compatibility_remains_executable() {
+    let wrapper = include_bytes!("fixtures/stage1-build-candidate");
+    assert_eq!(
+        sha(wrapper),
+        "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
+    );
+    let accepted = validate_patch_wrapper(wrapper, "linux-cachyos-gcc-7.1.8-stage-1-telemetry");
+    assert!(accepted.status.success(), "{}", failure_text(&accepted));
+
+    let gate = run_verified_cli_gate(
+        "linux-cachyos-gcc-7.1.8-stage-1-telemetry",
+        "--compile-telemetry",
+    );
+    assert!(gate.status.success(), "{}", failure_text(&gate));
+    assert!(String::from_utf8_lossy(&gate.stdout).contains("handoff:--compile-telemetry"));
 }
 
 #[test]
@@ -1830,6 +2068,31 @@ fn verified_build_handoff_does_not_expose_the_original_bundle() {
 
 #[cfg(unix)]
 #[test]
+fn verified_build_handoff_retains_exact_source_lock_bytes() {
+    let fixture = Fixture::new();
+    let mut expected = fs::read(&fixture.lock).expect("read source lock");
+    expected.extend_from_slice(b"\n# retained byte-for-byte through the verified snapshot\n");
+    fs::write(&fixture.lock, &expected).expect("write noncanonical source lock bytes");
+    let capture = fixture.root.join("captured-snapshot");
+    fs::create_dir(&capture).expect("create snapshot capture directory");
+    fixture.make_read_only();
+
+    let mut command = fixture.command();
+    let output = command
+        .arg("--exec-verified")
+        .env("SOURCE_LOCK_OUTPUT", &capture)
+        .output()
+        .expect("run verified snapshot handoff");
+
+    assert!(output.status.success(), "{}", failure_text(&output));
+    assert_eq!(
+        fs::read(capture.join("source-lock.toml")).expect("read retained source lock"),
+        expected
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn verified_build_handoff_ignores_ambient_bash_hooks() {
     let fixture = Fixture::new();
     let hook = fixture.root.join("bash-env");
@@ -1885,6 +2148,14 @@ fn stage_two_cli_selects_only_the_pwm_compile_gate() {
             .contains("only the selected compile gate or --verifysource is allowed")
     );
     assert!(!String::from_utf8_lossy(&rejected.stdout).contains("handoff:"));
+
+    let package_candidate = "linux-cachyos-pt31553-7.1.8-1-package-set";
+    let package_gate = run_verified_cli_gate(package_candidate, "--compile-pwm");
+    assert!(
+        package_gate.status.success(),
+        "{}",
+        failure_text(&package_gate)
+    );
 }
 
 #[cfg(unix)]
@@ -2019,6 +2290,8 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
         "packaging",
         "packaging-commit",
         "kernel-config",
+        "nvidia-source",
+        "nvidia-patch",
         "build-environment",
         "build-tool",
         "build-wrapper",
@@ -2038,11 +2311,43 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
     );
     let digest = sha(&manifest);
     assert!(lock.contains(&format!("toolchain_image_digest = \"{digest}\"")));
-    assert!(lock.contains("candidate = \"linux-cachyos-gcc-7.1.8-stage-2-pwm\""));
+    assert!(lock.contains("candidate = \"linux-cachyos-pt31553-7.1.8-1-package-set\""));
     assert!(lock.contains("patches = [\"pt31553-telemetry\", \"pt31553-pwm\"]"));
 
     let parsed: toml::Value = toml::from_str(&lock).expect("parse checked-in lock");
     let inputs = parsed["inputs"].as_array().expect("lock inputs");
+    for (name, kind, revision, digest, size) in [
+        (
+            "nvidia-open-source",
+            "nvidia-source",
+            "610.57.04",
+            "0be1ce1905f579e68c1701c1286e15ddf02f5243e625773f5a997a8325dc856d",
+            26_177_484,
+        ),
+        (
+            "nvidia-patch-dsc",
+            "nvidia-patch",
+            "fcdc4806b62f86b62a61b92c4b7213a1759537e5",
+            "71008a4f65cd598c2346e22046e87f88aaa8c04f04402f025ebc9888c8fa443b",
+            5_951,
+        ),
+        (
+            "nvidia-patch-vr",
+            "nvidia-patch",
+            "fcdc4806b62f86b62a61b92c4b7213a1759537e5",
+            "bb652257e5cb0dea432a83c971d01406b7acf9cbdb054adf8954c564be0e4e74",
+            1_821,
+        ),
+    ] {
+        let record = inputs
+            .iter()
+            .find(|input| input["name"].as_str() == Some(name))
+            .expect("locked NVIDIA input");
+        assert_eq!(record["kind"].as_str(), Some(kind));
+        assert_eq!(record["revision"].as_str(), Some(revision));
+        assert_eq!(record["sha256"].as_str(), Some(digest));
+        assert_eq!(record["size"].as_integer(), Some(size));
+    }
     let bc = inputs
         .iter()
         .find(|input| input["name"].as_str() == Some("build-tool-bc"))
@@ -2169,6 +2474,40 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
     assert!(environment.contains("\"pt31553-pwm\""));
     let environment_value: toml::Value =
         toml::from_str(&environment).expect("parse checked-in build environment");
+    assert_eq!(
+        environment_value["pkgbase"].as_str(),
+        Some("linux-cachyos-pt31553")
+    );
+    assert_eq!(
+        environment_value["package_names"]
+            .as_array()
+            .expect("package names")
+            .iter()
+            .map(|name| name.as_str().expect("package name"))
+            .collect::<Vec<_>>(),
+        [
+            "linux-cachyos-pt31553",
+            "linux-cachyos-pt31553-headers",
+            "linux-cachyos-pt31553-nvidia-open",
+        ]
+    );
+    assert_eq!(
+        environment_value["nvidia_open_version"].as_str(),
+        Some("610.57.04")
+    );
+    assert_eq!(
+        environment_value["recovery_kernel_package"].as_str(),
+        Some("linux-cachyos-lts")
+    );
+    assert_eq!(
+        environment_value["recovery_kernel_release"].as_str(),
+        Some("6.18")
+    );
+    assert_eq!(
+        environment_value["recovery_pwm_capable"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(environment_value["build_nvidia_open"].as_bool(), Some(true));
     let selected_inputs = environment_value["build_inputs"]
         .as_array()
         .expect("build inputs")
@@ -2194,5 +2533,12 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
         fs::read_to_string(root.join("build-candidate")).expect("read checked-in build wrapper");
     assert!(wrapper.contains("/bundle/patches/$telemetry_patch"));
     assert!(wrapper.contains("/bundle/patches/$pwm_patch"));
+    assert!(wrapper.contains("/bundle/$nvidia_source"));
+    assert!(wrapper.contains("/bundle/nvidia/$nvidia_patch_dsc"));
+    assert!(wrapper.contains("/bundle/nvidia/$nvidia_patch_vr"));
+    assert!(wrapper.contains("linux-cachyos-pt31553-nvidia-open"));
+    assert!(wrapper.contains("package-set.SRCINFO"));
+    assert!(wrapper.contains("packages/$package_name"));
+    assert!(wrapper.contains("sha256sum \"$package\""));
     assert!(wrapper.contains("source+=(\"%s\" \"%s\")"));
 }

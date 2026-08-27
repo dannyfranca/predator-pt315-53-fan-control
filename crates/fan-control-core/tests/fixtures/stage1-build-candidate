@@ -3,10 +3,10 @@ set -euo pipefail
 
 : "${SOURCE_LOCK_BUNDLE:?set SOURCE_LOCK_BUNDLE to the verified bundle directory}"
 if (( $# > 1 )); then
-    echo "only the locked build, --compile-pwm, or --verifysource is allowed" >&2
+    echo "only the locked build, --compile-telemetry, or --verifysource is allowed" >&2
     exit 2
-elif (( $# == 1 )) && [[ "$1" != --compile-pwm && "$1" != --verifysource ]]; then
-    echo "only the locked build, --compile-pwm, or --verifysource is allowed" >&2
+elif (( $# == 1 )) && [[ "$1" != --compile-telemetry && "$1" != --verifysource ]]; then
+    echo "only the locked build, --compile-telemetry, or --verifysource is allowed" >&2
     exit 2
 fi
 
@@ -14,11 +14,7 @@ toolchain_origin="docker.io/cachyos/docker-makepkg-v4@sha256:1c9d839ed8baec04826
 toolchain="docker.io/library/source-lock@sha256:1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6"
 packaging="linux-cachyos-3c399d306eed6497838b246b9dbe73ec2cd1bb2f.tar.gz"
 telemetry_patch="0001-acer-wmi-add-pt31553-telemetry.patch"
-pwm_patch="0002-acer-wmi-enable-pt31553-pwm.patch"
 bc_package="bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
-nvidia_source="NVIDIA-kernel-module-source-610.57.04.tar.xz"
-nvidia_patch_dsc="0002-fix-dsc-correct-RC-parameter-tables-to-match-VESA-DS.patch"
-nvidia_patch_vr="0004-fix-dp-add-Bigscreen-Beyond-VR-headset-to-WAR-databa.patch"
 
 if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
     : "${SOURCE_LOCK_OUTPUT:?container output mount is required}"
@@ -45,16 +41,14 @@ if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
     export _use_gcc_suffix=yes
     export _use_kcfi=no
     export _build_zfs=no
-    export _build_nvidia_open=yes
+    export _build_nvidia_open=no
     export _build_r8125=no
     export _build_debug=no
     export _autofdo=no
     export _propeller=no
 
-    if [[ "${1:-}" == --compile-pwm ]]; then
-        rm -f -- "$SOURCE_LOCK_OUTPUT/acer-wmi.o" \
-            "$SOURCE_LOCK_OUTPUT/acer-wmi.o.sha256"
-        compile_root="$PWD/pwm-compile"
+    if [[ "${1:-}" == --compile-telemetry ]]; then
+        compile_root="$PWD/telemetry-compile"
         tools_root="$compile_root/tools"
         source_root="$compile_root/source"
         mkdir -p "$tools_root/bin" "$source_root"
@@ -65,8 +59,6 @@ if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
             --directory "$source_root" --strip-components=1
         patch --directory "$source_root" -Np1 \
             <"$SOURCE_LOCK_BUNDLE/patches/$telemetry_patch"
-        patch --directory "$source_root" -Np1 \
-            <"$SOURCE_LOCK_BUNDLE/patches/$pwm_patch"
         cp "$SOURCE_LOCK_BUNDLE/config" "$source_root/.config"
         PATH="$tools_root/bin:$PATH" make -C "$source_root" olddefconfig
         PATH="$tools_root/bin:$PATH" make -C "$source_root" -j2 \
@@ -80,96 +72,7 @@ if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
         exit 0
     fi
 
-    if [[ "${1:-}" == --verifysource ]]; then
-        exec makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --skippgpcheck \
-            --skipchecksums --noconfirm --verifysource
-    fi
-
-    if find "$SOURCE_LOCK_OUTPUT" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
-        echo "package output directory must be empty before a locked build" >&2
-        exit 2
-    fi
-
-    expected_packages=(
-        linux-cachyos-pt31553
-        linux-cachyos-pt31553-headers
-        linux-cachyos-pt31553-nvidia-open
-    )
-    # shellcheck disable=SC1091 -- the authenticated recipe is the build input.
-    source ./PKGBUILD
-    [[ "$pkgbase" == linux-cachyos-pt31553 ]]
-    [[ "$_kernuname" == 7.1.8-cachyos-pt31553 ]]
-    [[ "${pkgname[*]}" == "${expected_packages[*]}" ]]
-
-    install -m 0444 "$SOURCE_LOCK_BUNDLE/source-lock.toml" \
-        "$SOURCE_LOCK_OUTPUT/source-lock.toml"
-    install -m 0444 "$SOURCE_LOCK_BUNDLE/build-environment.toml" \
-        "$SOURCE_LOCK_OUTPUT/build-environment.toml"
-    makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --printsrcinfo \
-        >"$SOURCE_LOCK_OUTPUT/package-set.SRCINFO"
-
-    package_list=$(mktemp "$SOURCE_LOCK_OUTPUT/.packagelist.XXXXXX")
-    if ! makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --packagelist \
-        >"$package_list"; then
-        rm -f -- "$package_list"
-        exit 1
-    fi
-    mapfile -t package_paths <"$package_list"
-    rm -f -- "$package_list"
-    [[ "${#package_paths[@]}" -eq "${#expected_packages[@]}" ]]
-    makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --skippgpcheck \
-        --skipchecksums --noconfirm --cleanbuild 2>&1 \
-        | tee "$SOURCE_LOCK_OUTPUT/build.log"
-
-    mapfile -d '' -t produced_package_paths < <(
-        find "$SOURCE_LOCK_OUTPUT" -mindepth 1 -maxdepth 1 -type f \
-            -name '*.pkg.tar.zst' -print0 | sort -z
-    )
-    [[ "${#produced_package_paths[@]}" -eq "${#expected_packages[@]}" ]]
-    declare -A produced_packages=()
-    for produced in "${produced_package_paths[@]}"; do
-        produced=$(realpath "$produced")
-        [[ "$produced" == "$SOURCE_LOCK_OUTPUT/"* && -f "$produced" ]]
-        produced_packages["$produced"]=1
-    done
-    [[ "${#produced_packages[@]}" -eq "${#expected_packages[@]}" ]]
-    for package in "${package_paths[@]}"; do
-        package=$(realpath "$package")
-        [[ ${produced_packages["$package"]+present} ]]
-    done
-
-    evidence_root=$(mktemp -d "$SOURCE_LOCK_OUTPUT/.evidence.XXXXXX")
-    cleanup_evidence() {
-        [[ -z "${evidence_root:-}" ]] || rm -rf -- "$evidence_root"
-    }
-    trap cleanup_evidence EXIT
-    mkdir "$evidence_root/packages"
-    : >"$evidence_root/SHA256SUMS"
-    for index in "${!expected_packages[@]}"; do
-        package="${package_paths[$index]}"
-        package_name="${expected_packages[$index]}"
-        package=$(realpath "$package")
-        [[ "$package" == "$SOURCE_LOCK_OUTPUT/"* && -f "$package" ]]
-        metadata="$evidence_root/packages/$package_name"
-        mkdir "$metadata"
-        for entry in .BUILDINFO .MTREE .PKGINFO; do
-            bsdtar -xOf "$package" "$entry" >"$metadata/$entry"
-        done
-        grep -Fxq "pkgname = $package_name" "$metadata/.PKGINFO"
-        sha256sum "$package" | sed 's#  .*/#  #' \
-            >>"$evidence_root/SHA256SUMS"
-    done
-    chmod 0444 "$evidence_root/SHA256SUMS" \
-        "$evidence_root"/packages/*/.*INFO \
-        "$evidence_root"/packages/*/.MTREE
-    mv "$evidence_root/packages" "$SOURCE_LOCK_OUTPUT/packages"
-    mv "$evidence_root/SHA256SUMS" "$SOURCE_LOCK_OUTPUT/SHA256SUMS"
-    rmdir "$evidence_root"
-    evidence_root=
-    trap - EXIT
-    chmod 0444 "$SOURCE_LOCK_OUTPUT/build.log" \
-        "$SOURCE_LOCK_OUTPUT/package-set.SRCINFO"
-    exit 0
+    exec makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --skippgpcheck --skipchecksums --noconfirm --cleanbuild "$@"
 fi
 
 : "${SOURCE_LOCK_OUTPUT:?set SOURCE_LOCK_OUTPUT to an existing output directory}"
@@ -215,19 +118,7 @@ ln -s /bundle/cachyos-7.1.8-1.tar.gz "$package_root/source-cache/cachyos-7.1.8-1
 ln -s /bundle/cachyos-7.1.8-1.tar.gz.asc "$package_root/source-cache/cachyos-7.1.8-1.tar.gz.asc"
 ln -s /bundle/config "$package_root/source-cache/config"
 ln -s "/bundle/patches/$telemetry_patch" "$package_root/source-cache/$telemetry_patch"
-ln -s "/bundle/patches/$pwm_patch" "$package_root/source-cache/$pwm_patch"
-ln -s "/bundle/$nvidia_source" "$package_root/source-cache/$nvidia_source"
-ln -s "/bundle/nvidia/$nvidia_patch_dsc" "$package_root/source-cache/$nvidia_patch_dsc"
-ln -s "/bundle/nvidia/$nvidia_patch_vr" "$package_root/source-cache/$nvidia_patch_vr"
-printf '\nsource+=("%s" "%s")\nb2sums+=("SKIP" "SKIP")\n' \
-    "$telemetry_patch" "$pwm_patch" >>"$package_root/PKGBUILD"
-[[ "$(grep -Fxc 'pkgbase="linux-$_pkgsuffix"' "$package_root/PKGBUILD")" == 1 ]]
-sed -i 's/^pkgbase="linux-$_pkgsuffix"$/pkgbase="linux-cachyos-pt31553"/' \
-    "$package_root/PKGBUILD"
-[[ "$(grep -Fxc '_kernuname="${pkgver}-${_pkgsuffix}"' "$package_root/PKGBUILD")" == 1 ]]
-sed -i 's/^_kernuname="${pkgver}-${_pkgsuffix}"$/_kernuname="${pkgver}-cachyos-pt31553"/' \
-    "$package_root/PKGBUILD"
-printf 'b2sums+=("SKIP" "SKIP")\n' >>"$package_root/PKGBUILD"
+printf '\nsource+=("%s")\nb2sums+=("SKIP")\n' "$telemetry_patch" >>"$package_root/PKGBUILD"
 
 printf '{"imageLayoutVersion":"1.0.0"}\n' >"$image_layout/oci-layout"
 printf '{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","digest":"sha256:1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6","size":3656,"annotations":{"org.opencontainers.image.ref.name":"source-lock"}}]}\n' >"$image_layout/index.json"

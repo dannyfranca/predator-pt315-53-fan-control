@@ -1,12 +1,13 @@
 # Kernel source lock
 
-`source-lock.toml` is the complete input allowlist for the stage-2 PWM
-`linux-cachyos-gcc` candidate. It pins:
+`source-lock.toml` is the complete input allowlist for the side-by-side
+`linux-cachyos-pt31553` package set. It pins:
 
 - the signed CachyOS tag, signed target commit/tree, release archive, detached archive signature, signer key, and authenticated signature-time policy;
 - the signed CachyOS packaging commit/tree and the exact config contained by that snapshot;
 - the machine-readable build environment, executable PKGBUILD-variable wrapper, and `makepkg.conf`;
 - the raw, digest-addressed CachyOS v4 OCI manifest plus every referenced config/layer blob;
+- NVIDIA open-kernel-module source 610.57.04 and both immutable CachyOS patch revisions;
 - the ordered GPL-2.0-only PT315-53 telemetry and PWM patches.
 
 Copy the tracked metadata and patch inputs into a disposable bundle:
@@ -21,11 +22,19 @@ cp packaging/kernel/cachyos-7.1.8-1.commit /bundle/
 cp packaging/kernel/linux-cachyos-3c399d306eed6497838b246b9dbe73ec2cd1bb2f.commit /bundle/
 cp packaging/kernel/trust/cachyos-release-key.gpg /bundle/
 mkdir -p /bundle/patches
+mkdir -p /bundle/nvidia
 cp packaging/kernel/patches/0001-acer-wmi-add-pt31553-telemetry.patch /bundle/patches/
 cp packaging/kernel/patches/0002-acer-wmi-enable-pt31553-pwm.patch /bundle/patches/
 ```
 
-Fetch the four upstream source inputs at their exact `origin` paths: release archive, detached archive signature, packaging archive, and `config`. Populate `/bundle/oci/blobs/sha256/` with the OCI config and every compressed layer blob recorded by the manifest; each blob's immutable registry URL, digest, path, and size is recorded in the lock. Keep every recorded filename and do not leave registry metadata or other files in the bundle.
+Fetch the four kernel/packaging inputs at their exact `origin` paths: release
+archive, detached archive signature, packaging archive, and `config`. Also
+fetch the locked NVIDIA source archive into `/bundle/` and its two locked
+CachyOS patches into `/bundle/nvidia/`. Populate
+`/bundle/oci/blobs/sha256/` with the OCI config and every compressed layer
+blob recorded by the manifest. Every immutable URL, digest, path, and size is
+recorded in the lock. Keep every recorded filename and do not leave registry
+metadata or other files in the bundle.
 
 Also fetch the exact CachyOS v4 `bc` package at its locked `origin` into
 `/bundle/build-tools/`. It is extracted without installation and used only to
@@ -38,6 +47,15 @@ chmod -R a+rX,a-w /bundle
 mkdir -p "$PWD/build-output"
 SOURCE_LOCK_OUTPUT="$PWD/build-output" scripts/verify-source-lock --inputs /bundle --exec-verified
 ```
+
+The default verified execution emits exactly three non-stock package names:
+`linux-cachyos-pt31553`, `linux-cachyos-pt31553-headers`, and
+`linux-cachyos-pt31553-nvidia-open`. The output directory must be empty. It
+retains the complete build log, source lock, build environment, generated
+`.SRCINFO`, package checksums, and each package's `.BUILDINFO`, `.MTREE`,
+and `.PKGINFO`.
+The verifier places the exact parsed source-lock bytes into its private
+snapshot for retention; do not add `source-lock.toml` to the input bundle.
 
 For the stage-2 review gate, compile the patched translation unit in the same
 verified, offline environment and retain the object plus its SHA-256 evidence:
@@ -63,4 +81,7 @@ Patch presence is not hardware qualification and does not authorize live fan
 writes. The controller remains disabled until the exact candidate completes the
 qualification and promotion gates.
 
-The wrapper reconstructs a temporary OCI layout from the verified manifest and blobs, imports it into disposable Podman root/runroot storage, and executes that exact manifest digest using `--pull=never`, no network, and a read-only container root. It extracts only the pinned packaging snapshot into a disposable work directory; clears ambient CI controls; exposes the verified source/config/patch chain through a writable cache of read-only symlinks; adds only those patches to the authenticated recipe; writes packages only to the output mount; and explicitly selects CachyOS's default scheduler, GCC, `generic_v4`, and no NVIDIA/ZFS/R8125 module build. The verifier also accepts the exact `--compile-pwm` review gate, which extracts the locked `bc` executable into the disposable work directory and compiles only the patched `acer-wmi.o`; arbitrary `makepkg` flags are rejected. `makepkg`'s inconsistent snapshot checksum array is bypassed only after the source-lock verifier has authenticated and hashed every input. The wrapper never uses the caller's checkout or host `makepkg`.
+The recovery package remains stock `linux-cachyos-lts` 6.18. It is always
+Firmware Auto recovery and is explicitly not PWM-capable.
+
+The wrapper reconstructs a temporary OCI layout from the verified manifest and blobs, imports it into disposable Podman root/runroot storage, and executes that exact manifest digest using `--pull=never`, no network, and a read-only container root. It extracts only the pinned packaging snapshot into a disposable work directory; clears ambient CI controls; exposes the verified source/config/patch chain through a writable cache of read-only symlinks; assigns the unique package base and kernel release suffix; adds only the locked PT315-53 patches to the authenticated recipe; builds the matching locked NVIDIA open module; writes packages and retained evidence only to the output mount; and explicitly selects CachyOS's default scheduler, GCC, `generic_v4`, and no ZFS/R8125 module build. The verifier also accepts the exact `--compile-pwm` review gate, which extracts the locked `bc` executable into the disposable work directory and compiles only the patched `acer-wmi.o`; arbitrary `makepkg` flags are rejected. `makepkg`'s inconsistent snapshot checksum array is bypassed only after the source-lock verifier has authenticated and hashed every input. The wrapper never uses the caller's checkout or host `makepkg`.
