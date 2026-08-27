@@ -19,6 +19,7 @@ sha256sums=(
 )
 
 prepare() {
+  umask 0022
   cd "predator-pt315-53-fan-control-$_commit"
   # GitHub archives may preserve a group-writable top-level directory. Keep
   # ownership-sensitive tests and build outputs beneath trusted ancestors.
@@ -27,11 +28,13 @@ prepare() {
 }
 
 build() {
+  umask 0022
   cd "predator-pt315-53-fan-control-$_commit"
   cargo build --frozen --release --workspace --bins
 }
 
 check() {
+  umask 0022
   cd "predator-pt315-53-fan-control-$_commit"
   RUSTFLAGS="${RUSTFLAGS:-} -C debug-assertions=yes" cargo test --frozen --workspace
 }

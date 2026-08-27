@@ -145,7 +145,7 @@ fn prepare_hardens_reused_source_ancestors() {
     let output = Command::new("/bin/bash")
         .args([
             "-c",
-            "set -euo pipefail; source \"$1\"; cargo() { test \"$(stat -c %a \"$srcdir\")\" = 755; test \"$(stat -c %a \"$PWD\")\" = 755; }; prepare",
+            "set -euo pipefail; source \"$1\"; cargo() { test \"$(umask)\" = 0022; test \"$(stat -c %a \"$srcdir\")\" = 755; test \"$(stat -c %a \"$PWD\")\" = 755; }; (umask 0002; prepare); (umask 0002; build); (umask 0002; check)",
             "package-prepare-test",
         ])
         .arg(package_root().join("PKGBUILD"))
