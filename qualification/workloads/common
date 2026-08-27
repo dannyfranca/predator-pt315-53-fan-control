@@ -43,6 +43,25 @@ stop_fixed_workload() {
 }
 
 wait_for_fixed_workload() {
+  local status
+  local -a pids=()
+  local pid
+  for pid in "${CPU_WORKLOAD_PID:-}" "${GPU_WORKLOAD_PID:-}"; do
+    if [[ -n $pid ]]; then
+      pids+=("$pid")
+    fi
+  done
+  if [[ ${#pids[@]} -eq 0 ]]; then
+    return 1
+  fi
   trap 'stop_fixed_workload; exit 0' HUP INT TERM
-  wait -n "${CPU_WORKLOAD_PID:-}" "${GPU_WORKLOAD_PID:-}"
+  if wait -n "${pids[@]}"; then
+    # Every fixed load is intentionally unbounded; a clean child exit is also
+    # an incomplete workload and must fail after its sibling is contained.
+    status=1
+  else
+    status=$?
+  fi
+  stop_fixed_workload
+  return "$status"
 }
