@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Danny Franca <dannyfranca@users.noreply.github.com>
+Date: Thu, 27 Aug 2026 06:45:00 -0300
+Subject: [PATCH 2/2] platform/x86: acer-wmi: enable PT315-53 PWM
+
+SPDX-License-Identifier: GPL-2.0-only
+Upstream-Repository: https://github.com/CachyOS/linux
+Upstream-Revision: 7a84732fd5e4350c1312fd0ed0c72ffa139fb766
+Upstream-Path: drivers/platform/x86/acer-wmi.c
+
+After the separate exact-model telemetry patch has established the
+PT315-53 / Civic_TLS identity, enable the existing Predator-v4 PWM
+interface for that model-specific quirk. Add no alternate write path.
+---
+ drivers/platform/x86/acer-wmi.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/platform/x86/acer-wmi.c b/drivers/platform/x86/acer-wmi.c
+index ff8648f541d0..7d8c2ca76b73 100644
+--- a/drivers/platform/x86/acer-wmi.c
++++ b/drivers/platform/x86/acer-wmi.c
+@@ -484,6 +484,7 @@ static struct quirk_entry quirk_acer_predator_pt14_51 = {
+ 
+ static struct quirk_entry quirk_acer_predator_pt315_53 = {
+ 	.predator_v4 = 1,
++	.pwm = 1,
+ };
+ 
+ static struct quirk_entry quirk_acer_predator_v4 = {
+-- 
+2.51.0

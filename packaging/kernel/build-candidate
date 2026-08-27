@@ -3,10 +3,10 @@ set -euo pipefail
 
 : "${SOURCE_LOCK_BUNDLE:?set SOURCE_LOCK_BUNDLE to the verified bundle directory}"
 if (( $# > 1 )); then
-    echo "only the locked build, --compile-telemetry, or --verifysource is allowed" >&2
+    echo "only the locked build, --compile-pwm, or --verifysource is allowed" >&2
     exit 2
-elif (( $# == 1 )) && [[ "$1" != --compile-telemetry && "$1" != --verifysource ]]; then
-    echo "only the locked build, --compile-telemetry, or --verifysource is allowed" >&2
+elif (( $# == 1 )) && [[ "$1" != --compile-pwm && "$1" != --verifysource ]]; then
+    echo "only the locked build, --compile-pwm, or --verifysource is allowed" >&2
     exit 2
 fi
 
@@ -14,6 +14,7 @@ toolchain_origin="docker.io/cachyos/docker-makepkg-v4@sha256:1c9d839ed8baec04826
 toolchain="docker.io/library/source-lock@sha256:1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6"
 packaging="linux-cachyos-3c399d306eed6497838b246b9dbe73ec2cd1bb2f.tar.gz"
 telemetry_patch="0001-acer-wmi-add-pt31553-telemetry.patch"
+pwm_patch="0002-acer-wmi-enable-pt31553-pwm.patch"
 bc_package="bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
 
 if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
@@ -47,8 +48,10 @@ if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
     export _autofdo=no
     export _propeller=no
 
-    if [[ "${1:-}" == --compile-telemetry ]]; then
-        compile_root="$PWD/telemetry-compile"
+    if [[ "${1:-}" == --compile-pwm ]]; then
+        rm -f -- "$SOURCE_LOCK_OUTPUT/acer-wmi.o" \
+            "$SOURCE_LOCK_OUTPUT/acer-wmi.o.sha256"
+        compile_root="$PWD/pwm-compile"
         tools_root="$compile_root/tools"
         source_root="$compile_root/source"
         mkdir -p "$tools_root/bin" "$source_root"
@@ -59,6 +62,8 @@ if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
             --directory "$source_root" --strip-components=1
         patch --directory "$source_root" -Np1 \
             <"$SOURCE_LOCK_BUNDLE/patches/$telemetry_patch"
+        patch --directory "$source_root" -Np1 \
+            <"$SOURCE_LOCK_BUNDLE/patches/$pwm_patch"
         cp "$SOURCE_LOCK_BUNDLE/config" "$source_root/.config"
         PATH="$tools_root/bin:$PATH" make -C "$source_root" olddefconfig
         PATH="$tools_root/bin:$PATH" make -C "$source_root" -j2 \
@@ -118,7 +123,9 @@ ln -s /bundle/cachyos-7.1.8-1.tar.gz "$package_root/source-cache/cachyos-7.1.8-1
 ln -s /bundle/cachyos-7.1.8-1.tar.gz.asc "$package_root/source-cache/cachyos-7.1.8-1.tar.gz.asc"
 ln -s /bundle/config "$package_root/source-cache/config"
 ln -s "/bundle/patches/$telemetry_patch" "$package_root/source-cache/$telemetry_patch"
-printf '\nsource+=("%s")\nb2sums+=("SKIP")\n' "$telemetry_patch" >>"$package_root/PKGBUILD"
+ln -s "/bundle/patches/$pwm_patch" "$package_root/source-cache/$pwm_patch"
+printf '\nsource+=("%s" "%s")\nb2sums+=("SKIP" "SKIP")\n' \
+    "$telemetry_patch" "$pwm_patch" >>"$package_root/PKGBUILD"
 
 printf '{"imageLayoutVersion":"1.0.0"}\n' >"$image_layout/oci-layout"
 printf '{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","digest":"sha256:1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6","size":3656,"annotations":{"org.opencontainers.image.ref.name":"source-lock"}}]}\n' >"$image_layout/index.json"
