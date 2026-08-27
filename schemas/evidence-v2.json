@@ -110,7 +110,10 @@
             "allOf": [{
               "items": {
                 "required": ["source_timestamp", "fresh"],
-                "not": { "required": ["phase"] }
+                "not": { "required": ["phase"] },
+                "properties": {
+                  "endpoint_identity": { "$ref": "#/$defs/liveLifecycleIdentity" }
+                }
               }
             }],
             "prefixItems": [
@@ -691,7 +694,7 @@
         "observed_at": { "$ref": "#/$defs/timestamp" },
         "fresh": { "const": true },
         "enable_readback": { "const": 2 },
-        "endpoint_identity": { "type": "string", "minLength": 1 }
+        "endpoint_identity": { "$ref": "#/$defs/liveLifecycleIdentity" }
       }
     },
     "liveLifecycleAutoPair": {
@@ -742,8 +745,8 @@
                 "fresh": { "const": true },
                 "duplicate_rejected": { "const": true },
                 "original_owner_preserved": { "const": true },
-                "original_process_identity": { "type": "string", "minLength": 1 },
-                "rejected_process_identity": { "type": "string", "minLength": 1 }
+                "original_process_identity": { "$ref": "#/$defs/liveLifecycleIdentity" },
+                "rejected_process_identity": { "$ref": "#/$defs/liveLifecycleIdentity" }
               }
             }
           }
@@ -768,8 +771,8 @@
                 "auto_before_restart": { "$ref": "#/$defs/liveLifecycleAutoPair" },
                 "restarted_at": { "$ref": "#/$defs/timestamp" },
                 "fresh_process": { "const": true },
-                "process_identity_before": { "type": "string", "minLength": 1 },
-                "process_identity_after": { "type": "string", "minLength": 1 }
+                "process_identity_before": { "$ref": "#/$defs/liveLifecycleIdentity" },
+                "process_identity_after": { "$ref": "#/$defs/liveLifecycleIdentity" }
               }
             }
           }
@@ -794,8 +797,8 @@
                 "killed_at": { "$ref": "#/$defs/timestamp" },
                 "auto_before_restart": { "$ref": "#/$defs/liveLifecycleAutoPair" },
                 "restarted_at": { "$ref": "#/$defs/timestamp" },
-                "process_identity_before": { "type": "string", "minLength": 1 },
-                "process_identity_after": { "type": "string", "minLength": 1 },
+                "process_identity_before": { "$ref": "#/$defs/liveLifecycleIdentity" },
+                "process_identity_after": { "$ref": "#/$defs/liveLifecycleIdentity" },
                 "restart_delay_millis": { "const": 2000 },
                 "start_limit_burst": { "const": 2 }
               }
@@ -822,8 +825,8 @@
                 "expired_at": { "$ref": "#/$defs/timestamp" },
                 "auto_before_restart": { "$ref": "#/$defs/liveLifecycleAutoPair" },
                 "restarted_at": { "$ref": "#/$defs/timestamp" },
-                "process_identity_before": { "type": "string", "minLength": 1 },
-                "process_identity_after": { "type": "string", "minLength": 1 },
+                "process_identity_before": { "$ref": "#/$defs/liveLifecycleIdentity" },
+                "process_identity_after": { "$ref": "#/$defs/liveLifecycleIdentity" },
                 "restart_delay_millis": { "const": 2000 },
                 "start_limit_burst": { "const": 2 }
               }
@@ -887,8 +890,8 @@
                 "suspend_completed": { "const": true },
                 "resumed_at": { "$ref": "#/$defs/timestamp" },
                 "process_started_at": { "$ref": "#/$defs/timestamp" },
-                "process_identity_before": { "type": "string", "minLength": 1 },
-                "process_identity_after": { "type": "string", "minLength": 1 }
+                "process_identity_before": { "$ref": "#/$defs/liveLifecycleIdentity" },
+                "process_identity_after": { "$ref": "#/$defs/liveLifecycleIdentity" }
               }
             }
           }
@@ -914,12 +917,17 @@
                 "post_boot_at": { "$ref": "#/$defs/timestamp" },
                 "auto_before_arm": { "$ref": "#/$defs/liveLifecycleAutoPair" },
                 "armed_at": { "$ref": "#/$defs/timestamp" },
-                "controller_process_identity": { "type": "string", "minLength": 1 }
+                "controller_process_identity": { "$ref": "#/$defs/liveLifecycleIdentity" }
               }
             }
           }
         }
       ]
+    },
+    "liveLifecycleIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "[^\\u0000-\\u0020\\u007F-\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]"
     },
     "identifier": {
       "type": "string",

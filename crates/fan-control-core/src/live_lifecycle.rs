@@ -575,7 +575,9 @@ where
                                 > gate.completed_at.monotonic_millis
                                 && arm.armed_at.monotonic_millis
                                     <= arm_completed_at.monotonic_millis
-                                && !arm.controller_process_identity.trim().is_empty();
+                                && identity_has_nonblank_character(
+                                    &arm.controller_process_identity,
+                                );
                             case_completed_at = arm_completed_at;
                             if arm_is_ordered {
                                 if let Some(LiveLifecycleCaseObservation::Reboot {
@@ -806,7 +808,10 @@ where
                 .to_owned(),
         );
     } else if let Some((cpu_identity, gpu_identity)) = &identities {
-        if cpu_identity.is_empty() || gpu_identity.is_empty() || cpu_identity == gpu_identity {
+        if !identity_has_nonblank_character(cpu_identity)
+            || !identity_has_nonblank_character(gpu_identity)
+            || cpu_identity == gpu_identity
+        {
             detail =
                 Some("Firmware Auto readbacks require two distinct endpoint identities".into());
         } else if let Some((expected_cpu, expected_gpu)) = expected_identities {
@@ -875,7 +880,7 @@ where
                 && observation.observed_at.wall_unix_millis <= raw_completed_at.wall_unix_millis
                 && observation.observed_at.monotonic_millis >= not_before.monotonic_millis
                 && observation.observed_at.wall_unix_millis >= not_before.wall_unix_millis;
-            let identity_valid = !observation.endpoint_identity.is_empty();
+            let identity_valid = identity_has_nonblank_character(&observation.endpoint_identity);
             let completed_at = if boot_id.is_some() {
                 observation.observed_at
             } else {
@@ -1025,8 +1030,8 @@ fn validate_bounded_recovery(
         || started_at.wall_unix_millis > proof.start_limit_reset_at.wall_unix_millis
         || proof.start_limit_reset_at.monotonic_millis >= proof.event_at.monotonic_millis
         || proof.start_limit_reset_at.wall_unix_millis > proof.event_at.wall_unix_millis
-        || proof.process_identity_before.trim().is_empty()
-        || proof.process_identity_after.trim().is_empty()
+        || !identity_has_nonblank_character(proof.process_identity_before)
+        || !identity_has_nonblank_character(proof.process_identity_after)
         || proof.process_identity_before == proof.process_identity_after
     {
         return Err(
@@ -1073,8 +1078,8 @@ fn validate_case_observation(
                 rejected_process_identity,
             },
         ) if timestamp_is_inside_case(*observed_at, started_at, completed_at)
-            && !original_process_identity.trim().is_empty()
-            && !rejected_process_identity.trim().is_empty()
+            && identity_has_nonblank_character(original_process_identity)
+            && identity_has_nonblank_character(rejected_process_identity)
             && original_process_identity != rejected_process_identity =>
         {
             Ok(())
@@ -1090,8 +1095,8 @@ fn validate_case_observation(
                 process_identity_before,
                 process_identity_after,
             },
-        ) if !process_identity_before.trim().is_empty()
-            && !process_identity_after.trim().is_empty()
+        ) if identity_has_nonblank_character(process_identity_before)
+            && identity_has_nonblank_character(process_identity_after)
             && process_identity_before != process_identity_after =>
         {
             validate_auto_after_event_before_boundary(
@@ -1208,8 +1213,8 @@ fn validate_case_observation(
             && resumed_at.wall_unix_millis <= process_started_at.wall_unix_millis
             && process_started_at.monotonic_millis <= completed_at.monotonic_millis
             && process_started_at.wall_unix_millis <= completed_at.wall_unix_millis
-            && !process_identity_before.is_empty()
-            && !process_identity_after.is_empty()
+            && identity_has_nonblank_character(process_identity_before)
+            && identity_has_nonblank_character(process_identity_after)
             && process_identity_before != process_identity_after =>
         {
             validate_auto_before_boundary(
@@ -1250,7 +1255,7 @@ fn validate_case_observation(
             && armed_at.monotonic_millis <= completed_at.monotonic_millis
             && armed_at.wall_unix_millis <= completed_at.wall_unix_millis =>
         {
-            if controller_process_identity.trim().is_empty() {
+            if !identity_has_nonblank_character(controller_process_identity) {
                 return Err("reboot failed: armed controller process identity is empty".into());
             }
             validate_rebound_auto_pair(auto_before_arm, expected_identities).map_err(|_| {
@@ -1396,8 +1401,8 @@ fn rebound_identities(
     pair: &LiveLifecycleFanAutoPair,
     previous_identities: Option<&(String, String)>,
 ) -> Option<(String, String)> {
-    let identities_are_unambiguous = !pair.cpu.endpoint_identity.is_empty()
-        && !pair.gpu.endpoint_identity.is_empty()
+    let identities_are_unambiguous = identity_has_nonblank_character(&pair.cpu.endpoint_identity)
+        && identity_has_nonblank_character(&pair.gpu.endpoint_identity)
         && pair.cpu.endpoint_identity != pair.gpu.endpoint_identity
         && previous_identities.is_none_or(|previous| {
             pair.cpu.endpoint_identity != previous.1 && pair.gpu.endpoint_identity != previous.0
@@ -1406,6 +1411,24 @@ fn rebound_identities(
         (
             pair.cpu.endpoint_identity.clone(),
             pair.gpu.endpoint_identity.clone(),
+        )
+    })
+}
+
+pub(crate) fn identity_has_nonblank_character(identity: &str) -> bool {
+    identity.chars().any(|character| {
+        !matches!(
+            character,
+            '\u{0000}'..='\u{0020}'
+                | '\u{007f}'..='\u{00a0}'
+                | '\u{1680}'
+                | '\u{2000}'..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
         )
     })
 }
@@ -1502,6 +1525,8 @@ pub(crate) fn live_lifecycle_cases_are_well_formed(record: &EvidenceRecord) -> b
         [cpu, gpu]
             if cpu.fan == EvidenceFan::Cpu
                 && gpu.fan == EvidenceFan::Gpu
+                && identity_has_nonblank_character(&cpu.endpoint_identity)
+                && identity_has_nonblank_character(&gpu.endpoint_identity)
                 && cpu.endpoint_identity != gpu.endpoint_identity =>
         {
             Some((cpu.endpoint_identity.clone(), gpu.endpoint_identity.clone()))
@@ -1763,7 +1788,10 @@ pub(crate) fn live_lifecycle_is_complete(record: &EvidenceRecord) -> bool {
         return false;
     };
     let expected_identities = (cpu_identity.to_owned(), gpu_identity.to_owned());
-    if cpu_identity == gpu_identity {
+    if !identity_has_nonblank_character(cpu_identity)
+        || !identity_has_nonblank_character(gpu_identity)
+        || cpu_identity == gpu_identity
+    {
         return false;
     }
 

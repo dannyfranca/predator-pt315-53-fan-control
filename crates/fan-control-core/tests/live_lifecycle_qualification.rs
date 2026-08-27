@@ -96,6 +96,60 @@ fn passing_report_round_trips_with_durable_case_proof_and_matches_the_v2_schema(
 }
 
 #[test]
+fn passing_lifecycle_identity_fields_reject_whitespace_only_values() {
+    let mut environment = LifecycleEnvironment::default();
+    let report = run_live_lifecycle_qualification(&mut environment, &envelope()).unwrap();
+    let value = serde_json::to_value(report.record()).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(EVIDENCE_V2_SCHEMA).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+
+    for blank_identity in ["\0", " \t ", "\u{0085}", "\u{2000}", "\u{feff}"] {
+        for pointer in [
+            "/readbacks/0/endpoint_identity",
+            "/readbacks/3/endpoint_identity",
+            "/live_lifecycle_cases/1/observation/original_process_identity",
+            "/live_lifecycle_cases/2/observation/process_identity_before",
+            "/live_lifecycle_cases/3/observation/process_identity_after",
+            "/live_lifecycle_cases/4/observation/process_identity_before",
+            "/live_lifecycle_cases/6/observation/process_identity_after",
+            "/live_lifecycle_cases/7/observation/controller_process_identity",
+            "/live_lifecycle_cases/2/observation/auto_before_restart/cpu/endpoint_identity",
+        ] {
+            let mut tampered = value.clone();
+            *tampered.pointer_mut(pointer).unwrap() = blank_identity.into();
+            assert!(
+                !validator.is_valid(&tampered),
+                "{pointer}: {blank_identity:?}"
+            );
+            assert!(
+                parse_evidence_v2(&serde_json::to_string(&tampered).unwrap()).is_err(),
+                "{pointer}: {blank_identity:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn visible_unicode_lifecycle_identities_remain_schema_and_parser_compatible() {
+    let mut environment = LifecycleEnvironment {
+        unicode_endpoint_identities: true,
+        ..LifecycleEnvironment::default()
+    };
+    let report = run_live_lifecycle_qualification(&mut environment, &envelope()).unwrap();
+    assert!(report.accepted());
+
+    let schema: serde_json::Value = serde_json::from_str(EVIDENCE_V2_SCHEMA).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let mut value = serde_json::to_value(report.record()).unwrap();
+    value["live_lifecycle_cases"][1]["observation"]["original_process_identity"] = "管理器".into();
+    value["live_lifecycle_cases"][7]["observation"]["controller_process_identity"] =
+        "控制器".into();
+
+    assert!(validator.is_valid(&value));
+    assert!(parse_evidence_v2(&serde_json::to_string(&value).unwrap()).is_ok());
+}
+
+#[test]
 fn fresh_auto_reads_in_the_request_millisecond_remain_ordered_and_valid() {
     let mut environment = LifecycleEnvironment {
         same_millisecond_auto: true,
@@ -873,10 +927,15 @@ fn endpoint_identity_change_blocks_the_next_case() {
 
 #[test]
 fn unreadable_or_identityless_auto_gate_is_recorded_and_fails_closed() {
-    for (auto_error_call, empty_identity_call) in [(Some(3), None), (None, Some(3))] {
+    for (auto_error_call, empty_identity_call, whitespace_identity_call) in [
+        (Some(3), None, None),
+        (None, Some(3), None),
+        (None, None, Some(3)),
+    ] {
         let mut environment = LifecycleEnvironment {
             auto_error_call,
             empty_identity_call,
+            whitespace_identity_call,
             ..LifecycleEnvironment::default()
         };
 
@@ -889,6 +948,7 @@ fn unreadable_or_identityless_auto_gate_is_recorded_and_fails_closed() {
         assert_eq!(report.record().readbacks.len(), 4);
         assert!(report.record().readbacks.iter().all(|attempt| {
             !attempt.endpoint_identity.is_empty()
+                && !attempt.endpoint_identity.trim().is_empty()
                 && (attempt.value.is_some()
                     || attempt.outcome == fan_control_core::ObservationOutcome::Unreadable)
         }));
@@ -898,10 +958,15 @@ fn unreadable_or_identityless_auto_gate_is_recorded_and_fails_closed() {
 
 #[test]
 fn initial_gate_records_both_typed_attempts_when_identity_or_read_fails() {
-    for (auto_error_call, empty_identity_call) in [(Some(1), None), (None, Some(1))] {
+    for (auto_error_call, empty_identity_call, whitespace_identity_call) in [
+        (Some(1), None, None),
+        (None, Some(1), None),
+        (None, None, Some(1)),
+    ] {
         let mut environment = LifecycleEnvironment {
             auto_error_call,
             empty_identity_call,
+            whitespace_identity_call,
             ..LifecycleEnvironment::default()
         };
 
@@ -918,6 +983,15 @@ fn initial_gate_records_both_typed_attempts_when_identity_or_read_fails() {
                 .contains("cpu-enable")
         );
         assert!(report.record().validate().is_ok());
+
+        for blank_identity in ["\0", "\u{0085}", "\u{2000}", "\u{feff}"] {
+            let mut tampered = serde_json::to_value(report.record()).unwrap();
+            tampered["readbacks"][0]["endpoint_identity"] = blank_identity.into();
+            assert!(
+                parse_evidence_v2(&serde_json::to_string(&tampered).unwrap()).is_err(),
+                "partial initial gate accepted {blank_identity:?}"
+            );
+        }
     }
 }
 
@@ -1185,6 +1259,8 @@ struct LifecycleEnvironment {
     stale_auto_call: Option<usize>,
     stale_wall_auto_call: Option<usize>,
     empty_identity_call: Option<usize>,
+    whitespace_identity_call: Option<usize>,
+    unicode_endpoint_identities: bool,
     case_error: Option<LiveLifecycleCase>,
     malformed_case: Option<LiveLifecycleCase>,
     invalid_recovery_proof: Option<LiveLifecycleCase>,
@@ -1208,20 +1284,34 @@ impl LifecycleEnvironment {
     }
 
     fn auto_pair(&mut self) -> LiveLifecycleFanAutoPair {
-        let identity_suffix = if self.after_reboot { "-postboot" } else { "" };
+        let cpu_identity = self.endpoint_identity(EvidenceFan::Cpu);
+        let gpu_identity = self.endpoint_identity(EvidenceFan::Gpu);
         let cpu = LiveLifecycleFanAutoObservation {
             observed_at: self.tick(),
             fresh: true,
             enable_readback: Some(2),
-            endpoint_identity: format!("cpu-enable{identity_suffix}"),
+            endpoint_identity: cpu_identity,
         };
         let gpu = LiveLifecycleFanAutoObservation {
             observed_at: self.tick(),
             fresh: true,
             enable_readback: Some(2),
-            endpoint_identity: format!("gpu-enable{identity_suffix}"),
+            endpoint_identity: gpu_identity,
         };
         LiveLifecycleFanAutoPair { cpu, gpu }
+    }
+
+    fn endpoint_identity(&self, fan: EvidenceFan) -> String {
+        match (fan, self.after_reboot, self.unicode_endpoint_identities) {
+            (EvidenceFan::Cpu, false, true) => "处理器风扇".into(),
+            (EvidenceFan::Gpu, false, true) => "图形风扇".into(),
+            (EvidenceFan::Cpu, true, true) => "处理器风扇-重启后".into(),
+            (EvidenceFan::Gpu, true, true) => "图形风扇-重启后".into(),
+            (EvidenceFan::Cpu, false, false) => "cpu-enable".into(),
+            (EvidenceFan::Gpu, false, false) => "gpu-enable".into(),
+            (EvidenceFan::Cpu, true, false) => "cpu-enable-postboot".into(),
+            (EvidenceFan::Gpu, true, false) => "gpu-enable-postboot".into(),
+        }
     }
 
     fn passing_observation(&mut self, case: LiveLifecycleCase) -> LiveLifecycleCaseObservation {
@@ -1638,18 +1728,16 @@ impl LiveLifecycleEnvironment for LifecycleEnvironment {
                     2
                 },
             ),
-            endpoint_identity: match (fan, self.after_reboot) {
-                (EvidenceFan::Cpu, false) => "cpu-enable".into(),
-                (EvidenceFan::Gpu, false) => "gpu-enable".into(),
-                (EvidenceFan::Cpu, true) => "cpu-enable-postboot".into(),
-                (EvidenceFan::Gpu, true) => "gpu-enable-postboot".into(),
-            },
+            endpoint_identity: self.endpoint_identity(fan),
         };
         if self.changed_identity_call == Some(self.auto_calls) {
             observation.endpoint_identity.push_str("-changed");
         }
         if self.empty_identity_call == Some(self.auto_calls) {
             observation.endpoint_identity.clear();
+        }
+        if self.whitespace_identity_call == Some(self.auto_calls) {
+            observation.endpoint_identity = " \t ".into();
         }
         if self.stale_wall_auto_call == Some(self.auto_calls) {
             observation.observed_at.wall_unix_millis = timestamp_parts(0, 1).wall_unix_millis;

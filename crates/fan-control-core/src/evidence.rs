@@ -771,6 +771,10 @@ impl EvidenceRecord {
             };
             if !outcome_matches_value
                 || readback.endpoint_identity.is_empty()
+                || self.stage == "live-lifecycle"
+                    && !crate::live_lifecycle::identity_has_nonblank_character(
+                        &readback.endpoint_identity,
+                    )
                 || readback
                     .boot_id
                     .as_deref()
