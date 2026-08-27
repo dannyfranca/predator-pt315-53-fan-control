@@ -1,9 +1,11 @@
 use fan_control_core::{
     ABBREVIATED_RECHECKS, AbbreviatedRecheck, AbbreviatedRecheckOutcome, AbbreviatedRecheckResults,
-    CompatibilityDeclarationV1, FullRequalificationReason, PhysicalHardwareContinuity,
-    QualificationBaseline, QualificationCandidate, QualificationRecordV2, RequalificationDecision,
-    decide_requalification, parse_config_v1, validate_config_v1,
+    COMBINED_AC_WORKLOAD_DURATION, CombinedAcWorkloadEvidence, CompatibilityDeclarationV1,
+    FullRequalificationReason, PhysicalHardwareContinuity, QualificationBaseline,
+    QualificationCandidate, QualificationRecordV2, RequalificationDecision, decide_requalification,
+    parse_config_v1, validate_config_v1,
 };
+use std::time::Duration;
 
 mod support;
 use support::{HASH_B, PROTECTED_POLICY, compatibility_declaration, matching_record};
@@ -108,6 +110,9 @@ fn abbreviated_results(
         serde_json::from_str(&matching_record(PROTECTED_POLICY)).unwrap(),
         candidate.clone(),
         PROTECTED_POLICY,
+        CombinedAcWorkloadEvidence::Uninterrupted {
+            duration: COMBINED_AC_WORKLOAD_DURATION,
+        },
         outcomes,
     )
 }
@@ -421,6 +426,66 @@ fn same_code_rebuild_is_eligible_only_after_every_abbreviated_check_passes() {
         ),
         RequalificationDecision::EligibleAfterAbbreviatedRequalification
     );
+}
+
+#[test]
+fn abbreviated_combined_ac_check_requires_one_uninterrupted_run_of_at_least_twenty_minutes() {
+    let candidate = same_code_rebuild_compatibility();
+    for evidence in [
+        CombinedAcWorkloadEvidence::Uninterrupted {
+            duration: Duration::from_secs(19 * 60 + 59),
+        },
+        CombinedAcWorkloadEvidence::Interrupted {
+            accumulated_duration: COMBINED_AC_WORKLOAD_DURATION,
+        },
+    ] {
+        let results = AbbreviatedRecheckResults::new(
+            serde_json::from_str(&matching_record(PROTECTED_POLICY)).unwrap(),
+            candidate.clone(),
+            PROTECTED_POLICY,
+            evidence,
+            [AbbreviatedRecheckOutcome::Passed; ABBREVIATED_RECHECKS.len()],
+        );
+
+        assert_eq!(
+            decision(
+                &candidate,
+                PROTECTED_POLICY,
+                &protected_configuration(),
+                PhysicalHardwareContinuity::ConfirmedUnchanged,
+                Some(&results),
+            ),
+            RequalificationDecision::FullRequalificationRequired {
+                reason: FullRequalificationReason::AbbreviatedCheckDifferent {
+                    check: AbbreviatedRecheck::CombinedAcWorkload,
+                },
+            }
+        );
+    }
+
+    for duration in [
+        COMBINED_AC_WORKLOAD_DURATION,
+        COMBINED_AC_WORKLOAD_DURATION + Duration::from_millis(1),
+    ] {
+        let results = AbbreviatedRecheckResults::new(
+            serde_json::from_str(&matching_record(PROTECTED_POLICY)).unwrap(),
+            candidate.clone(),
+            PROTECTED_POLICY,
+            CombinedAcWorkloadEvidence::Uninterrupted { duration },
+            [AbbreviatedRecheckOutcome::Passed; ABBREVIATED_RECHECKS.len()],
+        );
+
+        assert_eq!(
+            decision(
+                &candidate,
+                PROTECTED_POLICY,
+                &protected_configuration(),
+                PhysicalHardwareContinuity::ConfirmedUnchanged,
+                Some(&results),
+            ),
+            RequalificationDecision::EligibleAfterAbbreviatedRequalification
+        );
+    }
 }
 
 #[test]

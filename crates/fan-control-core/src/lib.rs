@@ -155,8 +155,9 @@ pub use qualification::{
 };
 pub use requalification::{
     ABBREVIATED_RECHECKS, AbbreviatedRecheck, AbbreviatedRecheckOutcome, AbbreviatedRecheckResults,
-    FullRequalificationReason, PhysicalHardwareContinuity, QualificationBaseline,
-    QualificationCandidate, RequalificationDecision, decide_requalification,
+    COMBINED_AC_WORKLOAD_DURATION, CombinedAcWorkloadEvidence, FullRequalificationReason,
+    PhysicalHardwareContinuity, QualificationBaseline, QualificationCandidate,
+    RequalificationDecision, decide_requalification,
 };
 pub use restoration::{
     EmergencyContainmentReport, EmergencyFanStatus, FanModeFailure, FanRestorationStatus,

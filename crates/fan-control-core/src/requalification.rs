@@ -6,6 +6,7 @@ use crate::{
     validate_against_protected_envelope,
 };
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 /// Evidence that the physical fans and board have not been replaced since qualification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,16 @@ pub const ABBREVIATED_RECHECKS: [AbbreviatedRecheck; 6] = [
     AbbreviatedRecheck::RebootRestoration,
 ];
 
+/// Required uninterrupted duration of the single combined AC workload recheck.
+pub const COMBINED_AC_WORKLOAD_DURATION: Duration = Duration::from_secs(20 * 60);
+
+/// Evidence about the continuity of the single combined AC workload run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombinedAcWorkloadEvidence {
+    Interrupted { accumulated_duration: Duration },
+    Uninterrupted { duration: Duration },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AbbreviatedRecheckOutcome {
     Pending,
@@ -48,6 +59,7 @@ pub struct AbbreviatedRecheckResults {
     baseline_qualification: QualificationRecordV2,
     candidate_compatibility: CompatibilityDeclarationV1,
     protected_policy_sha256: String,
+    combined_ac_workload: CombinedAcWorkloadEvidence,
     outcomes: [AbbreviatedRecheckOutcome; ABBREVIATED_RECHECKS.len()],
 }
 
@@ -56,12 +68,14 @@ impl AbbreviatedRecheckResults {
         baseline_qualification: QualificationRecordV2,
         candidate_compatibility: CompatibilityDeclarationV1,
         protected_policy_source: &str,
+        combined_ac_workload: CombinedAcWorkloadEvidence,
         outcomes: [AbbreviatedRecheckOutcome; ABBREVIATED_RECHECKS.len()],
     ) -> Self {
         Self {
             baseline_qualification,
             candidate_compatibility,
             protected_policy_sha256: policy_source_sha256(protected_policy_source),
+            combined_ac_workload,
             outcomes,
         }
     }
@@ -231,6 +245,16 @@ pub fn decide_requalification(
             AbbreviatedRecheckOutcome::Different => {
                 return full(FullRequalificationReason::AbbreviatedCheckDifferent { check });
             }
+        }
+        if check == AbbreviatedRecheck::CombinedAcWorkload
+            && outcome == AbbreviatedRecheckOutcome::Passed
+            && !matches!(
+                results.combined_ac_workload,
+                CombinedAcWorkloadEvidence::Uninterrupted { duration }
+                    if duration >= COMBINED_AC_WORKLOAD_DURATION
+            )
+        {
+            return full(FullRequalificationReason::AbbreviatedCheckDifferent { check });
         }
     }
 
