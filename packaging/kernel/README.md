@@ -26,12 +26,24 @@ cp packaging/kernel/patches/0001-acer-wmi-add-pt31553-telemetry.patch /bundle/pa
 
 Fetch the four upstream source inputs at their exact `origin` paths: release archive, detached archive signature, packaging archive, and `config`. Populate `/bundle/oci/blobs/sha256/` with the OCI config and every compressed layer blob recorded by the manifest; each blob's immutable registry URL, digest, path, and size is recorded in the lock. Keep every recorded filename and do not leave registry metadata or other files in the bundle.
 
+Also fetch the exact CachyOS v4 `bc` package at its locked `origin` into
+`/bundle/build-tools/`. It is extracted without installation and used only to
+generate the kernel time constants required before compiling `acer-wmi.c`.
+
 Then make the staged bundle read-only and verify it offline:
 
 ```sh
 chmod -R a+rX,a-w /bundle
 mkdir -p "$PWD/build-output"
 SOURCE_LOCK_OUTPUT="$PWD/build-output" scripts/verify-source-lock --inputs /bundle --exec-verified
+```
+
+For the stage-1 review gate, compile the patched translation unit in the same
+verified, offline environment and retain the object plus its SHA-256 evidence:
+
+```sh
+SOURCE_LOCK_OUTPUT="$PWD/build-output" scripts/verify-source-lock \
+  --inputs /bundle --exec-verified -- --compile-telemetry
 ```
 
 The verifier hashes every allowlisted regular file through retained directory-bound file descriptors, rejects symlinks, hard links, writable bundles, and extra files, then rehashes all pinned descriptors and repeats the live path scan before success. It verifies every signature in a fresh, offline GnuPG home at `signature_verification_epoch`, rejects expired/revoked status at that time, and requires that epoch to equal the latest creation time authenticated by the verified signatures. This preserves reproducibility after later key expiry without trusting an arbitrary historical clock. It also verifies the signed tag→commit relation, both signed commit→tree relations, and detached release signature with the pinned key, reconstructs both archives' Git tree IDs, compares `config` and the effective recipe source program with the packaging archive, validates the raw OCI manifest and every blob, and cross-checks the wrapper's actual exported PKGBUILD variables with the build metadata.
@@ -45,4 +57,4 @@ access, and every unrelated kernel change. The gate also applies both hunks in
 memory to the authenticated pinned `acer-wmi.c`; context drift fails before a
 build starts.
 
-The wrapper reconstructs a temporary OCI layout from the verified manifest and blobs, imports it into disposable Podman root/runroot storage, and executes that exact manifest digest using `--pull=never`, no network, and a read-only container root. It extracts only the pinned packaging snapshot into a disposable work directory; clears ambient CI controls; exposes the verified source/config/telemetry patch through a writable cache of read-only symlinks; adds only that patch to the authenticated recipe; writes packages only to the output mount; and explicitly selects CachyOS's default scheduler, GCC, `generic_v4`, and no NVIDIA/ZFS/R8125 module build. The verifier accepts only a full build or `--verifysource`; arbitrary `makepkg` flags are rejected. `makepkg`'s inconsistent snapshot checksum array is bypassed only after the source-lock verifier has authenticated and hashed every input. The wrapper never uses the caller's checkout or host `makepkg`.
+The wrapper reconstructs a temporary OCI layout from the verified manifest and blobs, imports it into disposable Podman root/runroot storage, and executes that exact manifest digest using `--pull=never`, no network, and a read-only container root. It extracts only the pinned packaging snapshot into a disposable work directory; clears ambient CI controls; exposes the verified source/config/telemetry patch through a writable cache of read-only symlinks; adds only that patch to the authenticated recipe; writes packages only to the output mount; and explicitly selects CachyOS's default scheduler, GCC, `generic_v4`, and no NVIDIA/ZFS/R8125 module build. The verifier also accepts the exact `--compile-telemetry` review gate, which extracts the locked `bc` executable into the disposable work directory and compiles only the patched `acer-wmi.o`; arbitrary `makepkg` flags are rejected. `makepkg`'s inconsistent snapshot checksum array is bypassed only after the source-lock verifier has authenticated and hashed every input. The wrapper never uses the caller's checkout or host `makepkg`.

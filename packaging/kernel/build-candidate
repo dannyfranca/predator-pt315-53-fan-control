@@ -3,10 +3,10 @@ set -euo pipefail
 
 : "${SOURCE_LOCK_BUNDLE:?set SOURCE_LOCK_BUNDLE to the verified bundle directory}"
 if (( $# > 1 )); then
-    echo "only the locked build or --verifysource is allowed" >&2
+    echo "only the locked build, --compile-telemetry, or --verifysource is allowed" >&2
     exit 2
-elif (( $# == 1 )) && [[ "$1" != --verifysource ]]; then
-    echo "only the locked build or --verifysource is allowed" >&2
+elif (( $# == 1 )) && [[ "$1" != --compile-telemetry && "$1" != --verifysource ]]; then
+    echo "only the locked build, --compile-telemetry, or --verifysource is allowed" >&2
     exit 2
 fi
 
@@ -14,6 +14,7 @@ toolchain_origin="docker.io/cachyos/docker-makepkg-v4@sha256:1c9d839ed8baec04826
 toolchain="docker.io/library/source-lock@sha256:1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6"
 packaging="linux-cachyos-3c399d306eed6497838b246b9dbe73ec2cd1bb2f.tar.gz"
 telemetry_patch="0001-acer-wmi-add-pt31553-telemetry.patch"
+bc_package="bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
 
 if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
     : "${SOURCE_LOCK_OUTPUT:?container output mount is required}"
@@ -45,6 +46,31 @@ if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
     export _build_debug=no
     export _autofdo=no
     export _propeller=no
+
+    if [[ "${1:-}" == --compile-telemetry ]]; then
+        compile_root="$PWD/telemetry-compile"
+        tools_root="$compile_root/tools"
+        source_root="$compile_root/source"
+        mkdir -p "$tools_root/bin" "$source_root"
+        tar --extract --file "$SOURCE_LOCK_BUNDLE/build-tools/$bc_package" \
+            --to-stdout usr/bin/bc >"$tools_root/bin/bc"
+        chmod 0555 "$tools_root/bin/bc"
+        tar --extract --gzip --file "$SOURCE_LOCK_BUNDLE/cachyos-7.1.8-1.tar.gz" \
+            --directory "$source_root" --strip-components=1
+        patch --directory "$source_root" -Np1 \
+            <"$SOURCE_LOCK_BUNDLE/patches/$telemetry_patch"
+        cp "$SOURCE_LOCK_BUNDLE/config" "$source_root/.config"
+        PATH="$tools_root/bin:$PATH" make -C "$source_root" olddefconfig
+        PATH="$tools_root/bin:$PATH" make -C "$source_root" -j2 \
+            drivers/platform/x86/acer-wmi.o
+        install -m 0444 "$source_root/drivers/platform/x86/acer-wmi.o" \
+            "$SOURCE_LOCK_OUTPUT/acer-wmi.o"
+        (
+            cd "$SOURCE_LOCK_OUTPUT"
+            sha256sum acer-wmi.o >acer-wmi.o.sha256
+        )
+        exit 0
+    fi
 
     exec makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --skippgpcheck --skipchecksums --noconfirm --cleanbuild "$@"
 fi

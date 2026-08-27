@@ -95,22 +95,31 @@ sha256 = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9cab052b63"
 size = 1691
 
 [[inputs]]
+name = "build-tool-bc"
+kind = "build-tool"
+path = "build-tools/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.08.2-1.1"
+sha256 = "b3740d2c34090685b6ffe1b6a6b4631c45edd4801dc7a2bde1049de92165b0d3"
+size = 110253
+
+[[inputs]]
 name = "build-environment"
 kind = "build-environment"
 path = "build-environment.toml"
 origin = "repository:packaging/kernel/build-environment.toml"
-revision = "72bfb845ddcc9ae6a761c0bc5429dfb5377f6c9700c6e05f1659de28a4203947"
-sha256 = "72bfb845ddcc9ae6a761c0bc5429dfb5377f6c9700c6e05f1659de28a4203947"
-size = 1393
+revision = "9990099e9c48023f82620f060db98daf9fa2b5eb73193f2a1ec4e3474061e702"
+sha256 = "9990099e9c48023f82620f060db98daf9fa2b5eb73193f2a1ec4e3474061e702"
+size = 1412
 
 [[inputs]]
 name = "build-wrapper"
 kind = "build-wrapper"
 path = "build-candidate"
 origin = "repository:packaging/kernel/build-candidate"
-revision = "3bb8d560afa8e15665abcbfd954d407311eadb1b2d63384fa718f17a6404e3b7"
-sha256 = "3bb8d560afa8e15665abcbfd954d407311eadb1b2d63384fa718f17a6404e3b7"
-size = 4848
+revision = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
+sha256 = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
+size = 6124
 
 [[inputs]]
 name = "makepkg-config"

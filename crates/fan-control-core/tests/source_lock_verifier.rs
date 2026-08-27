@@ -684,6 +684,141 @@ fn validate_patch_wrapper(wrapper: &[u8]) -> Output {
     output
 }
 
+fn validate_checked_in_stage_one_manifest(mutation: &str) -> Output {
+    let lock =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/source-lock.toml");
+    Command::new("python3")
+        .args([
+            "-c",
+            r#"import copy,pathlib,runpy,sys,tomllib
+m=runpy.run_path(sys.argv[1], run_name='stage_one_manifest_test')
+with pathlib.Path(sys.argv[2]).open('rb') as stream:
+    lock=tomllib.load(stream)
+mutation=sys.argv[3]
+tools=[item for item in lock['inputs'] if item['kind']=='build-tool']
+if mutation=='missing':
+    lock['inputs']=[item for item in lock['inputs'] if item['kind']!='build-tool']
+elif mutation=='duplicate':
+    duplicate=copy.deepcopy(tools[0]); duplicate['name']='build-tool-bc-duplicate'; duplicate['path']='build-tools/duplicate.pkg.tar.zst'; lock['inputs'].append(duplicate)
+elif mutation=='altered':
+    tools[0]['sha256']='0'*64
+elif mutation=='stage-zero':
+    lock['candidate']='linux-cachyos-gcc-7.1.8-stage-0'; lock['patches']=[]; lock['inputs']=[item for item in lock['inputs'] if item['kind']!='patch']
+m['validate_manifest'](lock)
+"#,
+        ])
+        .arg(verifier())
+        .arg(lock)
+        .arg(mutation)
+        .output()
+        .expect("validate checked-in stage-one manifest")
+}
+
+#[cfg(unix)]
+fn run_verified_build_tool_snapshot_fixture(mutation: &str) -> (Output, bool) {
+    let root = std::env::temp_dir().join(format!(
+        "fan-control-build-tool-snapshot-{}-{}",
+        std::process::id(),
+        NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    let bundle = root.join("bundle");
+    let tool_dir = bundle.join("build-tools");
+    let tool = tool_dir.join("bc.pkg.tar.zst");
+    let wrapper = bundle.join("build-candidate");
+    let output_dir = root.join("output");
+    let marker = output_dir.join("snapshot-used");
+    fs::create_dir_all(&tool_dir).expect("create snapshot fixture bundle");
+    fs::create_dir(&output_dir).expect("create snapshot fixture output");
+    let tool_bytes = b"pinned bc fixture\n";
+    fs::write(&tool, tool_bytes).expect("write snapshot build tool");
+    let wrapper_bytes = format!(
+        r#"#!/bin/bash
+set -euo pipefail
+[[ "${{1:-}}" == --compile-telemetry ]]
+[[ "$SOURCE_LOCK_BUNDLE" != "{}" ]]
+grep -qx 'pinned bc fixture' "$SOURCE_LOCK_BUNDLE/build-tools/bc.pkg.tar.zst"
+printf 'yes\n' >"$SOURCE_LOCK_OUTPUT/snapshot-used"
+"#,
+        bundle.display()
+    )
+    .into_bytes();
+    fs::write(&wrapper, &wrapper_bytes).expect("write snapshot wrapper");
+    set_tree_modes(&bundle, 0o555, 0o444);
+
+    match mutation {
+        "none" => {}
+        "missing" => {
+            fs::set_permissions(&tool_dir, fs::Permissions::from_mode(0o755))
+                .expect("unlock tool directory");
+            fs::remove_file(&tool).expect("remove build tool");
+            fs::set_permissions(&tool_dir, fs::Permissions::from_mode(0o555))
+                .expect("relock tool directory");
+        }
+        "changed" => {
+            fs::set_permissions(&tool, fs::Permissions::from_mode(0o644))
+                .expect("unlock build tool");
+            fs::write(&tool, b"changed bc fixture\n").expect("change build tool");
+            fs::set_permissions(&tool, fs::Permissions::from_mode(0o444))
+                .expect("relock build tool");
+        }
+        "writable" => fs::set_permissions(&tool, fs::Permissions::from_mode(0o644))
+            .expect("make build tool writable"),
+        "linked" => {
+            let outside = root.join("outside-bc");
+            fs::write(&outside, tool_bytes).expect("write outside build tool");
+            fs::set_permissions(&tool_dir, fs::Permissions::from_mode(0o755))
+                .expect("unlock tool directory");
+            fs::remove_file(&tool).expect("remove build tool before linking");
+            symlink(&outside, &tool).expect("link build tool");
+            fs::set_permissions(&tool_dir, fs::Permissions::from_mode(0o555))
+                .expect("relock tool directory");
+        }
+        "additional" => {
+            fs::set_permissions(&bundle, fs::Permissions::from_mode(0o755)).expect("unlock bundle");
+            let extra = bundle.join("unexpected");
+            fs::write(&extra, b"unexpected\n").expect("write extra input");
+            fs::set_permissions(&extra, fs::Permissions::from_mode(0o444))
+                .expect("lock extra input");
+            fs::set_permissions(&bundle, fs::Permissions::from_mode(0o555)).expect("relock bundle");
+        }
+        _ => panic!("unknown snapshot mutation"),
+    }
+
+    let run = Command::new("python3")
+        .args([
+            "-c",
+            r#"import pathlib,runpy,sys
+m=runpy.run_path(sys.argv[1], run_name='build_tool_snapshot_test')
+inputs=[
+ {'name':'build-wrapper','kind':'build-wrapper','path':'build-candidate','sha256':sys.argv[3],'size':int(sys.argv[4])},
+ {'name':'build-tool-bc','kind':'build-tool','path':'build-tools/bc.pkg.tar.zst','sha256':sys.argv[5],'size':int(sys.argv[6])},
+]
+bundle=m['Bundle'](pathlib.Path(sys.argv[2]))
+try:
+ m['verify_hashes'](bundle, inputs)
+ m['verify_pinned_inputs'](bundle, inputs)
+ raise SystemExit(m['build_from_verified_snapshot'](bundle, inputs, ['--compile-telemetry']))
+except m['VerificationError'] as error:
+ print(error, file=sys.stderr); raise SystemExit(1)
+finally:
+ bundle.close()
+"#,
+        ])
+        .arg(verifier())
+        .arg(&bundle)
+        .arg(sha(&wrapper_bytes))
+        .arg(wrapper_bytes.len().to_string())
+        .arg(sha(tool_bytes))
+        .arg(tool_bytes.len().to_string())
+        .env("SOURCE_LOCK_OUTPUT", &output_dir)
+        .output()
+        .expect("run verified build-tool snapshot fixture");
+    let used_snapshot = marker.exists();
+    restore_tree_modes(&bundle);
+    fs::remove_dir_all(&root).expect("remove build-tool snapshot fixture");
+    (run, used_snapshot)
+}
+
 #[cfg(unix)]
 #[test]
 fn accepts_a_complete_read_only_bundle_without_modifying_it() {
@@ -881,6 +1016,179 @@ prepare
     assert!(failure_text(&rejected).contains("must be a non-symlink directory"));
 
     fs::remove_dir_all(&root).expect("remove actual executor fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn checked_in_executor_compiles_telemetry_and_emits_a_portable_checksum() {
+    let root = std::env::temp_dir().join(format!(
+        "fan-control-telemetry-compile-{}-{}",
+        std::process::id(),
+        NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    let bundle = root.join("bundle");
+    let output = root.join("output");
+    let bin = root.join("bin");
+    let source_tree = root
+        .join("source")
+        .join("cachyos-7.1.8-1")
+        .join("drivers/platform/x86");
+    let tool_tree = root.join("tool").join("usr/bin");
+    fs::create_dir_all(bundle.join("build-tools")).expect("create build-tool directory");
+    fs::create_dir_all(bundle.join("patches")).expect("create patch directory");
+    fs::create_dir_all(&output).expect("create output directory");
+    fs::create_dir_all(&bin).expect("create fake command directory");
+    fs::create_dir_all(&source_tree).expect("create source tree");
+    fs::create_dir_all(&tool_tree).expect("create build-tool tree");
+    fs::write(source_tree.join("acer-wmi.c"), pinned_acer_wmi_contexts())
+        .expect("write pinned acer-wmi source");
+    fs::write(tool_tree.join("bc"), b"#!/bin/sh\nexit 0\n").expect("write fake bc");
+    fs::write(bundle.join("config"), b"CONFIG_TEST=y\n").expect("write kernel config");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packaging/kernel/patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
+        bundle.join("patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
+    )
+    .expect("stage telemetry patch");
+    let source_status = Command::new("tar")
+        .args(["-czf"])
+        .arg(bundle.join("cachyos-7.1.8-1.tar.gz"))
+        .arg("-C")
+        .arg(root.join("source"))
+        .arg("cachyos-7.1.8-1")
+        .status()
+        .expect("create kernel source archive");
+    assert!(source_status.success());
+    let tool_status = Command::new("tar")
+        .args(["-cf"])
+        .arg(
+            bundle
+                .join("build-tools")
+                .join("bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"),
+        )
+        .arg("-C")
+        .arg(root.join("tool"))
+        .arg("usr/bin/bc")
+        .status()
+        .expect("create build-tool archive");
+    assert!(tool_status.success());
+
+    let make_log = root.join("make.log");
+    let fake_make = bin.join("make");
+    fs::write(
+        &fake_make,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$TEST_MAKE_LOG"
+source_root=""
+while (( $# )); do
+    if [[ "$1" == -C ]]; then source_root="$2"; shift 2; continue; fi
+    shift
+done
+[[ -n "$source_root" ]]
+if [[ " $(tail -n 1 "$TEST_MAKE_LOG") " == *" drivers/platform/x86/acer-wmi.o "* ]]; then
+    grep -q 'Predator PT315-53' "$source_root/drivers/platform/x86/acer-wmi.c"
+    grep -q 'DMI_EXACT_MATCH(DMI_BOARD_NAME, "Civic_TLS")' "$source_root/drivers/platform/x86/acer-wmi.c"
+    printf 'pinned telemetry object\n' >"$source_root/drivers/platform/x86/acer-wmi.o"
+fi
+"#,
+    )
+    .expect("write fake make");
+    fs::set_permissions(&fake_make, fs::Permissions::from_mode(0o755))
+        .expect("make fake make executable");
+
+    let wrapper =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/build-candidate");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let run = Command::new("/bin/bash")
+        .arg(&wrapper)
+        .arg("--compile-telemetry")
+        .env("PATH", path)
+        .env("SOURCE_LOCK_INSIDE", "1")
+        .env("SOURCE_LOCK_BUNDLE", &bundle)
+        .env("SOURCE_LOCK_OUTPUT", &output)
+        .env("TEST_MAKE_LOG", &make_log)
+        .current_dir(&root)
+        .output()
+        .expect("run telemetry compile gate");
+    assert!(run.status.success(), "{}", failure_text(&run));
+
+    let object = output.join("acer-wmi.o");
+    let checksum = output.join("acer-wmi.o.sha256");
+    let object_bytes = fs::read(&object).expect("read retained object");
+    assert_eq!(object_bytes, b"pinned telemetry object\n");
+    assert_eq!(
+        fs::read_to_string(&checksum).expect("read checksum manifest"),
+        format!("{}  acer-wmi.o\n", sha(&object_bytes))
+    );
+    assert_eq!(
+        fs::metadata(&object)
+            .expect("object metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o444
+    );
+    let checksum_check = Command::new("sha256sum")
+        .args(["-c", "acer-wmi.o.sha256"])
+        .current_dir(&output)
+        .output()
+        .expect("verify retained checksum on host");
+    assert!(
+        checksum_check.status.success(),
+        "{}",
+        failure_text(&checksum_check)
+    );
+    let calls = fs::read_to_string(&make_log).expect("read make log");
+    assert!(calls.lines().any(|line| line.ends_with(" olddefconfig")));
+    assert!(
+        calls
+            .lines()
+            .any(|line| line.ends_with(" -j2 drivers/platform/x86/acer-wmi.o"))
+    );
+
+    fs::remove_dir_all(&root).expect("remove telemetry compile fixture");
+}
+
+#[test]
+fn stage_one_manifest_requires_the_one_exact_build_tool() {
+    let accepted = validate_checked_in_stage_one_manifest("none");
+    assert!(accepted.status.success(), "{}", failure_text(&accepted));
+
+    for (mutation, expected) in [
+        ("missing", "requires exactly the pinned bc package"),
+        ("duplicate", "requires exactly the pinned bc package"),
+        ("altered", "bc package identity is not exact"),
+        ("stage-zero", "stage 0 must not select build tools"),
+    ] {
+        let rejected = validate_checked_in_stage_one_manifest(mutation);
+        assert!(!rejected.status.success(), "{mutation} unexpectedly passed");
+        assert!(failure_text(&rejected).contains(expected), "{mutation}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn verified_stage_one_handoff_snapshots_and_protects_the_build_tool() {
+    let (accepted, used_snapshot) = run_verified_build_tool_snapshot_fixture("none");
+    assert!(accepted.status.success(), "{}", failure_text(&accepted));
+    assert!(
+        used_snapshot,
+        "build did not consume the verifier-owned snapshot"
+    );
+
+    for (mutation, expected) in [
+        ("missing", "missing input"),
+        ("changed", "size changed"),
+        ("writable", "verified bundle must be read-only"),
+        ("linked", "symlinked input is forbidden"),
+        ("additional", "unrecorded input"),
+    ] {
+        let (rejected, used_snapshot) = run_verified_build_tool_snapshot_fixture(mutation);
+        assert!(!rejected.status.success(), "{mutation} unexpectedly passed");
+        assert!(!used_snapshot, "{mutation} reached the build wrapper");
+        assert!(failure_text(&rejected).contains(expected), "{mutation}");
+    }
 }
 
 #[test]
@@ -1259,18 +1567,22 @@ fn verified_build_handoff_ignores_ambient_bash_hooks() {
 #[cfg(unix)]
 #[test]
 fn verified_build_handoff_rejects_unlocked_makepkg_options() {
-    let fixture = Fixture::new();
-    fixture.make_read_only();
-    let output = fixture
-        .command()
-        .arg("--exec-verified")
-        .arg("--")
-        .arg("--sign")
-        .output()
-        .expect("run verified handoff with forbidden option");
+    for option in ["--sign", "--compile-telemetry"] {
+        let fixture = Fixture::new();
+        fixture.make_read_only();
+        let output = fixture
+            .command()
+            .arg("--exec-verified")
+            .arg("--")
+            .arg(option)
+            .output()
+            .expect("run verified handoff with forbidden option");
 
-    assert!(!output.status.success());
-    assert!(failure_text(&output).contains("only --verifysource is allowed"));
+        assert!(!output.status.success());
+        assert!(
+            failure_text(&output).contains("only --compile-telemetry or --verifysource is allowed")
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -1406,6 +1718,7 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
         "packaging-commit",
         "kernel-config",
         "build-environment",
+        "build-tool",
         "build-wrapper",
         "makepkg-config",
         "patch",
@@ -1428,6 +1741,21 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
 
     let parsed: toml::Value = toml::from_str(&lock).expect("parse checked-in lock");
     let inputs = parsed["inputs"].as_array().expect("lock inputs");
+    let bc = inputs
+        .iter()
+        .find(|input| input["name"].as_str() == Some("build-tool-bc"))
+        .expect("locked bc build tool");
+    assert_eq!(bc["kind"].as_str(), Some("build-tool"));
+    assert_eq!(
+        bc["path"].as_str(),
+        Some("build-tools/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst")
+    );
+    assert_eq!(bc["revision"].as_str(), Some("1.08.2-1.1"));
+    assert_eq!(
+        bc["sha256"].as_str(),
+        Some("b3740d2c34090685b6ffe1b6a6b4631c45edd4801dc7a2bde1049de92165b0d3")
+    );
+    assert_eq!(bc["size"].as_integer(), Some(110253));
     for (name, path) in [
         ("source-commit", root.join("cachyos-7.1.8-1.commit")),
         ("release-tag", root.join("cachyos-7.1.8-1.tag")),
@@ -1524,6 +1852,29 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
         .expect("read checked-in build environment");
     assert!(environment.contains("patches = [\"pt31553-telemetry\"]"));
     assert!(environment.contains("\"pt31553-telemetry\""));
+    let environment_value: toml::Value =
+        toml::from_str(&environment).expect("parse checked-in build environment");
+    let selected_inputs = environment_value["build_inputs"]
+        .as_array()
+        .expect("build inputs")
+        .iter()
+        .map(|name| name.as_str().expect("build input name"))
+        .collect::<Vec<_>>();
+    let excluded = [
+        "kernel-signature",
+        "source-commit",
+        "release-tag",
+        "signer-key",
+        "packaging-commit",
+        "build-environment",
+    ];
+    let mut expected_inputs = inputs
+        .iter()
+        .filter(|input| !excluded.contains(&input["kind"].as_str().expect("locked input kind")))
+        .map(|input| input["name"].as_str().expect("locked input name"))
+        .collect::<Vec<_>>();
+    expected_inputs.sort_unstable();
+    assert_eq!(selected_inputs, expected_inputs);
     let wrapper =
         fs::read_to_string(root.join("build-candidate")).expect("read checked-in build wrapper");
     assert!(wrapper.contains("/bundle/patches/$telemetry_patch"));

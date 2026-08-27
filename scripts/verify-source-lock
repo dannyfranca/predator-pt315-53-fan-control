@@ -38,7 +38,7 @@ SINGLETON_KINDS = {
     "makepkg-config",
     "toolchain-image",
 }
-KINDS = SINGLETON_KINDS | {"patch", "toolchain-blob"}
+KINDS = SINGLETON_KINDS | {"build-tool", "patch", "toolchain-blob"}
 TOP_LEVEL = {
     "format",
     "candidate",
@@ -61,7 +61,10 @@ OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW
 STAGE0_CANDIDATE = "linux-cachyos-gcc-7.1.8-stage-0"
 STAGE1_CANDIDATE = "linux-cachyos-gcc-7.1.8-stage-1-telemetry"
 STAGE1_PATCH_SHA256 = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9cab052b63"
-STAGE1_BUILD_WRAPPER_SHA256 = "3bb8d560afa8e15665abcbfd954d407311eadb1b2d63384fa718f17a6404e3b7"
+STAGE1_BUILD_WRAPPER_SHA256 = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
+STAGE1_BC_SHA256 = "b3740d2c34090685b6ffe1b6a6b4631c45edd4801dc7a2bde1049de92165b0d3"
+STAGE1_BC_PATH = "build-tools/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
+STAGE1_BC_REVISION = "1.08.2-1.1"
 
 
 class VerificationError(Exception):
@@ -216,6 +219,7 @@ def validate_manifest(lock: dict) -> list[dict]:
     names: set[str] = set()
     paths: set[str] = set()
     patch_names: set[str] = set()
+    build_tools: list[dict] = []
     kind_counts = {kind: 0 for kind in SINGLETON_KINDS}
     expected_revision = {
         "kernel-source": source_commit,
@@ -247,10 +251,12 @@ def validate_manifest(lock: dict) -> list[dict]:
             kind_counts[kind] += 1
         if kind == "patch":
             patch_names.add(name)
+        elif kind == "build-tool":
+            build_tools.append(item)
         sha256 = require_hash(item["sha256"], HEX64, f"{context}.sha256")
         revision = require_string(item["revision"], f"{context}.revision")
         required_revision = expected_revision.get(kind, sha256)
-        if revision != required_revision:
+        if kind != "build-tool" and revision != required_revision:
             fail(f"{context}.revision: does not match the identity required for kind {kind}")
         validate_origin(item["origin"], revision, sha256, release_tag, f"{context}.origin")
         if type(item["size"]) is not int or item["size"] < 0:
@@ -260,6 +266,26 @@ def validate_manifest(lock: dict) -> list[dict]:
         fail(f"source lock.inputs: singleton kind count must be one: {', '.join(sorted(invalid_counts))}")
     if patches != sorted(set(patches)) or set(patches) != patch_names:
         fail("source lock.patches: must exactly list sorted patch input names")
+    if candidate == STAGE0_CANDIDATE and build_tools:
+        fail("source lock build tools: stage 0 must not select build tools")
+    if candidate == STAGE1_CANDIDATE:
+        if len(build_tools) != 1:
+            fail("source lock build tools: stage 1 requires exactly the pinned bc package")
+        bc_tool = build_tools[0]
+        expected_bc = {
+            "name": "build-tool-bc",
+            "kind": "build-tool",
+            "path": STAGE1_BC_PATH,
+            "origin": (
+                "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/"
+                "cachyos-extra-v4/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
+            ),
+            "revision": STAGE1_BC_REVISION,
+            "sha256": STAGE1_BC_SHA256,
+            "size": 110253,
+        }
+        if bc_tool != expected_bc:
+            fail("source lock build tools: stage 1 bc package identity is not exact")
     return inputs
 
 
@@ -1146,6 +1172,16 @@ def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> Non
         "--userns=keep-id:uid=1000,gid=1000": "does not map the pinned non-root toolchain user",
         '--entrypoint /bundle/build-candidate': "does not re-enter the locked wrapper inside the container",
     }
+    if lock["candidate"] == STAGE1_CANDIDATE:
+        required_fragments.update(
+            {
+                'bc_package="bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"': "does not select the locked bc build tool",
+                'tar --extract --file "$SOURCE_LOCK_BUNDLE/build-tools/$bc_package"': "does not extract the locked bc build tool",
+                'PATH="$tools_root/bin:$PATH" make -C "$source_root" olddefconfig': "does not configure the locked kernel source",
+                'make -C "$source_root" -j2 \\\n            drivers/platform/x86/acer-wmi.o': "does not compile the patched telemetry translation unit",
+                'install -m 0444 "$source_root/drivers/platform/x86/acer-wmi.o" \\\n            "$SOURCE_LOCK_OUTPUT/acer-wmi.o"': "does not retain the telemetry compile artifact",
+            }
+        )
     for fragment, message in required_fragments.items():
         if wrapper.count(fragment) != 1:
             fail(f"build wrapper: {message}")
@@ -1328,8 +1364,11 @@ def main() -> int:
         verify_pinned_inputs(bundle, inputs)
         if args.exec_verified:
             build_args = args.build_args[1:] if args.build_args[:1] == ["--"] else args.build_args
-            if build_args not in ([], ["--verifysource"]):
-                fail("verified build arguments: only --verifysource is allowed")
+            allowed_build_args = [[], ["--verifysource"]]
+            if lock["candidate"] == STAGE1_CANDIDATE:
+                allowed_build_args.append(["--compile-telemetry"])
+            if build_args not in allowed_build_args:
+                fail("verified build arguments: only --compile-telemetry or --verifysource is allowed")
             return build_from_verified_snapshot(bundle, inputs, build_args)
         print(f"source lock verified: {len(inputs)} immutable inputs")
     except VerificationError as error:

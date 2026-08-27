@@ -31,6 +31,7 @@ toolchain_image_digest = "1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d
 makepkg_config = "makepkg.conf"
 build_wrapper = "build-candidate"
 build_inputs = [
+  "build-tool-bc",
   "build-wrapper",
   "kernel-config",
   "kernel-source",
