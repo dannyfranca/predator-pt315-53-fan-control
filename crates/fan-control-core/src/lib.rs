@@ -14,6 +14,7 @@ mod coretemp;
 mod curve;
 mod demand;
 mod diagnostics;
+mod endurance;
 mod envelope;
 mod evidence;
 mod external_power;
@@ -25,6 +26,7 @@ mod ownership;
 mod platform;
 mod policy;
 mod preflight;
+mod qualification;
 mod restoration;
 mod sampling;
 mod sensor_recovery;
@@ -40,7 +42,7 @@ pub use arming::{
 };
 pub use authority::{
     AdmittedPolicyAuthority, PolicyAuthorityAdmissionError, PolicyAuthorityError,
-    admit_policy_authority,
+    QUALIFICATION_RECORD_PATH, SUPERVISED_ENDURANCE_EVIDENCE_PATH, admit_policy_authority,
 };
 pub use baseline::{
     BaselineCleanupAttestation, BaselineObservation, BaselineStartingConditions,
@@ -80,16 +82,26 @@ pub use diagnostics::{
     STATE_TRANSITION_EVENT_ID, emit_control_cycle, emit_fault, emit_restoration_attempt,
     emit_state_transition, init_journald_diagnostics,
 };
+pub use endurance::{
+    SUPERVISED_ENDURANCE_DURATION_MILLIS, SUPERVISED_ENDURANCE_SAMPLE_COUNT,
+    SUPERVISED_ENDURANCE_SEGMENTS, SUPERVISED_ENDURANCE_WORKLOAD_ID,
+    SupervisedEnduranceEnvironment, SupervisedEnduranceLoad, SupervisedEndurancePlan,
+    SupervisedEndurancePlanError, SupervisedEnduranceProcessStopConfirmation,
+    SupervisedEnduranceReport, SupervisedEnduranceSegment, SupervisedEnduranceSegmentConfirmation,
+    run_supervised_endurance,
+};
 pub use envelope::{EnvelopeValidationError, validate_against_protected_envelope};
 pub use evidence::{
-    EVIDENCE_SCHEMA_VERSION, EVIDENCE_SCHEMA_VERSION_V2, EvidenceExternalPower, EvidenceFan,
-    EvidenceParseError, EvidenceProfile, EvidenceRecord, EvidenceRecordStatus, EvidenceTimestamp,
-    EvidenceValidationError, EvidenceWriteError, FanCalibrationEvidence, FanCommandEvidence,
-    FanControlField, FanReadbackEvidence, FanReadbackField, FanReadbackPhase, FaultEvidence,
-    ObservationOutcome, QualificationEnvelopeIdentityV1, RestorationAttemptEvidence,
-    RestorationOutcome, RpmAnchorEvidence, RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness,
-    StateTransitionEvidence, TelemetrySampleEvidence, ThermalSummaryEvidence, WorkloadEvidence,
-    parse_evidence_v1, parse_evidence_v2, write_evidence_atomically,
+    EVIDENCE_SCHEMA_VERSION, EVIDENCE_SCHEMA_VERSION_V2, EnduranceThermalEnvelopeEvidence,
+    EvidenceExternalPower, EvidenceFan, EvidenceParseError, EvidenceProfile, EvidenceRecord,
+    EvidenceRecordStatus, EvidenceTimestamp, EvidenceValidationError, EvidenceWriteError,
+    FanCalibrationEvidence, FanCommandEvidence, FanControlField, FanReadbackEvidence,
+    FanReadbackField, FanReadbackPhase, FaultEvidence, ObservationOutcome, ProcessStopEvidence,
+    QualificationEnvelopeIdentityV1, RestorationAttemptEvidence, RestorationOutcome,
+    RpmAnchorEvidence, RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness,
+    StateTransitionEvidence, StoppedProcess, TelemetrySampleEvidence, ThermalSummaryEvidence,
+    WorkloadEvidence, parse_evidence_v1, parse_evidence_v2, validate_root_owned_output_destination,
+    write_evidence_atomically, write_root_owned_evidence_atomically,
 };
 pub use external_power::observe_external_power;
 pub use live_lifecycle::{
@@ -124,8 +136,9 @@ pub use platform::{
     BoundedFileAccess, BoundedIdentityBoundFileAccess, Clock, FakePlatform, FakeRuntimeLock,
     FakeRuntimeLockBackend, FakeStep, FileAccess, FileIdentity, FilePermissions,
     IdentityBoundFileAccess, IdentityBoundReadAccess, PlatformError, PlatformErrorKind,
-    PlatformOperation, RuntimeLockAccess, RuntimeLockError, ServiceAccess, SystemOwnershipPlatform,
-    SystemRuntimeLock,
+    PlatformOperation, ProtectedFileRequirement, RootOwnedQualificationRecordAccess,
+    RuntimeLockAccess, RuntimeLockError, ServiceAccess, SystemOwnershipPlatform, SystemRuntimeLock,
+    validate_root_owned_protected_file,
 };
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
@@ -134,6 +147,10 @@ pub use policy::{
 pub use preflight::{
     PreflightArtifact, PreflightCheck, PreflightCheckResult, PreflightEnvironment, PreflightInputs,
     PreflightReport, PreflightRequirements, run_read_only_preflight,
+};
+pub use qualification::{
+    QualificationAuthorizationError, QualificationRecordV2, SupervisedEnduranceAuthorizationV1,
+    write_qualification_record_after_endurance,
 };
 pub use restoration::{
     EmergencyContainmentReport, EmergencyFanStatus, FanModeFailure, FanRestorationStatus,

@@ -1,15 +1,15 @@
 use std::{collections::HashSet, error::Error, fmt};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     CPU_ABSOLUTE_ABORT_MILLICELSIUS, EVIDENCE_SCHEMA_VERSION_V2, EvidenceExternalPower,
-    EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceRecordStatus, EvidenceTimestamp,
-    EvidenceValidationError, Fan, FanCalibrationEvidence, FanCommandEvidence, FanControlField,
-    FanReadbackEvidence, FanReadbackField, FaultEvidence, GPU_ABSOLUTE_ABORT_MILLICELSIUS,
-    ObservationOutcome, Pwm, RestorationAttemptEvidence, RestorationOutcome, RunOutcomeEvidence,
-    RunOutcomeStatus, SampleFreshness, StateTransitionEvidence, TelemetrySampleEvidence,
-    WorkloadEvidence,
+    EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceTimestamp, EvidenceValidationError, Fan,
+    FanCalibrationEvidence, FanCommandEvidence, FanControlField, FanReadbackEvidence,
+    FanReadbackField, FaultEvidence, GPU_ABSOLUTE_ABORT_MILLICELSIUS, ObservationOutcome, Pwm,
+    RestorationAttemptEvidence, RestorationOutcome, RunOutcomeEvidence, RunOutcomeStatus,
+    SampleFreshness, StateTransitionEvidence, TelemetrySampleEvidence, WorkloadEvidence,
     evidence::{precise_final_thermal_slopes, summarize_thermal_evidence},
     tachometer::{expected_rpm_from_evidence, pwm_to_basis_points, rpm_in_band},
 };
@@ -27,11 +27,11 @@ const CUSTOM_HANDOVER_TIMEOUT_MILLIS: u64 = 5_000;
 const WORKLOAD_START_TIMEOUT_MILLIS: u64 = 10_000;
 const WORKLOAD_STOP_TIMEOUT_MILLIS: u64 = 5_000;
 const FAN_RESTORATION_TIMEOUT_MILLIS: u64 = 5_000;
+pub(crate) const MAX_PLAUSIBLE_COMPONENT_TEMPERATURE_MILLICELSIUS: i32 = 150_000;
+pub(crate) const MAX_PLAUSIBLE_AMBIENT_MILLICELSIUS: i32 = 80_000;
 const MIN_PLAUSIBLE_TEMPERATURE_MILLICELSIUS: i32 = -40_000;
-const MAX_PLAUSIBLE_COMPONENT_TEMPERATURE_MILLICELSIUS: i32 = 150_000;
-const MAX_PLAUSIBLE_AMBIENT_MILLICELSIUS: i32 = 80_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MatchedWorkloadClass {
     Idle,
     Cpu,
@@ -40,14 +40,14 @@ pub enum MatchedWorkloadClass {
 }
 
 impl MatchedWorkloadClass {
-    const fn required_passing_runs(self) -> u8 {
+    pub(crate) const fn required_passing_runs(self) -> usize {
         match self {
             Self::Idle => 1,
             Self::Cpu | Self::Gpu | Self::Combined => 2,
         }
     }
 
-    fn from_workload_id(workload_id: &str) -> Option<Self> {
+    pub(crate) fn from_workload_id(workload_id: &str) -> Option<Self> {
         match workload_id.split('-').next() {
             Some("idle") => Some(Self::Idle),
             Some("cpu") => Some(Self::Cpu),
@@ -58,7 +58,8 @@ impl MatchedWorkloadClass {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MatchedWorkloadStartingConditions {
     pub ambient_millicelsius: i32,
     pub cpu_millicelsius: i32,
@@ -66,13 +67,15 @@ pub struct MatchedWorkloadStartingConditions {
     pub power_profile: EvidenceProfile,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CapturedMatchedWorkloadStartingConditions {
     pub conditions: MatchedWorkloadStartingConditions,
     pub captured_at: EvidenceTimestamp,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MatchedWorkloadObservation {
     pub sample: TelemetrySampleEvidence,
     pub commands: Vec<FanCommandEvidence>,
@@ -83,7 +86,8 @@ pub struct MatchedWorkloadObservation {
     pub nvidia_faults: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MatchedWorkloadFanRestoration {
     pub auto_write_succeeded: bool,
     pub enable_readback: Option<u32>,
@@ -587,7 +591,7 @@ where
         }
         validate_observation(
             &mut observation,
-            &workload,
+            workload.power_profile,
             ObservationSchedule {
                 run_started_at: started_at,
                 captured_at,
@@ -839,7 +843,7 @@ where
     let accepted = faults.is_empty() && samples.len() == samples_required && both_fans_restored;
     let another_passing_run_required = !accepted
         || plan.previous_passing_runs.len().saturating_add(1)
-            < usize::from(workload_class.required_passing_runs());
+            < workload_class.required_passing_runs();
     let reason = if accepted {
         "Custom workload accepted against its Firmware Auto baseline".to_owned()
     } else {
@@ -848,30 +852,12 @@ where
             .map(|fault| fault.detail.clone())
             .unwrap_or_else(|| "Custom workload incomplete".to_owned())
     };
-    let record = EvidenceRecord {
-        schema_version: EVIDENCE_SCHEMA_VERSION_V2,
-        record_status: EvidenceRecordStatus::Complete,
-        qualification_envelope: plan.baseline.qualification_envelope.clone(),
-        stage: "matched-workload".into(),
+    let mut record = EvidenceRecord::complete_v2(
+        plan.baseline.qualification_envelope.clone(),
+        "matched-workload",
         started_at,
         completed_at,
-        starting_conditions_captured_at,
-        workload_started_at,
-        baseline_binding_sha256: Some(baseline_fingerprint(plan.baseline)),
-        workload: Some(workload),
-        samples,
-        commands,
-        readbacks,
-        state_transitions,
-        faults,
-        restoration_attempts,
-        calibration: vec![
-            calibration_for_fan(plan.tachometer_calibrations, EvidenceFan::Cpu).clone(),
-            calibration_for_fan(plan.tachometer_calibrations, EvidenceFan::Gpu).clone(),
-        ],
-        thermal_summary: Some(thermal_summary),
-        live_lifecycle_cases: None,
-        outcome: RunOutcomeEvidence {
+        RunOutcomeEvidence {
             status: if accepted {
                 RunOutcomeStatus::Passed
             } else {
@@ -881,7 +867,22 @@ where
             another_passing_run_required,
             final_firmware_auto_confirmed: both_fans_restored,
         },
-    };
+    );
+    record.starting_conditions_captured_at = starting_conditions_captured_at;
+    record.workload_started_at = workload_started_at;
+    record.baseline_binding_sha256 = Some(baseline_fingerprint(plan.baseline));
+    record.workload = Some(workload);
+    record.samples = samples;
+    record.commands = commands;
+    record.readbacks = readbacks;
+    record.state_transitions = state_transitions;
+    record.faults = faults;
+    record.restoration_attempts = restoration_attempts;
+    record.calibration = vec![
+        calibration_for_fan(plan.tachometer_calibrations, EvidenceFan::Cpu).clone(),
+        calibration_for_fan(plan.tachometer_calibrations, EvidenceFan::Gpu).clone(),
+    ];
+    record.thermal_summary = Some(thermal_summary);
     record
         .validate()
         .map_err(MatchedWorkloadPlanError::InvalidGeneratedEvidence)?;
@@ -949,30 +950,83 @@ fn validate_plan(plan: &MatchedWorkloadPlan<'_>) -> Result<(), MatchedWorkloadPl
     Ok(())
 }
 
-fn baseline_fingerprint(baseline: &EvidenceRecord) -> String {
+pub(crate) fn baseline_fingerprint(baseline: &EvidenceRecord) -> String {
     let canonical = serde_json::to_vec(baseline).expect("validated evidence always serializes");
     format!("{:x}", Sha256::digest(canonical))
 }
 
-fn matched_run_fingerprint(record: &EvidenceRecord) -> String {
+pub(crate) fn matched_run_fingerprint(record: &EvidenceRecord) -> String {
     let mut transcript =
         serde_json::to_value(record).expect("validated evidence always serializes");
-    transcript["completed_at"] = transcript["started_at"].clone();
+    normalize_transcript_timestamps(&mut transcript);
+    normalize_transcript_endpoint_identities(&mut transcript);
     transcript["outcome"]["reason"] = "canonical-run-transcript".into();
     transcript["outcome"]["another_passing_run_required"] = false.into();
     let canonical = serde_json::to_vec(&transcript).expect("JSON evidence always serializes");
     format!("{:x}", Sha256::digest(canonical))
 }
 
-fn calibration_record_is_qualified(
+pub(crate) fn baseline_measurement_fingerprint(record: &EvidenceRecord) -> String {
+    let mut transcript =
+        serde_json::to_value(record).expect("validated evidence always serializes");
+    normalize_transcript_timestamps(&mut transcript);
+    normalize_transcript_endpoint_identities(&mut transcript);
+    if let Some(workload) = transcript["workload"].as_object_mut() {
+        workload.retain(|key, _| key == "power_profile");
+    }
+    transcript["outcome"]["reason"] = "canonical-baseline-transcript".into();
+    transcript["outcome"]["another_passing_run_required"] = false.into();
+    let canonical = serde_json::to_vec(&transcript).expect("JSON evidence always serializes");
+    format!("{:x}", Sha256::digest(canonical))
+}
+
+fn normalize_transcript_endpoint_identities(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter_mut()
+            .for_each(normalize_transcript_endpoint_identities),
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                if key == "endpoint_identity" {
+                    *value = "canonical-endpoint".into();
+                } else {
+                    normalize_transcript_endpoint_identities(value);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_transcript_timestamps(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            values.iter_mut().for_each(normalize_transcript_timestamps);
+        }
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                if key == "timestamp" || key == "source_timestamp" || key.ends_with("_at") {
+                    *value = serde_json::Value::Null;
+                } else {
+                    normalize_transcript_timestamps(value);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn calibration_record_is_qualified(
     record: &EvidenceRecord,
     expected_fan: EvidenceFan,
     baseline: &EvidenceRecord,
 ) -> bool {
     record.validate().is_ok()
         && record.schema_version == EVIDENCE_SCHEMA_VERSION_V2
+        && record.record_status == crate::EvidenceRecordStatus::Complete
         && record.stage == "fan-calibration"
         && record.outcome.status == RunOutcomeStatus::Passed
+        && !record.outcome.another_passing_run_required
         && record.faults.is_empty()
         && record.qualification_envelope == baseline.qualification_envelope
         && matches!(record.calibration.as_slice(), [calibration] if calibration_is_qualified(calibration, expected_fan))
@@ -1078,11 +1132,7 @@ pub(crate) fn matched_workload_is_complete(record: &EvidenceRecord) -> bool {
                 elapsed.abs_diff(SAMPLE_CADENCE_MILLIS) <= SAMPLE_CADENCE_JITTER_MILLIS
             })
     });
-    let control_evidence_is_complete = record.commands.len() == record.samples.len() * 2
-        && record.readbacks.len() == record.samples.len() * 6 + 2
-        && [EvidenceFan::Cpu, EvidenceFan::Gpu]
-            .into_iter()
-            .all(|fan| matched_fan_evidence_is_complete(record, fan));
+    let control_evidence_is_complete = matched_control_evidence_is_complete(record);
     let transitions_are_complete = matches!(
         record.state_transitions.as_slice(),
         [entered, restored]
@@ -1127,83 +1177,116 @@ pub(crate) fn matched_workload_is_complete(record: &EvidenceRecord) -> bool {
         && matched_workload_matches_embedded_calibrations(record)
 }
 
-fn matched_fan_evidence_is_complete(record: &EvidenceRecord, fan: EvidenceFan) -> bool {
-    let mut endpoint_identities: [Option<&str>; 3] = [None; 3];
-    for sample in &record.samples {
-        let commands = record
-            .commands
-            .iter()
-            .filter(|command| {
-                command.fan == fan
-                    && command.field == FanControlField::Pwm
-                    && timestamp_within_sample(command.timestamp, sample.timestamp)
-            })
-            .collect::<Vec<_>>();
-        let [command] = commands.as_slice() else {
+pub(crate) fn matched_control_evidence_is_complete(record: &EvidenceRecord) -> bool {
+    let sample_count = record.samples.len();
+    if record.commands.len() != sample_count * 2
+        || record.readbacks.len() != sample_count * 6 + 2
+        || record.restoration_attempts.len() != 2
+    {
+        return false;
+    }
+    let mut commands = vec![[None; 2]; sample_count];
+    let mut readbacks = vec![[[None; 3]; 2]; sample_count];
+    let mut final_readbacks = [None; 2];
+    let mut attempts = [None; 2];
+
+    for command in &record.commands {
+        let Some(sample_index) = evidence_sample_index(&record.samples, command.timestamp) else {
             return false;
         };
-        for (field_index, field) in [
-            FanReadbackField::Enable,
-            FanReadbackField::Pwm,
-            FanReadbackField::Rpm,
-        ]
-        .into_iter()
-        .enumerate()
+        let fan_index = fan_index(command.fan);
+        if command.field != FanControlField::Pwm
+            || commands[sample_index][fan_index].replace(command).is_some()
         {
-            let readbacks = record
-                .readbacks
-                .iter()
-                .filter(|readback| {
-                    readback.fan == fan
-                        && readback.field == field
-                        && readback.phase == Some(crate::FanReadbackPhase::Sample)
-                        && timestamp_within_sample(readback.timestamp, sample.timestamp)
-                })
-                .collect::<Vec<_>>();
-            let [readback] = readbacks.as_slice() else {
-                return false;
-            };
-            let expected_value = match field {
-                FanReadbackField::Enable => Some(1),
-                FanReadbackField::Pwm => Some(command.value),
-                FanReadbackField::Rpm => readback.value,
-            };
-            if readback.outcome != ObservationOutcome::Confirmed
-                || readback.value != expected_value
-                || readback.timestamp.monotonic_millis < command.timestamp.monotonic_millis
-                || endpoint_identities[field_index]
-                    .is_some_and(|identity| identity != readback.endpoint_identity)
-            {
-                return false;
-            }
-            endpoint_identities[field_index] = Some(readback.endpoint_identity.as_str());
+            return false;
         }
     }
-    let final_readbacks = record
-        .readbacks
-        .iter()
-        .filter(|readback| {
-            readback.fan == fan
-                && readback.field == FanReadbackField::Enable
-                && readback.phase == Some(crate::FanReadbackPhase::Final)
-        })
-        .collect::<Vec<_>>();
-    let attempts = record
-        .restoration_attempts
-        .iter()
-        .filter(|attempt| attempt.fan == fan)
-        .collect::<Vec<_>>();
-    matches!(
-        (final_readbacks.as_slice(), attempts.as_slice()),
-        ([readback], [attempt])
-            if readback.value == Some(2)
-                && readback.outcome == ObservationOutcome::Confirmed
-                && Some(readback.endpoint_identity.as_str()) == endpoint_identities[0]
-                && attempt.timestamp == readback.timestamp
-                && attempt.auto_write_succeeded
-                && attempt.enable_readback == Some(2)
-                && attempt.outcome == RestorationOutcome::FirmwareAutoConfirmed
-    )
+    for readback in &record.readbacks {
+        let fan_index = fan_index(readback.fan);
+        match readback.phase {
+            Some(crate::FanReadbackPhase::Sample) => {
+                let Some(sample_index) = evidence_sample_index(&record.samples, readback.timestamp)
+                else {
+                    return false;
+                };
+                let field_index = readback_field_index(readback.field);
+                if readbacks[sample_index][fan_index][field_index]
+                    .replace(readback)
+                    .is_some()
+                {
+                    return false;
+                }
+            }
+            Some(crate::FanReadbackPhase::Final) if readback.field == FanReadbackField::Enable => {
+                if final_readbacks[fan_index].replace(readback).is_some() {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    for attempt in &record.restoration_attempts {
+        if attempts[fan_index(attempt.fan)].replace(attempt).is_some() {
+            return false;
+        }
+    }
+
+    let mut endpoint_identities: [[Option<&str>; 3]; 2] = [[None; 3]; 2];
+    for sample_index in 0..sample_count {
+        for fan_index in 0..2 {
+            let Some(command) = commands[sample_index][fan_index] else {
+                return false;
+            };
+            for field_index in 0..3 {
+                let Some(readback) = readbacks[sample_index][fan_index][field_index] else {
+                    return false;
+                };
+                let expected_value = match field_index {
+                    0 => Some(1),
+                    1 => Some(command.value),
+                    _ => readback.value,
+                };
+                if readback.outcome != ObservationOutcome::Confirmed
+                    || readback.value != expected_value
+                    || readback.timestamp.monotonic_millis < command.timestamp.monotonic_millis
+                    || endpoint_identities[fan_index][field_index]
+                        .is_some_and(|identity| identity != readback.endpoint_identity)
+                {
+                    return false;
+                }
+                endpoint_identities[fan_index][field_index] =
+                    Some(readback.endpoint_identity.as_str());
+            }
+        }
+    }
+    (0..2).all(|fan_index| {
+        matches!(
+            (final_readbacks[fan_index], attempts[fan_index]),
+            (Some(readback), Some(attempt))
+                if readback.value == Some(2)
+                    && readback.outcome == ObservationOutcome::Confirmed
+                    && Some(readback.endpoint_identity.as_str())
+                        == endpoint_identities[fan_index][0]
+                    && attempt.timestamp == readback.timestamp
+                    && attempt.auto_write_succeeded
+                    && attempt.enable_readback == Some(2)
+                    && attempt.outcome == RestorationOutcome::FirmwareAutoConfirmed
+        )
+    })
+}
+
+fn evidence_sample_index(
+    samples: &[TelemetrySampleEvidence],
+    timestamp: EvidenceTimestamp,
+) -> Option<usize> {
+    let index = samples
+        .partition_point(|sample| sample.timestamp.monotonic_millis <= timestamp.monotonic_millis)
+        .checked_sub(1)?;
+    timestamp
+        .monotonic_millis
+        .checked_sub(samples[index].timestamp.monotonic_millis)
+        .is_some_and(|delay| delay <= SAMPLE_CADENCE_JITTER_MILLIS)
+        .then_some(index)
 }
 
 fn timestamp_within_sample(timestamp: EvidenceTimestamp, sample_at: EvidenceTimestamp) -> bool {
@@ -1213,7 +1296,25 @@ fn timestamp_within_sample(timestamp: EvidenceTimestamp, sample_at: EvidenceTime
         .is_some_and(|delay| delay <= SAMPLE_CADENCE_JITTER_MILLIS)
 }
 
-fn matched_workload_matches_baseline(custom: &EvidenceRecord, baseline: &EvidenceRecord) -> bool {
+const fn fan_index(fan: EvidenceFan) -> usize {
+    match fan {
+        EvidenceFan::Cpu => 0,
+        EvidenceFan::Gpu => 1,
+    }
+}
+
+const fn readback_field_index(field: FanReadbackField) -> usize {
+    match field {
+        FanReadbackField::Enable => 0,
+        FanReadbackField::Pwm => 1,
+        FanReadbackField::Rpm => 2,
+    }
+}
+
+pub(crate) fn matched_workload_matches_baseline(
+    custom: &EvidenceRecord,
+    baseline: &EvidenceRecord,
+) -> bool {
     let (
         Some(custom_workload),
         Some(baseline_workload),
@@ -1263,7 +1364,7 @@ fn matched_workload_matches_baseline(custom: &EvidenceRecord, baseline: &Evidenc
         && custom_summary.nvidia_faults.is_empty()
 }
 
-fn matched_workload_matches_calibrations(
+pub(crate) fn matched_workload_matches_calibrations(
     record: &EvidenceRecord,
     calibrations: MatchedWorkloadTachometerCalibrations<'_>,
 ) -> bool {
@@ -1315,26 +1416,30 @@ fn matched_workload_matches_calibration_evidence(
 }
 
 #[derive(Default)]
-struct ControlEvidenceState {
+pub(crate) struct ControlEvidenceState {
     endpoint_identities: [Option<String>; 6],
 }
 
 impl ControlEvidenceState {
-    fn endpoint_identity(&self, fan: EvidenceFan, field: FanReadbackField) -> Option<&str> {
+    pub(crate) fn endpoint_identity(
+        &self,
+        fan: EvidenceFan,
+        field: FanReadbackField,
+    ) -> Option<&str> {
         self.endpoint_identities[endpoint_index(fan, field)].as_deref()
     }
 }
 
 #[derive(Clone, Copy)]
-struct ObservationSchedule {
-    run_started_at: EvidenceTimestamp,
-    captured_at: EvidenceTimestamp,
-    expected_millis: u64,
+pub(crate) struct ObservationSchedule {
+    pub(crate) run_started_at: EvidenceTimestamp,
+    pub(crate) captured_at: EvidenceTimestamp,
+    pub(crate) expected_millis: u64,
 }
 
-fn validate_observation(
+pub(crate) fn validate_observation(
     observation: &mut MatchedWorkloadObservation,
-    workload: &WorkloadEvidence,
+    expected_profile: EvidenceProfile,
     schedule: ObservationSchedule,
     control_evidence: &mut ControlEvidenceState,
     tachometer_calibrations: MatchedWorkloadTachometerCalibrations<'_>,
@@ -1414,8 +1519,8 @@ fn validate_observation(
             "required telemetry is missing, stale, or invalid",
         );
     }
-    if sample.external_power != Some(profile_power(workload.power_profile))
-        || sample.selected_profile != Some(workload.power_profile)
+    if sample.external_power != Some(profile_power(expected_profile))
+        || sample.selected_profile != Some(expected_profile)
     {
         push_fault(
             faults,
@@ -1502,7 +1607,7 @@ fn validate_observation(
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct TachometerEvidenceState {
+pub(crate) struct TachometerEvidenceState {
     cpu: Option<TachometerCommandState>,
     gpu: Option<TachometerCommandState>,
 }
@@ -1515,7 +1620,7 @@ struct TachometerCommandState {
 }
 
 impl TachometerEvidenceState {
-    fn pending_fans(self) -> impl Iterator<Item = EvidenceFan> {
+    pub(crate) fn pending_fans(self) -> impl Iterator<Item = EvidenceFan> {
         [
             self.cpu
                 .filter(|state| !state.settled)
@@ -1936,7 +2041,7 @@ fn profile_power(profile: EvidenceProfile) -> EvidenceExternalPower {
     }
 }
 
-fn plausible_temperature(value: i32, maximum: i32) -> bool {
+pub(crate) fn plausible_temperature(value: i32, maximum: i32) -> bool {
     (MIN_PLAUSIBLE_TEMPERATURE_MILLICELSIUS..=maximum).contains(&value)
 }
 

@@ -9,16 +9,18 @@ use fan_control_core::{
     FakePlatform, FakeRuntimeLock, Fan, FanArmingError, FanArmingFailure, FanArmingOperation,
     FanArmingReadback, FileAccess, FileIdentity, FilePermissions, FreshSampleGate,
     IdentityBoundFileAccess, ObservedSample, OwnershipSampleReadiness, PlatformError,
-    PlatformErrorKind, PlatformOperation, RuntimeLockAccess, RuntimeLockError, SampleCapture,
-    SampleSetError, SampleSourceError, SampleSources, ServiceAccess, TemperatureCelsius,
-    ValidatedConfig, acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
+    PlatformErrorKind, PlatformOperation, QUALIFICATION_RECORD_PATH,
+    RootOwnedQualificationRecordAccess, RuntimeLockAccess, RuntimeLockError,
+    SUPERVISED_ENDURANCE_EVIDENCE_PATH, SampleCapture, SampleSetError, SampleSourceError,
+    SampleSources, ServiceAccess, TemperatureCelsius, ValidatedConfig,
+    acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
     discover_acer_hwmon,
 };
 
 mod support;
 use support::{
-    PROTECTED_POLICY, diagnostic_field, matching_observation_for_policy, matching_record,
-    protected_config, record_diagnostics,
+    PROTECTED_POLICY, diagnostic_field, matching_endurance_evidence,
+    matching_observation_for_policy, matching_record, protected_config, record_diagnostics,
 };
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
@@ -104,7 +106,7 @@ fn policy_admission_rechecks_auto_after_restoration() {
         &mut ownership,
         &device,
         PROTECTED_POLICY,
-        &matching_record(PROTECTED_POLICY),
+        Path::new(QUALIFICATION_RECORD_PATH),
         &[matching_observation_for_policy(PROTECTED_POLICY)],
     )
     .unwrap_err();
@@ -649,7 +651,7 @@ fn failed_handover_starts_a_new_two_sample_epoch() {
         &mut ownership,
         &device,
         PROTECTED_POLICY,
-        &matching_record(PROTECTED_POLICY),
+        Path::new(QUALIFICATION_RECORD_PATH),
         &[matching_observation_for_policy(PROTECTED_POLICY)],
     )
     .unwrap();
@@ -823,14 +825,14 @@ fn admit_and_sample<P>(
     device: &fan_control_core::AcerHwmonDevice,
 ) -> (AdmittedPolicyAuthority, ValidatedConfig, ArmingReadySample)
 where
-    P: BoundedFileAccess + Clock + RuntimeLockAccess,
+    P: BoundedFileAccess + Clock + RootOwnedQualificationRecordAccess + RuntimeLockAccess,
 {
     ownership.restore_firmware_auto(device).unwrap();
     let authority = admit_policy_authority(
         ownership,
         device,
         PROTECTED_POLICY,
-        &matching_record(PROTECTED_POLICY),
+        Path::new(QUALIFICATION_RECORD_PATH),
         &[matching_observation_for_policy(PROTECTED_POLICY)],
     )
     .unwrap();
@@ -934,6 +936,16 @@ fn arming_preserves_post_discovery_ambiguity_attribution() {
 fn fixture(cpu_rpm: &str, gpu_rpm: &str) -> (FakePlatform, fan_control_core::AcerHwmonDevice) {
     let root = Path::new(ACER_ROOT);
     let mut platform = FakePlatform::new();
+    platform.insert_file_with_permissions(
+        QUALIFICATION_RECORD_PATH,
+        matching_record(PROTECTED_POLICY),
+        FilePermissions::READ_ONLY,
+    );
+    platform.insert_file_with_permissions(
+        SUPERVISED_ENDURANCE_EVIDENCE_PATH,
+        matching_endurance_evidence(PROTECTED_POLICY),
+        FilePermissions::READ_ONLY,
+    );
     platform.insert_file_with_permissions(root.join("name"), "acer\n", FilePermissions::READ_ONLY);
     for channel in 1..=2 {
         platform.insert_file_with_permissions(
@@ -1043,6 +1055,28 @@ impl FileAccess for PathAwarePlatform {
 
     fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
         self.inner.permissions(path)
+    }
+}
+
+impl RootOwnedQualificationRecordAccess for PathAwarePlatform {
+    fn read_root_owned_qualification_record(
+        &mut self,
+        path: &Path,
+    ) -> Result<String, PlatformError> {
+        self.inner.read_root_owned_qualification_record(path)
+    }
+
+    fn verify_root_owned_supervised_endurance_evidence(
+        &mut self,
+        path: &Path,
+        expected_sha256: &str,
+        expected_envelope: &fan_control_core::QualificationEnvelopeIdentityV1,
+    ) -> Result<(), PlatformError> {
+        self.inner.verify_root_owned_supervised_endurance_evidence(
+            path,
+            expected_sha256,
+            expected_envelope,
+        )
     }
 }
 

@@ -6,7 +6,10 @@ use std::{
     io::{self, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        },
     },
     path::Path,
 };
@@ -44,8 +47,10 @@ pub struct EvidenceRecord {
     pub state_transitions: Vec<StateTransitionEvidence>,
     pub faults: Vec<FaultEvidence>,
     pub restoration_attempts: Vec<RestorationAttemptEvidence>,
+    pub process_stops: Vec<ProcessStopEvidence>,
     pub calibration: Vec<FanCalibrationEvidence>,
     pub thermal_summary: Option<ThermalSummaryEvidence>,
+    pub endurance_thermal_envelope: Option<EnduranceThermalEnvelopeEvidence>,
     pub live_lifecycle_cases: Option<Vec<crate::LiveLifecycleCaseResult>>,
     pub outcome: RunOutcomeEvidence,
 }
@@ -74,9 +79,13 @@ struct EvidenceRecordWire {
     state_transitions: Vec<StateTransitionEvidence>,
     faults: Vec<FaultEvidence>,
     restoration_attempts: Vec<RestorationAttemptEvidence>,
+    #[serde(default)]
+    process_stops: Vec<ProcessStopEvidence>,
     calibration: Vec<FanCalibrationEvidence>,
     #[serde(deserialize_with = "deserialize_required_option")]
     thermal_summary: Option<ThermalSummaryEvidence>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    endurance_thermal_envelope: Option<EnduranceThermalEnvelopeEvidence>,
     #[serde(default, deserialize_with = "deserialize_present_option")]
     live_lifecycle_cases: Option<Vec<crate::LiveLifecycleCaseResult>>,
     outcome: RunOutcomeEvidence,
@@ -103,8 +112,10 @@ impl TryFrom<EvidenceRecordWire> for EvidenceRecord {
             state_transitions: wire.state_transitions,
             faults: wire.faults,
             restoration_attempts: wire.restoration_attempts,
+            process_stops: wire.process_stops,
             calibration: wire.calibration,
             thermal_summary: wire.thermal_summary,
+            endurance_thermal_envelope: wire.endurance_thermal_envelope,
             live_lifecycle_cases: wire.live_lifecycle_cases,
             outcome: wire.outcome,
         };
@@ -124,7 +135,9 @@ impl Serialize for EvidenceRecord {
             16 + usize::from(self.starting_conditions_captured_at.is_some())
                 + usize::from(self.workload_started_at.is_some())
                 + usize::from(self.baseline_binding_sha256.is_some())
-                + usize::from(self.live_lifecycle_cases.is_some()),
+                + usize::from(self.endurance_thermal_envelope.is_some())
+                + usize::from(self.live_lifecycle_cases.is_some())
+                + usize::from(!self.process_stops.is_empty()),
         )?;
         record.serialize_field("schema_version", &self.schema_version)?;
         record.serialize_field("record_status", &self.record_status)?;
@@ -151,8 +164,14 @@ impl Serialize for EvidenceRecord {
         record.serialize_field("state_transitions", &self.state_transitions)?;
         record.serialize_field("faults", &self.faults)?;
         record.serialize_field("restoration_attempts", &self.restoration_attempts)?;
+        if !self.process_stops.is_empty() {
+            record.serialize_field("process_stops", &self.process_stops)?;
+        }
         record.serialize_field("calibration", &self.calibration)?;
         record.serialize_field("thermal_summary", &self.thermal_summary)?;
+        if let Some(endurance_thermal_envelope) = &self.endurance_thermal_envelope {
+            record.serialize_field("endurance_thermal_envelope", endurance_thermal_envelope)?;
+        }
         if let Some(live_lifecycle_cases) = &self.live_lifecycle_cases {
             record.serialize_field("live_lifecycle_cases", live_lifecycle_cases)?;
         }
@@ -161,10 +180,19 @@ impl Serialize for EvidenceRecord {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EvidenceRecordStatus {
     Complete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnduranceThermalEnvelopeEvidence {
+    pub cpu_peak_limit_millicelsius: i32,
+    pub gpu_peak_limit_millicelsius: i32,
+    pub cpu_p95_limit_millicelsius: i32,
+    pub gpu_p95_limit_millicelsius: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,6 +245,10 @@ pub struct TelemetrySampleEvidence {
     pub cpu_source_demand_basis_points: Option<u16>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub gpu_source_demand_basis_points: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_utilization_basis_points: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_utilization_basis_points: Option<u16>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub commanded_demand_basis_points: Option<u16>,
     #[serde(deserialize_with = "deserialize_required_option")]
@@ -241,7 +273,7 @@ pub enum EvidenceExternalPower {
     Battery,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EvidenceProfile {
     Ac,
@@ -370,6 +402,23 @@ pub struct RestorationAttemptEvidence {
     #[serde(deserialize_with = "deserialize_required_option")]
     pub enable_readback: Option<u32>,
     pub outcome: RestorationOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoppedProcess {
+    Workload,
+    Service,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessStopEvidence {
+    pub process: StoppedProcess,
+    pub process_identity: String,
+    pub requested_at: EvidenceTimestamp,
+    pub confirmed_at: EvidenceTimestamp,
+    pub running: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -564,6 +613,39 @@ impl EvidenceWriteError {
 }
 
 impl EvidenceRecord {
+    pub(crate) fn complete_v2(
+        qualification_envelope: QualificationEnvelopeIdentityV1,
+        stage: impl Into<String>,
+        started_at: EvidenceTimestamp,
+        completed_at: EvidenceTimestamp,
+        outcome: RunOutcomeEvidence,
+    ) -> Self {
+        Self {
+            schema_version: EVIDENCE_SCHEMA_VERSION_V2,
+            record_status: EvidenceRecordStatus::Complete,
+            qualification_envelope,
+            stage: stage.into(),
+            started_at,
+            completed_at,
+            starting_conditions_captured_at: None,
+            workload_started_at: None,
+            baseline_binding_sha256: None,
+            workload: None,
+            samples: Vec::new(),
+            commands: Vec::new(),
+            readbacks: Vec::new(),
+            state_transitions: Vec::new(),
+            faults: Vec::new(),
+            restoration_attempts: Vec::new(),
+            process_stops: Vec::new(),
+            calibration: Vec::new(),
+            thermal_summary: None,
+            endurance_thermal_envelope: None,
+            live_lifecycle_cases: None,
+            outcome,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), EvidenceValidationError> {
         if !matches!(
             self.schema_version,
@@ -645,6 +727,20 @@ impl EvidenceRecord {
             }
             (_, _, None) => {}
         }
+        match (
+            self.stage.as_str(),
+            self.endurance_thermal_envelope.as_ref(),
+        ) {
+            ("supervised-endurance", Some(_))
+                if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2 => {}
+            ("supervised-endurance", _) | (_, Some(_)) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "endurance_thermal_envelope",
+                    index: 0,
+                });
+            }
+            (_, None) => {}
+        }
         match (self.stage.as_str(), self.live_lifecycle_cases.as_ref()) {
             ("live-lifecycle", Some(_))
                 if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2
@@ -722,6 +818,14 @@ impl EvidenceRecord {
                 (
                     "samples.gpu_source_demand_basis_points",
                     sample.gpu_source_demand_basis_points,
+                ),
+                (
+                    "samples.cpu_utilization_basis_points",
+                    sample.cpu_utilization_basis_points,
+                ),
+                (
+                    "samples.gpu_utilization_basis_points",
+                    sample.gpu_utilization_basis_points,
                 ),
                 (
                     "samples.commanded_demand_basis_points",
@@ -850,6 +954,25 @@ impl EvidenceRecord {
             {
                 return Err(EvidenceValidationError::InvalidValue {
                     field: "restoration_attempts.enable_readback",
+                    index,
+                });
+            }
+        }
+        if self.stage != "supervised-endurance" && !self.process_stops.is_empty() {
+            return Err(EvidenceValidationError::InvalidValue {
+                field: "process_stops",
+                index: 0,
+            });
+        }
+        for (index, process_stop) in self.process_stops.iter().enumerate() {
+            validate_timestamp(self, process_stop.requested_at, "process_stops", index)?;
+            validate_timestamp(self, process_stop.confirmed_at, "process_stops", index)?;
+            if process_stop.process_identity.trim().is_empty()
+                || process_stop.requested_at.monotonic_millis
+                    > process_stop.confirmed_at.monotonic_millis
+            {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "process_stops",
                     index,
                 });
             }
@@ -987,17 +1110,20 @@ impl EvidenceRecord {
             let mut commanded_fans = [EvidenceFan::Cpu, EvidenceFan::Gpu]
                 .into_iter()
                 .filter(|fan| self.commands.iter().any(|command| command.fan == *fan));
-            if !commanded_fans
+            let restoration_evidence_is_complete = commanded_fans
                 .clone()
                 .all(|fan| final_restoration_attempt_after_command(self, fan).is_some())
-                || !final_state_follows_restoration(self)
+                && final_state_follows_restoration(self);
+            if !restoration_evidence_is_complete
+                && matches!(self.outcome.status, RunOutcomeStatus::Passed)
             {
                 return Err(EvidenceValidationError::InvalidValue {
                     field: "outcome.restoration_evidence",
                     index: 0,
                 });
             }
-            commanded_fans.all(|fan| final_restoration_confirms_auto(self, fan))
+            restoration_evidence_is_complete
+                && commanded_fans.all(|fan| final_restoration_confirms_auto(self, fan))
                 && final_state_confirms_auto(self)
         };
         if self.outcome.final_firmware_auto_confirmed != final_restoration_is_complete {
@@ -1038,6 +1164,9 @@ impl EvidenceRecord {
                 }
                 "live-lifecycle" if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2 => {
                     crate::live_lifecycle::live_lifecycle_is_complete(self)
+                }
+                "supervised-endurance" if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2 => {
+                    crate::endurance::supervised_endurance_is_complete(self)
                 }
                 _ => {
                     self.workload.is_some()
@@ -1411,6 +1540,130 @@ pub fn write_evidence_atomically(
     record: &EvidenceRecord,
 ) -> Result<(), EvidenceWriteError> {
     write_evidence_with_observer(destination, record, |_| Ok(()))
+}
+
+/// Rejects output locations that cannot safely hold root-owned authorization evidence.
+pub fn validate_root_owned_output_destination(
+    destination: &Path,
+) -> Result<(), EvidenceWriteError> {
+    // SAFETY: geteuid has no preconditions and does not mutate process state.
+    validate_owned_destination(destination, 0, unsafe { libc::geteuid() })
+}
+
+/// Publishes immutable evidence only through a protected root-owned directory chain.
+pub fn write_root_owned_evidence_atomically(
+    destination: &Path,
+    record: &EvidenceRecord,
+) -> Result<(), EvidenceWriteError> {
+    record.validate().map_err(EvidenceWriteError::Invalid)?;
+    // SAFETY: geteuid has no preconditions and does not mutate process state.
+    write_owned_json_atomically(destination, record, 0, unsafe { libc::geteuid() })
+}
+
+pub(crate) fn write_root_owned_json_atomically<T: Serialize>(
+    destination: &Path,
+    value: &T,
+) -> Result<(), EvidenceWriteError> {
+    // SAFETY: geteuid has no preconditions and does not mutate process state.
+    write_owned_json_atomically(destination, value, 0, unsafe { libc::geteuid() })
+}
+
+fn write_owned_json_atomically<T: Serialize>(
+    destination: &Path,
+    value: &T,
+    required_owner: u32,
+    effective_user: u32,
+) -> Result<(), EvidenceWriteError> {
+    validate_owned_destination(destination, required_owner, effective_user)?;
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .expect("validated destination has a parent");
+    let file_name = destination
+        .file_name()
+        .expect("validated destination has a file name");
+    let directory = open_directory(parent)?;
+    let mut payload = serde_json::to_vec_pretty(value).map_err(EvidenceWriteError::Serialize)?;
+    payload.push(b'\n');
+    let file = create_unnamed_file(&directory)?;
+    publish_file(&directory, file_name, &payload, file, |_| Ok(()))
+}
+
+fn validate_owned_destination(
+    destination: &Path,
+    required_owner: u32,
+    effective_user: u32,
+) -> Result<(), EvidenceWriteError> {
+    if effective_user != required_owner {
+        return Err(io_error(
+            "validate qualification record ownership",
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "effective user must own the qualification record",
+            ),
+        ));
+    }
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or(EvidenceWriteError::InvalidDestination)?;
+    let file_name = destination
+        .file_name()
+        .ok_or(EvidenceWriteError::InvalidDestination)?;
+    if file_name.is_empty() {
+        return Err(EvidenceWriteError::InvalidDestination);
+    }
+    validate_owned_ancestor_chain(parent, required_owner)?;
+    let directory = open_directory(parent)?;
+    let metadata = directory
+        .metadata()
+        .map_err(|source| io_error("inspect qualification record directory", source))?;
+    if metadata.uid() != required_owner || metadata.permissions().mode() & 0o022 != 0 {
+        return Err(io_error(
+            "validate qualification record directory ownership",
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "directory must have the required owner and not be group/world writable",
+            ),
+        ));
+    }
+    match destination.symlink_metadata() {
+        Ok(_) => Err(io_error(
+            "validate output destination",
+            io::Error::new(io::ErrorKind::AlreadyExists, "destination already exists"),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error("inspect output destination", error)),
+    }
+}
+
+fn validate_owned_ancestor_chain(
+    parent: &Path,
+    required_owner: u32,
+) -> Result<(), EvidenceWriteError> {
+    if !parent.is_absolute() {
+        return Err(EvidenceWriteError::InvalidDestination);
+    }
+    for ancestor in parent.ancestors() {
+        let metadata = ancestor
+            .symlink_metadata()
+            .map_err(|source| io_error("inspect qualification record ancestor", source))?;
+        let owner_is_trusted = metadata.uid() == 0 || metadata.uid() == required_owner;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || !owner_is_trusted
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(io_error(
+                "validate qualification record ancestor ownership",
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "every ancestor must be a trusted-owner directory and not group/world writable",
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn write_evidence_with_observer(
@@ -1864,11 +2117,76 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    fn owned_json_publication_is_private_immutable_and_owner_confined() {
+        // SAFETY: geteuid has no preconditions and does not mutate process state.
+        let owner = unsafe { libc::geteuid() };
+        let directory = trusted_temporary_directory("owned-json");
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let destination = directory.join("qualification.json");
+        let value = serde_json::json!({"schema_version": 1, "qualification_id": "test"});
+
+        validate_owned_destination(&destination, owner, owner).unwrap();
+        write_owned_json_atomically(&destination, &value, owner, owner).unwrap();
+        let metadata = fs::metadata(&destination).unwrap();
+        assert_eq!(metadata.uid(), owner);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&destination).unwrap())
+                .unwrap(),
+            value
+        );
+        assert!(write_owned_json_atomically(&destination, &value, owner, owner).is_err());
+
+        let unsafe_ancestor = trusted_temporary_directory("unsafe-owned-json");
+        let unsafe_directory = unsafe_ancestor.join("safe-child");
+        fs::create_dir_all(&unsafe_directory).unwrap();
+        fs::set_permissions(&unsafe_ancestor, fs::Permissions::from_mode(0o770)).unwrap();
+        fs::set_permissions(&unsafe_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            validate_owned_destination(&unsafe_directory.join("endurance.json"), owner, owner,)
+                .is_err()
+        );
+        assert!(
+            write_owned_json_atomically(
+                &unsafe_directory.join("qualification.json"),
+                &value,
+                owner,
+                owner,
+            )
+            .is_err()
+        );
+        assert!(
+            write_owned_json_atomically(
+                &directory.join("wrong-owner.json"),
+                &value,
+                owner,
+                owner.saturating_add(1),
+            )
+            .is_err()
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+        fs::remove_dir_all(unsafe_ancestor).unwrap();
+    }
+
     fn temporary_directory(label: &str) -> std::path::PathBuf {
         let id = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
             "pt31553-evidence-unit-{label}-{}-{id}",
             std::process::id()
         ))
+    }
+
+    fn trusted_temporary_directory(label: &str) -> std::path::PathBuf {
+        let id = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "pt31553-owned-json-{label}-{}-{id}",
+                std::process::id()
+            ))
     }
 }

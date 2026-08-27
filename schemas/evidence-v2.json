@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/dannyfranca/predator-pt315-53-fan-control/schemas/evidence-v2.json",
   "title": "PT315-53 qualification evidence v2",
-  "$comment": "Structural validation MUST be followed by semantic validation. The canonical Rust API is parse_evidence_v2. Schema v2 adds source timestamps, phased Firmware Auto readbacks, and exact baseline binding for matched workload evidence; schema v1 remains available separately.",
+  "$comment": "Structural validation MUST be followed by semantic validation. The canonical Rust API is parse_evidence_v2. Schema v2 covers source timestamps, phased Firmware Auto readbacks, exact baseline binding, live lifecycle cases, and supervised endurance evidence; schema v1 remains available separately.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -66,6 +66,10 @@
       "type": "array",
       "items": { "$ref": "#/$defs/restorationAttempt" }
     },
+    "process_stops": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/processStop" }
+    },
     "calibration": {
       "type": "array",
       "maxItems": 2,
@@ -77,6 +81,7 @@
         { "type": "null" }
       ]
     },
+    "endurance_thermal_envelope": { "$ref": "#/$defs/enduranceThermalEnvelope" },
     "live_lifecycle_cases": {
       "type": "array",
       "maxItems": 8,
@@ -198,6 +203,199 @@
           }
         },
         "not": { "required": ["live_lifecycle_cases"] }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": { "const": "supervised-endurance" },
+          "outcome": {
+            "properties": { "status": { "const": "passed" } },
+            "required": ["status"]
+          }
+        },
+        "required": ["stage", "outcome"]
+      },
+      "then": {
+        "required": ["starting_conditions_captured_at", "workload_started_at", "process_stops", "endurance_thermal_envelope"],
+        "properties": {
+          "workload": {
+            "allOf": [
+              { "$ref": "#/$defs/workload" },
+              {
+                "properties": {
+                  "workload_id": { "const": "supervised-mixed-endurance" },
+                  "power_profile": { "const": "ac" },
+                  "version": { "const": "1.0.0" },
+                  "command": {
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "prefixItems": [
+                      { "const": "/usr/lib/pt31553-fan-control/workloads/mixed" },
+                      { "const": "--fixed" }
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "samples": {
+            "minItems": 1800,
+            "maxItems": 1800,
+            "$comment": "These exact disjoint counts structurally cover the six-segment AC/battery and load/idle matrix. parse_evidence_v2 remains mandatory to enforce chronological segment boundaries and timestamp coupling.",
+            "items": {
+              "required": ["cpu_utilization_basis_points", "gpu_utilization_basis_points"],
+              "properties": {
+                "cpu_utilization_basis_points": { "$ref": "#/$defs/basisPoints" },
+                "gpu_utilization_basis_points": { "$ref": "#/$defs/basisPoints" }
+              }
+            },
+            "allOf": [
+              {
+                "contains": {
+                  "required": ["selected_profile", "cpu_utilization_basis_points", "gpu_utilization_basis_points"],
+                  "properties": {
+                    "selected_profile": { "const": "ac" },
+                    "external_power": { "const": "ac" },
+                    "cpu_utilization_basis_points": { "minimum": 5000 },
+                    "gpu_utilization_basis_points": { "minimum": 5000 }
+                  }
+                },
+                "minContains": 750,
+                "maxContains": 750
+              },
+              {
+                "contains": {
+                  "required": ["selected_profile", "cpu_utilization_basis_points", "gpu_utilization_basis_points"],
+                  "properties": {
+                    "selected_profile": { "const": "ac" },
+                    "external_power": { "const": "ac" },
+                    "cpu_utilization_basis_points": { "maximum": 1000 },
+                    "gpu_utilization_basis_points": { "maximum": 1000 }
+                  }
+                },
+                "minContains": 600,
+                "maxContains": 600
+              },
+              {
+                "contains": {
+                  "required": ["selected_profile", "cpu_utilization_basis_points", "gpu_utilization_basis_points"],
+                  "properties": {
+                    "selected_profile": { "const": "battery" },
+                    "external_power": { "const": "battery" },
+                    "cpu_utilization_basis_points": { "minimum": 5000 },
+                    "gpu_utilization_basis_points": { "minimum": 5000 }
+                  }
+                },
+                "minContains": 300,
+                "maxContains": 300
+              },
+              {
+                "contains": {
+                  "required": ["selected_profile", "cpu_utilization_basis_points", "gpu_utilization_basis_points"],
+                  "properties": {
+                    "selected_profile": { "const": "battery" },
+                    "external_power": { "const": "battery" },
+                    "cpu_utilization_basis_points": { "maximum": 1000 },
+                    "gpu_utilization_basis_points": { "maximum": 1000 }
+                  }
+                },
+                "minContains": 150,
+                "maxContains": 150
+              }
+            ]
+          },
+          "commands": { "minItems": 3600, "maxItems": 3600 },
+          "readbacks": {
+            "minItems": 10802,
+            "maxItems": 10802,
+            "allOf": [
+              {
+                "contains": {
+                  "allOf": [
+                    { "$ref": "#/$defs/cpuFirmwareAutoReadback" },
+                    { "properties": { "phase": { "const": "final" } }, "required": ["phase"] }
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "allOf": [
+                    { "$ref": "#/$defs/gpuFirmwareAutoReadback" },
+                    { "properties": { "phase": { "const": "final" } }, "required": ["phase"] }
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            ]
+          },
+          "state_transitions": {
+            "minItems": 8,
+            "maxItems": 8,
+            "prefixItems": [
+              { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "custom-control" } } },
+              { "properties": { "from": { "const": "custom-control" }, "to": { "const": "endurance-ac-load-1" } } },
+              { "properties": { "from": { "const": "endurance-ac-load-1" }, "to": { "const": "endurance-ac-idle-1" } } },
+              { "properties": { "from": { "const": "endurance-ac-idle-1" }, "to": { "const": "endurance-battery-load" } } },
+              { "properties": { "from": { "const": "endurance-battery-load" }, "to": { "const": "endurance-battery-idle" } } },
+              { "properties": { "from": { "const": "endurance-battery-idle" }, "to": { "const": "endurance-ac-load-2" } } },
+              { "properties": { "from": { "const": "endurance-ac-load-2" }, "to": { "const": "endurance-ac-idle-2" } } },
+              { "properties": { "from": { "const": "endurance-ac-idle-2" }, "to": { "const": "firmware-auto" } } }
+            ]
+          },
+          "faults": { "maxItems": 0 },
+          "restoration_attempts": {
+            "minItems": 2,
+            "maxItems": 2,
+            "prefixItems": [
+              { "$ref": "#/$defs/cpuFirmwareAutoRestoration" },
+              { "$ref": "#/$defs/gpuFirmwareAutoRestoration" }
+            ]
+          },
+          "process_stops": {
+            "minItems": 2,
+            "maxItems": 2,
+            "prefixItems": [
+              {
+                "properties": {
+                  "process": { "const": "workload" },
+                  "process_identity": { "const": "/usr/lib/pt31553-fan-control/workloads/mixed" },
+                  "running": { "const": false }
+                }
+              },
+              {
+                "properties": {
+                  "process": { "const": "service" },
+                  "process_identity": { "const": "pt31553-fan-control.service" },
+                  "running": { "const": false }
+                }
+              }
+            ]
+          },
+          "calibration": { "maxItems": 0 },
+          "thermal_summary": {
+            "allOf": [
+              { "$ref": "#/$defs/thermalSummary" },
+              {
+                "required": ["system_stable"],
+                "properties": {
+                  "system_stable": { "const": true },
+                  "kernel_faults": { "maxItems": 0 },
+                  "nvidia_faults": { "maxItems": 0 }
+                }
+              }
+            ]
+          },
+          "outcome": {
+            "properties": {
+              "another_passing_run_required": { "const": false },
+              "final_firmware_auto_confirmed": { "const": true }
+            }
+          }
+        }
       }
     },
     {
@@ -1131,6 +1329,8 @@
         "selected_profile": { "enum": ["ac", "battery", null] },
         "cpu_source_demand_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
         "gpu_source_demand_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
+        "cpu_utilization_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
+        "gpu_utilization_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
         "commanded_demand_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
         "cpu_thermal_throttling": { "$ref": "#/$defs/nullableBoolean" },
         "gpu_thermal_throttling": { "$ref": "#/$defs/nullableBoolean" }
@@ -1286,6 +1486,18 @@
           }
         }
       ]
+    },
+    "processStop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["process", "process_identity", "requested_at", "confirmed_at", "running"],
+      "properties": {
+        "process": { "enum": ["workload", "service"] },
+        "process_identity": { "type": "string", "minLength": 1 },
+        "requested_at": { "$ref": "#/$defs/timestamp" },
+        "confirmed_at": { "$ref": "#/$defs/timestamp" },
+        "running": { "type": "boolean" }
+      }
     },
     "cpuFirmwareAutoReadback": {
       "type": "object",
@@ -1572,6 +1784,22 @@
         "system_stable": { "type": "boolean" },
         "kernel_faults": { "type": "array", "items": { "type": "string" } },
         "nvidia_faults": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "enduranceThermalEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu_peak_limit_millicelsius",
+        "gpu_peak_limit_millicelsius",
+        "cpu_p95_limit_millicelsius",
+        "gpu_p95_limit_millicelsius"
+      ],
+      "properties": {
+        "cpu_peak_limit_millicelsius": { "type": "integer", "minimum": 1, "exclusiveMaximum": 95000 },
+        "gpu_peak_limit_millicelsius": { "type": "integer", "minimum": 1, "exclusiveMaximum": 85000 },
+        "cpu_p95_limit_millicelsius": { "type": "integer", "minimum": 1, "exclusiveMaximum": 95000 },
+        "gpu_p95_limit_millicelsius": { "type": "integer", "minimum": 1, "exclusiveMaximum": 85000 }
       }
     },
     "outcome": {

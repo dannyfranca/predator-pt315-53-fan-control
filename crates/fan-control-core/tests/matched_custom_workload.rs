@@ -1510,6 +1510,8 @@ fn sample(monotonic_millis: u64, cpu: i32, gpu: i32) -> TelemetrySampleEvidence 
         selected_profile: Some(EvidenceProfile::Ac),
         cpu_source_demand_basis_points: Some(5_000),
         gpu_source_demand_basis_points: Some(4_000),
+        cpu_utilization_basis_points: None,
+        gpu_utilization_basis_points: None,
         commanded_demand_basis_points: Some(5_000),
         cpu_thermal_throttling: Some(false),
         gpu_thermal_throttling: Some(false),

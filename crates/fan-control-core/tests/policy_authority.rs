@@ -2,14 +2,16 @@ use std::path::Path;
 
 use fan_control_core::{
     CompatibilityAdmissionError, CompatibilityObservation, FakePlatform, FilePermissions,
-    PolicyAuthorityAdmissionError, PolicyAuthorityError, TachometerCalibrationError,
-    acquire_controller_ownership, admit_policy_authority, discover_acer_hwmon,
+    PolicyAuthorityAdmissionError, PolicyAuthorityError, QUALIFICATION_RECORD_PATH,
+    SUPERVISED_ENDURANCE_EVIDENCE_PATH, TachometerCalibrationError, acquire_controller_ownership,
+    admit_policy_authority, discover_acer_hwmon,
 };
 
 mod support;
 use support::{
-    PROTECTED_POLICY, SOURCE_COMMIT, compatibility_declaration, matching_observation,
-    matching_observation_for_policy, matching_record, protected_config, sha256,
+    PROTECTED_POLICY, SOURCE_COMMIT, compatibility_declaration, matching_endurance_evidence,
+    matching_observation, matching_observation_for_policy, matching_record, protected_config,
+    sha256,
 };
 
 const OTHER_SOURCE_COMMIT: &str = "fedcba9876543210fedcba9876543210fedcba98";
@@ -137,7 +139,7 @@ fn both_formats_reject_unsupported_missing_unknown_and_malformed_fields() {
 
     let record = matching_record(PROTECTED_POLICY);
     for candidate in [
-        record.replacen("\"schema_version\":1", "\"schema_version\":2", 1),
+        record.replacen("\"schema_version\":2", "\"schema_version\":1", 1),
         record.replacen("\"qualification_id\":\"pt31553-v1\",", "", 1),
         record.replacen("{", "{\"unexpected\":true,", 1),
         record.replacen(
@@ -145,6 +147,32 @@ fn both_formats_reject_unsupported_missing_unknown_and_malformed_fields() {
             "\"policy_version\":false",
             1,
         ),
+    ] {
+        let observation = matching_observation_for_policy(PROTECTED_POLICY);
+        let (result, platform) = admit(PROTECTED_POLICY, &candidate, &[observation]);
+        assert!(result.is_err(), "{candidate}");
+        assert_firmware_auto(&platform);
+    }
+}
+
+#[test]
+fn legacy_or_unbound_records_never_admit_authority() {
+    let record = matching_record(PROTECTED_POLICY);
+    let evidence_sha256 = sha256(&matching_endurance_evidence(PROTECTED_POLICY));
+    for candidate in [
+        record.replacen("\"schema_version\":2", "\"schema_version\":1", 1),
+        record.replacen(
+            &format!("\"evidence_sha256\":\"{evidence_sha256}\""),
+            "\"evidence_sha256\":\"unbound\"",
+            1,
+        ),
+        record.replacen(
+            "\"stage\":\"supervised-endurance\"",
+            "\"stage\":\"matched-workload\"",
+            1,
+        ),
+        record.replacen("\"outcome\":\"passed\"", "\"outcome\":\"failed\"", 1),
+        record.replacen("\"service_stopped\":true", "\"service_stopped\":false", 1),
     ] {
         let observation = matching_observation_for_policy(PROTECTED_POLICY);
         let (result, platform) = admit(PROTECTED_POLICY, &candidate, &[observation]);
@@ -310,13 +338,18 @@ fn policy_admission_requires_confirmed_firmware_auto() {
     let record = matching_record(PROTECTED_POLICY);
     let observation = matching_observation_for_policy(PROTECTED_POLICY);
     let (mut platform, device) = fan_fixture();
+    platform.insert_file_with_permissions(
+        QUALIFICATION_RECORD_PATH,
+        record,
+        FilePermissions::READ_ONLY,
+    );
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
 
     let error = admit_policy_authority(
         &mut ownership,
         &device,
         PROTECTED_POLICY,
-        &record,
+        Path::new(QUALIFICATION_RECORD_PATH),
         &[observation],
     )
     .unwrap_err();
@@ -329,6 +362,78 @@ fn policy_admission_requires_confirmed_firmware_auto() {
     assert_firmware_auto(&platform);
 }
 
+#[test]
+fn policy_admission_rejects_unprotected_or_non_root_qualification_records() {
+    for (permissions, root_owned) in [
+        (FilePermissions::from_mode(0o664), true),
+        (FilePermissions::READ_ONLY, false),
+    ] {
+        let record = matching_record(PROTECTED_POLICY);
+        let observation = matching_observation_for_policy(PROTECTED_POLICY);
+        let (mut platform, device) = fan_fixture();
+        platform.insert_file_with_permissions(QUALIFICATION_RECORD_PATH, record, permissions);
+        platform.set_file_root_owned(QUALIFICATION_RECORD_PATH, root_owned);
+        let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+        ownership.restore_firmware_auto(&device).unwrap();
+
+        let error = admit_policy_authority(
+            &mut ownership,
+            &device,
+            PROTECTED_POLICY,
+            Path::new(QUALIFICATION_RECORD_PATH),
+            &[observation],
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error.reason(),
+            PolicyAuthorityError::QualificationRecordRead(_)
+        ));
+        ownership.release().unwrap();
+        assert_firmware_auto(&platform);
+    }
+}
+
+#[test]
+fn policy_admission_rejects_missing_or_digest_mismatched_endurance_evidence() {
+    for evidence in [None, Some("not-the-authorized-digest")] {
+        let record = matching_record(PROTECTED_POLICY);
+        let observation = matching_observation_for_policy(PROTECTED_POLICY);
+        let (mut platform, device) = fan_fixture();
+        match evidence {
+            Some(contents) => platform.insert_file_with_permissions(
+                SUPERVISED_ENDURANCE_EVIDENCE_PATH,
+                contents,
+                FilePermissions::READ_ONLY,
+            ),
+            None => platform.remove_path(SUPERVISED_ENDURANCE_EVIDENCE_PATH),
+        }
+        platform.insert_file_with_permissions(
+            QUALIFICATION_RECORD_PATH,
+            record,
+            FilePermissions::READ_ONLY,
+        );
+        let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+        ownership.restore_firmware_auto(&device).unwrap();
+
+        let error = admit_policy_authority(
+            &mut ownership,
+            &device,
+            PROTECTED_POLICY,
+            Path::new(QUALIFICATION_RECORD_PATH),
+            &[observation],
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error.reason(),
+            PolicyAuthorityError::QualificationRecordRead(_)
+        ));
+        ownership.release().unwrap();
+        assert_firmware_auto(&platform);
+    }
+}
+
 fn admit(
     policy: &str,
     record: &str,
@@ -338,9 +443,25 @@ fn admit(
     FakePlatform,
 ) {
     let (mut platform, device) = fan_fixture();
+    platform.insert_file_with_permissions(
+        SUPERVISED_ENDURANCE_EVIDENCE_PATH,
+        matching_endurance_evidence(policy),
+        FilePermissions::READ_ONLY,
+    );
+    platform.insert_file_with_permissions(
+        QUALIFICATION_RECORD_PATH,
+        record,
+        FilePermissions::READ_ONLY,
+    );
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     ownership.restore_firmware_auto(&device).unwrap();
-    let result = admit_policy_authority(&mut ownership, &device, policy, record, observations);
+    let result = admit_policy_authority(
+        &mut ownership,
+        &device,
+        policy,
+        Path::new(QUALIFICATION_RECORD_PATH),
+        observations,
+    );
     ownership.release().unwrap();
     (result, platform)
 }
@@ -348,6 +469,11 @@ fn admit(
 fn fan_fixture() -> (FakePlatform, fan_control_core::AcerHwmonDevice) {
     let root = Path::new(ACER_ROOT);
     let mut platform = FakePlatform::new();
+    platform.insert_file_with_permissions(
+        SUPERVISED_ENDURANCE_EVIDENCE_PATH,
+        matching_endurance_evidence(PROTECTED_POLICY),
+        FilePermissions::READ_ONLY,
+    );
     platform.insert_file_with_permissions(root.join("name"), "acer\n", FilePermissions::READ_ONLY);
     for channel in 1..=2 {
         platform.insert_file_with_permissions(

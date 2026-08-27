@@ -2,12 +2,11 @@ use std::{error::Error, fmt, path::Path, time::Duration};
 
 use crate::{
     AcerHwmonDevice, AcerHwmonDiscoveryError, BoundedIdentityBoundFileAccess, Clock,
-    EVIDENCE_SCHEMA_VERSION_V2, EvidenceExternalPower, EvidenceFan, EvidenceProfile,
-    EvidenceRecord, EvidenceRecordStatus, EvidenceTimestamp, EvidenceValidationError,
-    FanReadbackEvidence, FanReadbackField, FanReadbackPhase, FaultEvidence,
-    IdentityBoundReadAccess, ObservationOutcome, PlatformError, QualificationEnvelopeIdentityV1,
-    RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness, TelemetrySampleEvidence,
-    WorkloadEvidence, discover_acer_hwmon,
+    EvidenceExternalPower, EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceTimestamp,
+    EvidenceValidationError, FanReadbackEvidence, FanReadbackField, FanReadbackPhase,
+    FaultEvidence, IdentityBoundReadAccess, ObservationOutcome, PlatformError,
+    QualificationEnvelopeIdentityV1, RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness,
+    TelemetrySampleEvidence, WorkloadEvidence, discover_acer_hwmon,
     evidence::{summarize_thermal_evidence, validate_identity, validate_workload},
     restoration::FIRMWARE_AUTO,
 };
@@ -579,27 +578,12 @@ where
             .map(|fault| fault.detail.clone())
             .unwrap_or_else(|| "Firmware Auto baseline incomplete".to_owned())
     };
-    let mut record = EvidenceRecord {
-        schema_version: EVIDENCE_SCHEMA_VERSION_V2,
-        record_status: EvidenceRecordStatus::Complete,
-        qualification_envelope: plan.qualification_envelope.clone(),
-        stage: "firmware-auto-baseline".to_owned(),
+    let mut record = EvidenceRecord::complete_v2(
+        plan.qualification_envelope.clone(),
+        "firmware-auto-baseline",
         started_at,
         completed_at,
-        starting_conditions_captured_at,
-        workload_started_at,
-        baseline_binding_sha256: None,
-        workload: workload_is_valid.then_some(workload),
-        samples,
-        commands: Vec::new(),
-        readbacks,
-        state_transitions: Vec::new(),
-        faults,
-        restoration_attempts: Vec::new(),
-        calibration: Vec::new(),
-        thermal_summary: Some(thermal_summary),
-        live_lifecycle_cases: None,
-        outcome: RunOutcomeEvidence {
+        RunOutcomeEvidence {
             status: if accepted {
                 RunOutcomeStatus::Passed
             } else {
@@ -609,7 +593,14 @@ where
             another_passing_run_required: !accepted,
             final_firmware_auto_confirmed,
         },
-    };
+    );
+    record.starting_conditions_captured_at = starting_conditions_captured_at;
+    record.workload_started_at = workload_started_at;
+    record.workload = workload_is_valid.then_some(workload);
+    record.samples = samples;
+    record.readbacks = readbacks;
+    record.faults = faults;
+    record.thermal_summary = Some(thermal_summary);
     if accepted {
         if let Err(error) = record.validate() {
             push_fault(

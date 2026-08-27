@@ -63,6 +63,98 @@ pub trait FileAccess {
     fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError>;
 }
 
+/// Reads an authorization artifact only when the complete path is protected by UID 0.
+pub trait RootOwnedQualificationRecordAccess {
+    fn read_root_owned_qualification_record(
+        &mut self,
+        path: &Path,
+    ) -> Result<String, PlatformError>;
+
+    fn verify_root_owned_supervised_endurance_evidence(
+        &mut self,
+        path: &Path,
+        expected_sha256: &str,
+        expected_envelope: &crate::QualificationEnvelopeIdentityV1,
+    ) -> Result<(), PlatformError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectedFileRequirement {
+    Regular,
+    Executable,
+}
+
+pub fn validate_root_owned_protected_file(
+    path: &Path,
+    requirement: ProtectedFileRequirement,
+) -> Result<(), PlatformError> {
+    if !path.is_absolute() {
+        return Err(PlatformError::new(
+            PlatformErrorKind::PermissionDenied,
+            "protected file path must be absolute",
+        ));
+    }
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            io_platform_error(&format!("cannot inspect {}", current.display()), error)
+        })?;
+        if metadata.file_type().is_symlink()
+            || metadata.uid() != 0
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(PlatformError::new(
+                PlatformErrorKind::PermissionDenied,
+                format!(
+                    "protected file path is not root-owned and protected: {}",
+                    current.display()
+                ),
+            ));
+        }
+    }
+    let metadata = fs::metadata(path)
+        .map_err(|error| io_platform_error(&format!("cannot inspect {}", path.display()), error))?;
+    if !metadata.is_file()
+        || (requirement == ProtectedFileRequirement::Executable
+            && metadata.permissions().mode() & 0o111 == 0)
+    {
+        return Err(PlatformError::new(
+            PlatformErrorKind::PermissionDenied,
+            "protected path is not a suitable regular file",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_supervised_endurance_evidence_source(
+    source: &str,
+    expected_sha256: &str,
+    expected_envelope: &crate::QualificationEnvelopeIdentityV1,
+) -> Result<(), PlatformError> {
+    use sha2::{Digest, Sha256};
+
+    let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
+    let record = crate::parse_evidence_v2(source).map_err(|error| {
+        PlatformError::new(
+            PlatformErrorKind::Unavailable,
+            format!("invalid supervised endurance evidence: {error}"),
+        )
+    })?;
+    if digest != expected_sha256
+        || &record.qualification_envelope != expected_envelope
+        || record.stage != "supervised-endurance"
+        || record.outcome.status != crate::RunOutcomeStatus::Passed
+        || !crate::endurance::supervised_endurance_is_complete(&record)
+    {
+        return Err(PlatformError::new(
+            PlatformErrorKind::PermissionDenied,
+            "supervised endurance evidence does not match its authorization",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileIdentity {
     device: u64,
@@ -492,6 +584,56 @@ impl FileAccess for SystemOwnershipPlatform {
     }
 }
 
+impl RootOwnedQualificationRecordAccess for SystemOwnershipPlatform {
+    fn read_root_owned_qualification_record(
+        &mut self,
+        path: &Path,
+    ) -> Result<String, PlatformError> {
+        validate_root_owned_protected_file(path, ProtectedFileRequirement::Regular)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| {
+                io_platform_error(
+                    &format!("cannot open qualification record {}", path.display()),
+                    error,
+                )
+            })?;
+        let metadata = file.metadata().map_err(|error| {
+            io_platform_error(
+                &format!("cannot inspect qualification record {}", path.display()),
+                error,
+            )
+        })?;
+        if !metadata.is_file() || metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(PlatformError::new(
+                PlatformErrorKind::PermissionDenied,
+                "qualification record is not a protected root-owned regular file",
+            ));
+        }
+        let mut source = String::new();
+        file.read_to_string(&mut source).map_err(|error| {
+            io_platform_error(
+                &format!("cannot read qualification record {}", path.display()),
+                error,
+            )
+        })?;
+        Ok(source)
+    }
+
+    fn verify_root_owned_supervised_endurance_evidence(
+        &mut self,
+        path: &Path,
+        expected_sha256: &str,
+        expected_envelope: &crate::QualificationEnvelopeIdentityV1,
+    ) -> Result<(), PlatformError> {
+        let source = self.read_root_owned_qualification_record(path)?;
+        verify_supervised_endurance_evidence_source(&source, expected_sha256, expected_envelope)
+    }
+}
+
 impl IdentityBoundFileAccess for SystemOwnershipPlatform {
     fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
         Self::file_identity(path)
@@ -917,6 +1059,7 @@ pub enum PlatformOperation {
 struct FakeFile {
     contents: String,
     permissions: FilePermissions,
+    root_owned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1029,8 +1172,15 @@ impl FakePlatform {
             FakeFile {
                 contents: contents.into(),
                 permissions,
+                root_owned: true,
             },
         );
+    }
+
+    pub fn set_file_root_owned(&mut self, path: impl AsRef<Path>, root_owned: bool) {
+        if let Some(file) = self.files.get_mut(path.as_ref()) {
+            file.root_owned = root_owned;
+        }
     }
 
     pub fn set_file_permissions(&mut self, path: impl AsRef<Path>, permissions: FilePermissions) {
@@ -1339,6 +1489,39 @@ impl FileAccess for FakePlatform {
             .get(path)
             .map(|file| file.permissions)
             .ok_or_else(|| Self::missing(path))
+    }
+}
+
+impl RootOwnedQualificationRecordAccess for FakePlatform {
+    fn read_root_owned_qualification_record(
+        &mut self,
+        path: &Path,
+    ) -> Result<String, PlatformError> {
+        self.operations
+            .push(PlatformOperation::Read(path.to_path_buf()));
+        self.apply_next_file_step()?;
+        let file = self.files.get(path).ok_or_else(|| Self::missing(path))?;
+        if !path.is_absolute()
+            || !file.root_owned
+            || file.permissions.mode() & 0o022 != 0
+            || !file.permissions.readable()
+        {
+            return Err(Self::permission_denied(
+                path,
+                "protected root-owned regular file",
+            ));
+        }
+        Ok(file.contents.clone())
+    }
+
+    fn verify_root_owned_supervised_endurance_evidence(
+        &mut self,
+        path: &Path,
+        expected_sha256: &str,
+        expected_envelope: &crate::QualificationEnvelopeIdentityV1,
+    ) -> Result<(), PlatformError> {
+        let source = self.read_root_owned_qualification_record(path)?;
+        verify_supervised_endurance_evidence_source(&source, expected_sha256, expected_envelope)
     }
 }
 

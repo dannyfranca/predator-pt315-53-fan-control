@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, path::Path};
 
 use serde::{Deserialize, Deserializer, de};
 use sha2::{Digest, Sha256};
@@ -7,12 +7,16 @@ use crate::{
     AcerHwmonDevice, BoundedFileAccess, Clock, CompatibilityAdmissionError,
     CompatibilityDeclarationV1, CompatibilityObservation, ConfigV1, ConfigValidationError,
     ControllerOwnership, EnvelopeValidationError, FirmwareAutoRestorationError,
-    QualificationEnvelopeIdentityV1, RuntimeLockAccess, TachometerCalibrationError,
-    ValidatedConfig, admit_compatibility,
+    QualificationEnvelopeIdentityV1, QualificationRecordV2, RootOwnedQualificationRecordAccess,
+    RuntimeLockAccess, TachometerCalibrationError, ValidatedConfig, admit_compatibility,
     compatibility::validate_declaration,
     tachometer::{QualifiedTachometerCalibrations, TachometerCalibrationConfig},
     validate_against_protected_envelope, validate_config_v1,
 };
+
+pub const QUALIFICATION_RECORD_PATH: &str = "/var/lib/pt31553-fan-control/qualification.json";
+pub const SUPERVISED_ENDURANCE_EVIDENCE_PATH: &str =
+    "/var/lib/pt31553-fan-control/evidence/supervised-endurance.json";
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,17 +28,6 @@ struct ProtectedPolicyManifestV2 {
     compatibility: CompatibilityDeclarationV1,
     calibration: TachometerCalibrationConfig,
     protected: ConfigV1,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct QualificationRecordV1 {
-    #[serde(deserialize_with = "deserialize_schema_version")]
-    schema_version: u32,
-    qualification_id: String,
-    policy_version: String,
-    protected_policy_sha256: String,
-    compatibility: CompatibilityDeclarationV1,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,6 +49,8 @@ struct ValidatedPolicyAuthority {
     compatibility: CompatibilityDeclarationV1,
     calibration: QualifiedTachometerCalibrations,
     protected: ValidatedConfig,
+    endurance_evidence_path: String,
+    endurance_evidence_sha256: String,
 }
 
 impl ValidatedPolicyAuthority {
@@ -155,6 +150,7 @@ impl Error for PolicyAuthorityAdmissionError {
 #[derive(Debug)]
 pub enum PolicyAuthorityError {
     FirmwareAutoUnconfirmed,
+    QualificationRecordRead(crate::PlatformError),
     ProtectedPolicyParse(toml::de::Error),
     QualificationRecordParse(serde_json::Error),
     InvalidIdentity {
@@ -178,6 +174,9 @@ impl fmt::Display for PolicyAuthorityError {
         match self {
             Self::FirmwareAutoUnconfirmed => {
                 formatter.write_str("Firmware Auto was not confirmed before policy admission")
+            }
+            Self::QualificationRecordRead(error) => {
+                write!(formatter, "qualification record provenance: {error}")
             }
             Self::ProtectedPolicyParse(error) => write!(formatter, "protected policy: {error}"),
             Self::QualificationRecordParse(error) => {
@@ -207,6 +206,7 @@ impl Error for PolicyAuthorityError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::ProtectedPolicyParse(error) => Some(error),
+            Self::QualificationRecordRead(error) => Some(error),
             Self::QualificationRecordParse(error) => Some(error),
             Self::InvalidProtectedPolicy(error) => Some(error),
             Self::InvalidTachometerCalibration(error) => Some(error),
@@ -227,9 +227,9 @@ fn parse_protected_policy_v2(
     Ok(manifest)
 }
 
-fn parse_qualification_record_v1(
+fn parse_qualification_record_v2(
     source: &str,
-) -> Result<QualificationRecordV1, PolicyAuthorityError> {
+) -> Result<QualificationRecordV2, PolicyAuthorityError> {
     let record =
         serde_json::from_str(source).map_err(PolicyAuthorityError::QualificationRecordParse)?;
     validate_record_identity(&record)?;
@@ -240,19 +240,43 @@ pub fn admit_policy_authority<P>(
     ownership: &mut ControllerOwnership<'_, P>,
     device: &AcerHwmonDevice,
     protected_policy_source: &str,
-    qualification_record_source: &str,
+    qualification_record_path: &Path,
     compatibility_observations: &[CompatibilityObservation],
 ) -> Result<AdmittedPolicyAuthority, PolicyAuthorityAdmissionError>
 where
-    P: BoundedFileAccess + Clock + RuntimeLockAccess + ?Sized,
+    P: BoundedFileAccess + Clock + RootOwnedQualificationRecordAccess + RuntimeLockAccess + ?Sized,
 {
     let result = if ownership.refresh_firmware_auto_confirmation(device) {
-        validate_policy_authority(
-            protected_policy_source,
-            qualification_record_source,
-            compatibility_observations,
-        )
-        .map(|authority| authority.bind_to_ownership(ownership.ownership_id()))
+        let qualification_record_source = ownership
+            .platform_mut()
+            .read_root_owned_qualification_record(qualification_record_path)
+            .map_err(PolicyAuthorityError::QualificationRecordRead);
+        let ownership_id = ownership.ownership_id();
+        qualification_record_source.and_then(|qualification_record_source| {
+            validate_policy_authority(
+                protected_policy_source,
+                &qualification_record_source,
+                compatibility_observations,
+            )
+            .and_then(|authority| {
+                let expected_envelope = QualificationEnvelopeIdentityV1 {
+                    qualification_record_schema_version: 1,
+                    qualification_id: authority.qualification_id.clone(),
+                    policy_version: authority.policy_version.clone(),
+                    protected_policy_sha256: authority.protected_policy_sha256.clone(),
+                    compatibility: authority.compatibility.clone(),
+                };
+                ownership
+                    .platform_mut()
+                    .verify_root_owned_supervised_endurance_evidence(
+                        Path::new(&authority.endurance_evidence_path),
+                        &authority.endurance_evidence_sha256,
+                        &expected_envelope,
+                    )
+                    .map_err(PolicyAuthorityError::QualificationRecordRead)?;
+                Ok(authority.bind_to_ownership(ownership_id))
+            })
+        })
     } else {
         Err(PolicyAuthorityError::FirmwareAutoUnconfirmed)
     };
@@ -289,7 +313,7 @@ fn validate_policy_authority(
     compatibility_observations: &[CompatibilityObservation],
 ) -> Result<ValidatedPolicyAuthority, PolicyAuthorityError> {
     let manifest = parse_protected_policy_v2(protected_policy_source)?;
-    let record = parse_qualification_record_v1(qualification_record_source)?;
+    let record = parse_qualification_record_v2(qualification_record_source)?;
 
     require_equal(
         "qualification_id",
@@ -330,6 +354,8 @@ fn validate_policy_authority(
         compatibility: manifest.compatibility,
         calibration,
         protected,
+        endurance_evidence_path: record.supervised_endurance.evidence_path,
+        endurance_evidence_sha256: record.supervised_endurance.evidence_sha256,
     })
 }
 
@@ -355,8 +381,8 @@ fn validate_manifest_identity(
     validate_compatibility("protected policy", &manifest.compatibility)
 }
 
-fn validate_record_identity(record: &QualificationRecordV1) -> Result<(), PolicyAuthorityError> {
-    if record.schema_version != 1 {
+fn validate_record_identity(record: &QualificationRecordV2) -> Result<(), PolicyAuthorityError> {
+    if record.schema_version != 2 {
         return Err(PolicyAuthorityError::InvalidIdentity {
             artifact: "qualification record",
             field: "schema_version",
@@ -376,6 +402,23 @@ fn validate_record_identity(record: &QualificationRecordV1) -> Result<(), Policy
         return Err(PolicyAuthorityError::InvalidIdentity {
             artifact: "qualification record",
             field: "protected_policy_sha256",
+        });
+    }
+    let endurance = &record.supervised_endurance;
+    if endurance.schema_version != 1
+        || endurance.evidence_schema_version != 2
+        || endurance.stage != "supervised-endurance"
+        || endurance.record_status != crate::EvidenceRecordStatus::Complete
+        || endurance.outcome != crate::RunOutcomeStatus::Passed
+        || !endurance.final_firmware_auto_confirmed
+        || !endurance.workload_stopped
+        || !endurance.service_stopped
+        || !is_lower_hex(&endurance.evidence_sha256, 64)
+        || !Path::new(&endurance.evidence_path).is_absolute()
+    {
+        return Err(PolicyAuthorityError::InvalidIdentity {
+            artifact: "qualification record",
+            field: "supervised_endurance",
         });
     }
     validate_compatibility("qualification record", &record.compatibility)
@@ -432,18 +475,6 @@ fn is_lower_hex(value: &str, length: usize) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
-fn deserialize_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let version = i64::deserialize(deserializer)?;
-    if version == 1 {
-        Ok(1)
-    } else {
-        Err(de::Error::custom("schema_version must be 1"))
-    }
 }
 
 fn deserialize_policy_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>

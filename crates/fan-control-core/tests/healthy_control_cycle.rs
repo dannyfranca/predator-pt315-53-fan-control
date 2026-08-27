@@ -13,19 +13,21 @@ use fan_control_core::{
     ExternalPower, FakePlatform, FakeRuntimeLock, FakeStep, Fan, FileAccess, FileIdentity,
     FilePermissions, FreshSampleGate, HealthyControl, HealthyControlCycleError,
     IdentityBoundFileAccess, ObservedSample, OwnershipSampleReadiness, PlatformError,
-    PlatformErrorKind, PlatformOperation, Pwm, RuntimeLockAccess, RuntimeLockError, SampleCapture,
-    SampleSetError, SampleSourceError, SampleSources, SensorControlState, SensorControlStep,
-    SensorSourceDiscovery, ServiceAccess, ServiceNotification, ServiceNotifier, ShutdownController,
-    ShutdownRequest, TemperatureCelsius, TransientSensorControl, TransientSensorControlError,
-    ValidatedConfig, acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
+    PlatformErrorKind, PlatformOperation, Pwm, QUALIFICATION_RECORD_PATH,
+    RootOwnedQualificationRecordAccess, RuntimeLockAccess, RuntimeLockError,
+    SUPERVISED_ENDURANCE_EVIDENCE_PATH, SampleCapture, SampleSetError, SampleSourceError,
+    SampleSources, SensorControlState, SensorControlStep, SensorSourceDiscovery, ServiceAccess,
+    ServiceNotification, ServiceNotifier, ShutdownController, ShutdownRequest, TemperatureCelsius,
+    TransientSensorControl, TransientSensorControlError, ValidatedConfig,
+    acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
     calculate_fan_outputs, discover_acer_hwmon, run_healthy_control_cycle,
     run_supervised_control_iteration,
 };
 
 mod support;
 use support::{
-    diagnostic_field, matching_observation_for_policy, matching_record, protected_config,
-    record_diagnostics, runtime_protected_policy,
+    diagnostic_field, matching_endurance_evidence, matching_observation_for_policy,
+    matching_record, protected_config, record_diagnostics, runtime_protected_policy,
 };
 
 fn state_and_fault_diagnostic_sequence(
@@ -904,7 +906,17 @@ fn overdue_response_faults_before_a_changed_command_can_replace_it() {
         "response_deadline_millis = 1000",
         1,
     );
-    let (platform, device) = fixture();
+    let (mut platform, device) = fixture();
+    platform.insert_file_with_permissions(
+        QUALIFICATION_RECORD_PATH,
+        matching_record(&policy),
+        FilePermissions::READ_ONLY,
+    );
+    platform.insert_file_with_permissions(
+        SUPERVISED_ENDURANCE_EVIDENCE_PATH,
+        matching_endurance_evidence(&policy),
+        FilePermissions::READ_ONLY,
+    );
     let injection = Rc::new(Cell::new(RuntimeInterference::None));
     let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
@@ -1240,6 +1252,28 @@ impl FileAccess for InterferingPlatform {
 
     fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
         self.inner.permissions(path)
+    }
+}
+
+impl RootOwnedQualificationRecordAccess for InterferingPlatform {
+    fn read_root_owned_qualification_record(
+        &mut self,
+        path: &Path,
+    ) -> Result<String, PlatformError> {
+        self.inner.read_root_owned_qualification_record(path)
+    }
+
+    fn verify_root_owned_supervised_endurance_evidence(
+        &mut self,
+        path: &Path,
+        expected_sha256: &str,
+        expected_envelope: &fan_control_core::QualificationEnvelopeIdentityV1,
+    ) -> Result<(), PlatformError> {
+        self.inner.verify_root_owned_supervised_endurance_evidence(
+            path,
+            expected_sha256,
+            expected_envelope,
+        )
     }
 }
 
@@ -2851,6 +2885,7 @@ where
     P: fan_control_core::BoundedIdentityBoundFileAccess
         + fan_control_core::Clock
         + fan_control_core::IdentityBoundFileAccess
+        + fan_control_core::RootOwnedQualificationRecordAccess
         + fan_control_core::RuntimeLockAccess,
 {
     let (authority, armed) = arm_with_authority(ownership, device);
@@ -2870,6 +2905,7 @@ where
     P: fan_control_core::BoundedIdentityBoundFileAccess
         + fan_control_core::Clock
         + fan_control_core::IdentityBoundFileAccess
+        + fan_control_core::RootOwnedQualificationRecordAccess
         + fan_control_core::RuntimeLockAccess,
 {
     arm_with_policy_authority(ownership, device, &PROTECTED_POLICY)
@@ -2887,6 +2923,7 @@ where
     P: fan_control_core::BoundedIdentityBoundFileAccess
         + fan_control_core::Clock
         + fan_control_core::IdentityBoundFileAccess
+        + fan_control_core::RootOwnedQualificationRecordAccess
         + fan_control_core::RuntimeLockAccess,
 {
     ownership.restore_firmware_auto(device).unwrap();
@@ -2894,7 +2931,7 @@ where
         ownership,
         device,
         policy,
-        &matching_record(policy),
+        Path::new(QUALIFICATION_RECORD_PATH),
         &[matching_observation_for_policy(policy)],
     )
     .unwrap();
@@ -2932,6 +2969,16 @@ where
 fn fixture() -> (FakePlatform, fan_control_core::AcerHwmonDevice) {
     let root = Path::new(ACER_ROOT);
     let mut platform = FakePlatform::new();
+    platform.insert_file_with_permissions(
+        QUALIFICATION_RECORD_PATH,
+        matching_record(&PROTECTED_POLICY),
+        FilePermissions::READ_ONLY,
+    );
+    platform.insert_file_with_permissions(
+        SUPERVISED_ENDURANCE_EVIDENCE_PATH,
+        matching_endurance_evidence(&PROTECTED_POLICY),
+        FilePermissions::READ_ONLY,
+    );
     insert_acer_device(&mut platform, root);
     let device = discover_acer_hwmon(&mut platform, Path::new(HWMON_ROOT)).unwrap();
     (platform, device)

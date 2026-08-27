@@ -4,10 +4,9 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::{
     EVIDENCE_SCHEMA_VERSION_V2, EvidenceExternalPower, EvidenceFan, EvidenceProfile,
-    EvidenceRecord, EvidenceRecordStatus, EvidenceTimestamp, EvidenceValidationError,
-    FanReadbackEvidence, FanReadbackField, FaultEvidence, ObservationOutcome,
-    QualificationEnvelopeIdentityV1, RunOutcomeEvidence, RunOutcomeStatus, StateTransitionEvidence,
-    evidence::validate_identity,
+    EvidenceRecord, EvidenceTimestamp, EvidenceValidationError, FanReadbackEvidence,
+    FanReadbackField, FaultEvidence, ObservationOutcome, QualificationEnvelopeIdentityV1,
+    RunOutcomeEvidence, RunOutcomeStatus, StateTransitionEvidence, evidence::validate_identity,
 };
 
 pub const LIVE_RESTART_DELAY_MILLIS: u64 = 2_000;
@@ -695,27 +694,12 @@ where
                 "live lifecycle qualification did not pass its initial Auto gate".into()
             })
     };
-    let record = EvidenceRecord {
-        schema_version: EVIDENCE_SCHEMA_VERSION_V2,
-        record_status: EvidenceRecordStatus::Complete,
-        qualification_envelope: envelope.clone(),
-        stage: "live-lifecycle".into(),
+    let mut record = EvidenceRecord::complete_v2(
+        envelope.clone(),
+        "live-lifecycle",
         started_at,
         completed_at,
-        starting_conditions_captured_at: None,
-        workload_started_at: None,
-        baseline_binding_sha256: None,
-        workload: None,
-        samples: Vec::new(),
-        commands: Vec::new(),
-        readbacks,
-        state_transitions: transitions,
-        faults,
-        restoration_attempts: Vec::new(),
-        calibration: Vec::new(),
-        thermal_summary: None,
-        live_lifecycle_cases: Some(cases.clone()),
-        outcome: RunOutcomeEvidence {
+        RunOutcomeEvidence {
             status: if accepted {
                 RunOutcomeStatus::Passed
             } else {
@@ -725,7 +709,11 @@ where
             another_passing_run_required: !accepted,
             final_firmware_auto_confirmed: final_auto_confirmed,
         },
-    };
+    );
+    record.readbacks = readbacks;
+    record.state_transitions = transitions;
+    record.faults = faults;
+    record.live_lifecycle_cases = Some(cases.clone());
     record
         .validate()
         .map_err(LiveLifecyclePlanError::InvalidGeneratedEvidence)?;
