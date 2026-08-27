@@ -1,5 +1,5 @@
 format = 1
-candidate = "linux-cachyos-gcc-7.1.8-stage-0"
+candidate = "linux-cachyos-gcc-7.1.8-stage-1-telemetry"
 architecture = "x86_64"
 cpu_target = "x86-64-v4"
 source_date_epoch = 1786378335
@@ -31,11 +31,13 @@ toolchain_image_digest = "1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d
 makepkg_config = "makepkg.conf"
 build_wrapper = "build-candidate"
 build_inputs = [
+  "build-tool-bc",
   "build-wrapper",
   "kernel-config",
   "kernel-source",
   "makepkg-config",
   "packaging-snapshot",
+  "pt31553-telemetry",
   "toolchain-blob-00",
   "toolchain-blob-01",
   "toolchain-blob-02",
@@ -55,4 +57,4 @@ build_inputs = [
   "toolchain-blob-16",
   "toolchain-image",
 ]
-patches = []
+patches = ["pt31553-telemetry"]

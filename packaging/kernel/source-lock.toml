@@ -1,5 +1,5 @@
 format = 1
-candidate = "linux-cachyos-gcc-7.1.8-stage-0"
+candidate = "linux-cachyos-gcc-7.1.8-stage-1-telemetry"
 release_tag = "cachyos-7.1.8-1"
 source_commit = "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
 source_tree = "a51d0ee1eeafc983129ec95f39cde1405e12eb28"
@@ -11,7 +11,7 @@ source_date_epoch = 1786378335
 signature_verification_epoch = 1786378335
 cpu_target = "x86-64-v4"
 toolchain_image_digest = "1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6"
-patches = []
+patches = ["pt31553-telemetry"]
 
 [[inputs]]
 name = "kernel-source"
@@ -86,22 +86,40 @@ sha256 = "ef721ae680109993eca463c8847553cf8c2775f6626da4ea9b460f0588b7969b"
 size = 293290
 
 [[inputs]]
+name = "pt31553-telemetry"
+kind = "patch"
+path = "patches/0001-acer-wmi-add-pt31553-telemetry.patch"
+origin = "repository:packaging/kernel/patches/0001-acer-wmi-add-pt31553-telemetry.patch"
+revision = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9cab052b63"
+sha256 = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9cab052b63"
+size = 1691
+
+[[inputs]]
+name = "build-tool-bc"
+kind = "build-tool"
+path = "build-tools/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.08.2-1.1"
+sha256 = "b3740d2c34090685b6ffe1b6a6b4631c45edd4801dc7a2bde1049de92165b0d3"
+size = 110253
+
+[[inputs]]
 name = "build-environment"
 kind = "build-environment"
 path = "build-environment.toml"
 origin = "repository:packaging/kernel/build-environment.toml"
-revision = "034f78fccc1287acce45118ebeb7ac5c89689aa267eedcd2c507be5ba065c4f7"
-sha256 = "034f78fccc1287acce45118ebeb7ac5c89689aa267eedcd2c507be5ba065c4f7"
-size = 1341
+revision = "9990099e9c48023f82620f060db98daf9fa2b5eb73193f2a1ec4e3474061e702"
+sha256 = "9990099e9c48023f82620f060db98daf9fa2b5eb73193f2a1ec4e3474061e702"
+size = 1412
 
 [[inputs]]
 name = "build-wrapper"
 kind = "build-wrapper"
 path = "build-candidate"
 origin = "repository:packaging/kernel/build-candidate"
-revision = "c6e6e47f450514183969127e481317d7b1a3d981603e3ba23dd892e0e09211c4"
-sha256 = "c6e6e47f450514183969127e481317d7b1a3d981603e3ba23dd892e0e09211c4"
-size = 4609
+revision = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
+sha256 = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
+size = 6124
 
 [[inputs]]
 name = "makepkg-config"
