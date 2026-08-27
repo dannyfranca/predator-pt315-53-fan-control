@@ -37,8 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        run: pacman -Syu --noconfirm rust
+      - name: Install build and workload dependencies
+        run: pacman -Syu --noconfirm glmark2 rust stress-ng
 
       - name: Prepare non-root builder
         run: |
