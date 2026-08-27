@@ -1,5 +1,5 @@
 format = 1
-candidate = "linux-cachyos-gcc-7.1.8-stage-1-telemetry"
+candidate = "linux-cachyos-gcc-7.1.8-stage-2-pwm"
 release_tag = "cachyos-7.1.8-1"
 source_commit = "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
 source_tree = "a51d0ee1eeafc983129ec95f39cde1405e12eb28"
@@ -11,7 +11,7 @@ source_date_epoch = 1786378335
 signature_verification_epoch = 1786378335
 cpu_target = "x86-64-v4"
 toolchain_image_digest = "1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6"
-patches = ["pt31553-telemetry"]
+patches = ["pt31553-telemetry", "pt31553-pwm"]
 
 [[inputs]]
 name = "kernel-source"
@@ -95,6 +95,15 @@ sha256 = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9cab052b63"
 size = 1691
 
 [[inputs]]
+name = "pt31553-pwm"
+kind = "patch"
+path = "patches/0002-acer-wmi-enable-pt31553-pwm.patch"
+origin = "repository:packaging/kernel/patches/0002-acer-wmi-enable-pt31553-pwm.patch"
+revision = "67b0d9fcd62451ae717e452d63f6419c02d8f4a34a82a060229cde5b3a96009d"
+sha256 = "67b0d9fcd62451ae717e452d63f6419c02d8f4a34a82a060229cde5b3a96009d"
+size = 1151
+
+[[inputs]]
 name = "build-tool-bc"
 kind = "build-tool"
 path = "build-tools/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
@@ -108,18 +117,18 @@ name = "build-environment"
 kind = "build-environment"
 path = "build-environment.toml"
 origin = "repository:packaging/kernel/build-environment.toml"
-revision = "9990099e9c48023f82620f060db98daf9fa2b5eb73193f2a1ec4e3474061e702"
-sha256 = "9990099e9c48023f82620f060db98daf9fa2b5eb73193f2a1ec4e3474061e702"
-size = 1412
+revision = "307869448e3d43e42420b8bd45bcb0f8932bb15c2fff8269c54c7ef85ea0ff9f"
+sha256 = "307869448e3d43e42420b8bd45bcb0f8932bb15c2fff8269c54c7ef85ea0ff9f"
+size = 1438
 
 [[inputs]]
 name = "build-wrapper"
 kind = "build-wrapper"
 path = "build-candidate"
 origin = "repository:packaging/kernel/build-candidate"
-revision = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
-sha256 = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
-size = 6124
+revision = "5b47af002478f06de04575ba56e233959d83d855758ce13ad0a0c919675f42f7"
+sha256 = "5b47af002478f06de04575ba56e233959d83d855758ce13ad0a0c919675f42f7"
+size = 6457
 
 [[inputs]]
 name = "makepkg-config"

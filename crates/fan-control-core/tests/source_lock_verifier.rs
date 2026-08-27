@@ -662,7 +662,149 @@ fn validate_telemetry_patch(patch: &[u8], source: &[u8]) -> Output {
     output
 }
 
-fn validate_patch_wrapper(wrapper: &[u8]) -> Output {
+fn validate_pwm_patch(telemetry_patch: &[u8], pwm_patch: &[u8], source: &[u8]) -> Output {
+    let root = std::env::temp_dir().join(format!(
+        "fan-control-pwm-patch-{}-{}",
+        std::process::id(),
+        NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&root).expect("create PWM patch fixture");
+    let telemetry_path = root.join("telemetry.patch");
+    let pwm_path = root.join("pwm.patch");
+    let source_path = root.join("acer-wmi.c");
+    fs::write(&telemetry_path, telemetry_patch).expect("write telemetry patch fixture");
+    fs::write(&pwm_path, pwm_patch).expect("write PWM patch fixture");
+    fs::write(&source_path, source).expect("write acer-wmi fixture");
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            "import pathlib,runpy,sys; m=runpy.run_path(sys.argv[1], run_name='pwm_patch_test'); source=pathlib.Path(sys.argv[4]).read_bytes(); telemetry=m['validate_telemetry_patch'](pathlib.Path(sys.argv[2]).read_bytes(), source); m['validate_pwm_patch'](pathlib.Path(sys.argv[3]).read_bytes(), telemetry)",
+        ])
+        .arg(verifier())
+        .arg(&telemetry_path)
+        .arg(&pwm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run PWM patch validator");
+    fs::remove_dir_all(root).expect("remove PWM patch fixture");
+    output
+}
+
+fn verify_stage_two_patch_scope(source: &[u8]) -> Output {
+    let root = std::env::temp_dir().join(format!(
+        "fan-control-stage-two-scope-{}-{}",
+        std::process::id(),
+        NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    let bundle = root.join("bundle");
+    let archive_root = root
+        .join("source")
+        .join("cachyos-7.1.8-1")
+        .join("drivers/platform/x86");
+    fs::create_dir_all(bundle.join("patches")).expect("create patch-scope bundle");
+    fs::create_dir_all(&archive_root).expect("create patch-scope source tree");
+    fs::write(archive_root.join("acer-wmi.c"), source).expect("write patch-scope source");
+    for patch in [
+        "0001-acer-wmi-add-pt31553-telemetry.patch",
+        "0002-acer-wmi-enable-pt31553-pwm.patch",
+    ] {
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../packaging/kernel/patches")
+                .join(patch),
+            bundle.join("patches").join(patch),
+        )
+        .expect("stage locked patch");
+    }
+    let archive = bundle.join("cachyos-7.1.8-1.tar.gz");
+    let archive_status = Command::new("tar")
+        .args(["-czf"])
+        .arg(&archive)
+        .arg("-C")
+        .arg(root.join("source"))
+        .arg("cachyos-7.1.8-1")
+        .status()
+        .expect("create patch-scope source archive");
+    assert!(archive_status.success());
+
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            r#"import pathlib,runpy,sys
+m=runpy.run_path(sys.argv[1], run_name='stage_two_scope_test')
+inputs=[
+ {'name':'kernel-source','kind':'kernel-source','path':'cachyos-7.1.8-1.tar.gz'},
+ {'name':'pt31553-telemetry','kind':'patch','path':'patches/0001-acer-wmi-add-pt31553-telemetry.patch'},
+ {'name':'pt31553-pwm','kind':'patch','path':'patches/0002-acer-wmi-enable-pt31553-pwm.patch'},
+]
+lock={'candidate':m['STAGE2_CANDIDATE'],'patches':['pt31553-telemetry','pt31553-pwm'],'release_tag':'cachyos-7.1.8-1'}
+bundle=m['Bundle'](pathlib.Path(sys.argv[2]))
+try:
+ bundle.discover()
+ m['verify_patch_scope'](bundle, lock, inputs)
+except m['VerificationError'] as error:
+ print(error, file=sys.stderr); raise SystemExit(1)
+finally:
+ bundle.close()
+"#,
+        ])
+        .arg(verifier())
+        .arg(&bundle)
+        .output()
+        .expect("run production Stage-2 patch-scope verifier");
+    fs::remove_dir_all(root).expect("remove patch-scope fixture");
+    output
+}
+
+fn run_verified_cli_gate(candidate: &str, option: &str) -> Output {
+    Command::new("python3")
+        .args([
+            "-c",
+            r#"import runpy,sys
+m=runpy.run_path(sys.argv[1], run_name='verified_cli_gate_test')
+g=m['main'].__globals__
+candidate=sys.argv[2]
+option=sys.argv[3]
+lock={
+ 'candidate':candidate,
+ 'source_date_epoch':100,
+ 'signature_verification_epoch':100,
+ 'source_commit':'source',
+ 'source_tree':'source-tree',
+ 'packaging_commit':'packaging',
+ 'packaging_tree':'packaging-tree',
+ 'tag_signer_fingerprint':'fingerprint',
+ 'release_tag':'release',
+}
+inputs=[{'kind':kind} for kind in ['signer-key','source-commit','packaging-commit','kernel-source','packaging']]
+class FakeBundle:
+ def __init__(self, _path): pass
+ def close(self): pass
+g['load_manifest']=lambda _path: lock
+g['validate_manifest']=lambda _lock: inputs
+g['Bundle']=FakeBundle
+g['verify_hashes']=lambda *_args: None
+g['verify_signatures']=lambda *_args: [100]
+g['verify_commit_object']=lambda *_args: (100,100)
+g['verify_archive_tree']=lambda *_args: None
+g['verify_packaging_config']=lambda *_args: None
+g['verify_recipe_sources']=lambda *_args: None
+g['verify_patch_scope']=lambda *_args: None
+g['verify_build_metadata']=lambda *_args: None
+g['verify_pinned_inputs']=lambda *_args: None
+g['build_from_verified_snapshot']=lambda _bundle,_inputs,args: print('handoff:'+','.join(args)) or 0
+sys.argv=['verify-source-lock','--inputs','unused','--exec-verified','--',option]
+raise SystemExit(m['main']())
+"#,
+        ])
+        .arg(verifier())
+        .arg(candidate)
+        .arg(option)
+        .output()
+        .expect("run verified CLI compile gate")
+}
+
+fn validate_patch_wrapper(wrapper: &[u8], candidate: &str) -> Output {
     let root = std::env::temp_dir().join(format!(
         "fan-control-patch-wrapper-{}-{}",
         std::process::id(),
@@ -674,24 +816,25 @@ fn validate_patch_wrapper(wrapper: &[u8]) -> Output {
     let output = Command::new("python3")
         .args([
             "-c",
-            "import pathlib,runpy,sys; m=runpy.run_path(sys.argv[1], run_name='patch_wrapper_test'); m['verify_patch_wrapper'](pathlib.Path(sys.argv[2]).read_text())",
+            "import pathlib,runpy,sys; m=runpy.run_path(sys.argv[1], run_name='patch_wrapper_test'); m['verify_patch_wrapper'](pathlib.Path(sys.argv[2]).read_text(), sys.argv[3])",
         ])
         .arg(verifier())
         .arg(&wrapper_path)
+        .arg(candidate)
         .output()
         .expect("run patch wrapper validator");
     fs::remove_dir_all(root).expect("remove patch wrapper fixture");
     output
 }
 
-fn validate_checked_in_stage_one_manifest(mutation: &str) -> Output {
+fn validate_checked_in_stage_two_manifest(mutation: &str) -> Output {
     let lock =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/source-lock.toml");
     Command::new("python3")
         .args([
             "-c",
             r#"import copy,pathlib,runpy,sys,tomllib
-m=runpy.run_path(sys.argv[1], run_name='stage_one_manifest_test')
+m=runpy.run_path(sys.argv[1], run_name='stage_two_manifest_test')
 with pathlib.Path(sys.argv[2]).open('rb') as stream:
     lock=tomllib.load(stream)
 mutation=sys.argv[3]
@@ -702,6 +845,10 @@ elif mutation=='duplicate':
     duplicate=copy.deepcopy(tools[0]); duplicate['name']='build-tool-bc-duplicate'; duplicate['path']='build-tools/duplicate.pkg.tar.zst'; lock['inputs'].append(duplicate)
 elif mutation=='altered':
     tools[0]['sha256']='0'*64
+elif mutation=='stage-one':
+    lock['candidate']='linux-cachyos-gcc-7.1.8-stage-1-telemetry'; lock['patches']=['pt31553-telemetry']; lock['inputs']=[item for item in lock['inputs'] if item['name']!='pt31553-pwm']
+elif mutation=='reverse-patches':
+    lock['patches']=list(reversed(lock['patches']))
 elif mutation=='stage-zero':
     lock['candidate']='linux-cachyos-gcc-7.1.8-stage-0'; lock['patches']=[]; lock['inputs']=[item for item in lock['inputs'] if item['kind']!='patch']
 m['validate_manifest'](lock)
@@ -711,7 +858,7 @@ m['validate_manifest'](lock)
         .arg(lock)
         .arg(mutation)
         .output()
-        .expect("validate checked-in stage-one manifest")
+        .expect("validate checked-in stage-two manifest")
 }
 
 #[cfg(unix)]
@@ -734,7 +881,7 @@ fn run_verified_build_tool_snapshot_fixture(mutation: &str) -> (Output, bool) {
     let wrapper_bytes = format!(
         r#"#!/bin/bash
 set -euo pipefail
-[[ "${{1:-}}" == --compile-telemetry ]]
+[[ "${{1:-}}" == --compile-pwm ]]
 [[ "$SOURCE_LOCK_BUNDLE" != "{}" ]]
 grep -qx 'pinned bc fixture' "$SOURCE_LOCK_BUNDLE/build-tools/bc.pkg.tar.zst"
 printf 'yes\n' >"$SOURCE_LOCK_OUTPUT/snapshot-used"
@@ -797,7 +944,7 @@ bundle=m['Bundle'](pathlib.Path(sys.argv[2]))
 try:
  m['verify_hashes'](bundle, inputs)
  m['verify_pinned_inputs'](bundle, inputs)
- raise SystemExit(m['build_from_verified_snapshot'](bundle, inputs, ['--compile-telemetry']))
+ raise SystemExit(m['build_from_verified_snapshot'](bundle, inputs, ['--compile-pwm']))
 except m['VerificationError'] as error:
  print(error, file=sys.stderr); raise SystemExit(1)
 finally:
@@ -904,6 +1051,12 @@ prepare() {
         bundle.join("patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
     )
     .expect("stage locked telemetry patch");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packaging/kernel/patches/0002-acer-wmi-enable-pt31553-pwm.patch"),
+        bundle.join("patches/0002-acer-wmi-enable-pt31553-pwm.patch"),
+    )
+    .expect("stage locked PWM patch");
 
     let podman_log = root.join("podman.log");
     let makepkg_log = root.join("makepkg.log");
@@ -958,9 +1111,10 @@ set -euo pipefail
 printf 'args=%s\n' "$*" >"$TEST_MAKEPKG_LOG"
 env | /usr/bin/sort >>"$TEST_MAKEPKG_LOG"
 [[ "$(readlink "$TEST_PACKAGE_ROOT/source-cache/0001-acer-wmi-add-pt31553-telemetry.patch")" == "/bundle/patches/0001-acer-wmi-add-pt31553-telemetry.patch" ]]
+[[ "$(readlink "$TEST_PACKAGE_ROOT/source-cache/0002-acer-wmi-enable-pt31553-pwm.patch")" == "/bundle/patches/0002-acer-wmi-enable-pt31553-pwm.patch" ]]
 source "$TEST_PACKAGE_ROOT/PKGBUILD"
-[[ "${source[*]}" == "0001-acer-wmi-add-pt31553-telemetry.patch" ]]
-[[ "${b2sums[*]}" == "SKIP" ]]
+[[ "${source[*]}" == "0001-acer-wmi-add-pt31553-telemetry.patch 0002-acer-wmi-enable-pt31553-pwm.patch" ]]
+[[ "${b2sums[*]}" == "SKIP SKIP" ]]
 prepare
 "#,
     )
@@ -985,7 +1139,12 @@ prepare
         .env("TEST_MAKEPKG_LOG", &makepkg_log)
         .output()
         .expect("run checked-in executor");
-    assert!(run.status.success(), "{}", failure_text(&run));
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        failure_text(&run)
+    );
 
     let podman = fs::read_to_string(&podman_log).expect("read fake podman log");
     assert!(podman.contains("--storage-driver=overlay pull --quiet oci:"));
@@ -1003,6 +1162,7 @@ prepare
         .expect("read patched acer-wmi fixture");
     assert!(patched_source.contains("Predator PT315-53"));
     assert!(patched_source.contains("DMI_EXACT_MATCH(DMI_BOARD_NAME, \"Civic_TLS\")"));
+    assert!(patched_source.contains("\t.pwm = 1,"));
 
     let missing_output = root.join("missing-output");
     let rejected = Command::new("/bin/bash")
@@ -1020,9 +1180,9 @@ prepare
 
 #[cfg(unix)]
 #[test]
-fn checked_in_executor_compiles_telemetry_and_emits_a_portable_checksum() {
+fn checked_in_executor_compiles_pwm_candidate_and_emits_a_portable_checksum() {
     let root = std::env::temp_dir().join(format!(
-        "fan-control-telemetry-compile-{}-{}",
+        "fan-control-pwm-compile-{}-{}",
         std::process::id(),
         NEXT_DIR.fetch_add(1, Ordering::Relaxed)
     ));
@@ -1050,6 +1210,12 @@ fn checked_in_executor_compiles_telemetry_and_emits_a_portable_checksum() {
         bundle.join("patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
     )
     .expect("stage telemetry patch");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packaging/kernel/patches/0002-acer-wmi-enable-pt31553-pwm.patch"),
+        bundle.join("patches/0002-acer-wmi-enable-pt31553-pwm.patch"),
+    )
+    .expect("stage PWM patch");
     let source_status = Command::new("tar")
         .args(["-czf"])
         .arg(bundle.join("cachyos-7.1.8-1.tar.gz"))
@@ -1089,7 +1255,8 @@ done
 if [[ " $(tail -n 1 "$TEST_MAKE_LOG") " == *" drivers/platform/x86/acer-wmi.o "* ]]; then
     grep -q 'Predator PT315-53' "$source_root/drivers/platform/x86/acer-wmi.c"
     grep -q 'DMI_EXACT_MATCH(DMI_BOARD_NAME, "Civic_TLS")' "$source_root/drivers/platform/x86/acer-wmi.c"
-    printf 'pinned telemetry object\n' >"$source_root/drivers/platform/x86/acer-wmi.o"
+    grep -q $'\t.pwm = 1,' "$source_root/drivers/platform/x86/acer-wmi.c"
+    printf 'pinned PWM object\n' >"$source_root/drivers/platform/x86/acer-wmi.o"
 fi
 "#,
     )
@@ -1102,7 +1269,7 @@ fi
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let run = Command::new("/bin/bash")
         .arg(&wrapper)
-        .arg("--compile-telemetry")
+        .arg("--compile-pwm")
         .env("PATH", path)
         .env("SOURCE_LOCK_INSIDE", "1")
         .env("SOURCE_LOCK_BUNDLE", &bundle)
@@ -1110,13 +1277,18 @@ fi
         .env("TEST_MAKE_LOG", &make_log)
         .current_dir(&root)
         .output()
-        .expect("run telemetry compile gate");
-    assert!(run.status.success(), "{}", failure_text(&run));
+        .expect("run PWM compile gate");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        failure_text(&run)
+    );
 
     let object = output.join("acer-wmi.o");
     let checksum = output.join("acer-wmi.o.sha256");
     let object_bytes = fs::read(&object).expect("read retained object");
-    assert_eq!(object_bytes, b"pinned telemetry object\n");
+    assert_eq!(object_bytes, b"pinned PWM object\n");
     assert_eq!(
         fs::read_to_string(&checksum).expect("read checksum manifest"),
         format!("{}  acer-wmi.o\n", sha(&object_bytes))
@@ -1147,21 +1319,58 @@ fi
             .any(|line| line.ends_with(" -j2 drivers/platform/x86/acer-wmi.o"))
     );
 
-    fs::remove_dir_all(&root).expect("remove telemetry compile fixture");
+    fs::remove_dir_all(root.join("pwm-compile")).expect("reset PWM compile tree");
+    fs::write(
+        &fake_make,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ " $* " == *" drivers/platform/x86/acer-wmi.o "* ]]; then
+    exit 23
+fi
+"#,
+    )
+    .expect("write failing fake make");
+    let failed = Command::new("/bin/bash")
+        .arg(&wrapper)
+        .arg("--compile-pwm")
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("SOURCE_LOCK_INSIDE", "1")
+        .env("SOURCE_LOCK_BUNDLE", &bundle)
+        .env("SOURCE_LOCK_OUTPUT", &output)
+        .current_dir(&root)
+        .output()
+        .expect("run failing PWM compile gate");
+    assert_eq!(failed.status.code(), Some(23), "{}", failure_text(&failed));
+    assert!(
+        !object.exists(),
+        "failed compile must not publish an object"
+    );
+    assert!(
+        !checksum.exists(),
+        "failed compile must not publish a checksum"
+    );
+
+    fs::remove_dir_all(&root).expect("remove PWM compile fixture");
 }
 
 #[test]
-fn stage_one_manifest_requires_the_one_exact_build_tool() {
-    let accepted = validate_checked_in_stage_one_manifest("none");
+fn stage_two_manifest_requires_the_one_exact_build_tool() {
+    let accepted = validate_checked_in_stage_two_manifest("none");
     assert!(accepted.status.success(), "{}", failure_text(&accepted));
+    let stage_one = validate_checked_in_stage_two_manifest("stage-one");
+    assert!(stage_one.status.success(), "{}", failure_text(&stage_one));
 
     for (mutation, expected) in [
-        ("missing", "requires exactly the pinned bc package"),
-        ("duplicate", "requires exactly the pinned bc package"),
+        ("missing", "require exactly the pinned bc package"),
+        ("duplicate", "require exactly the pinned bc package"),
         ("altered", "bc package identity is not exact"),
+        (
+            "reverse-patches",
+            "does not match the selected qualification stage",
+        ),
         ("stage-zero", "stage 0 must not select build tools"),
     ] {
-        let rejected = validate_checked_in_stage_one_manifest(mutation);
+        let rejected = validate_checked_in_stage_two_manifest(mutation);
         assert!(!rejected.status.success(), "{mutation} unexpectedly passed");
         assert!(failure_text(&rejected).contains(expected), "{mutation}");
     }
@@ -1281,7 +1490,7 @@ fn rejects_patch_inputs_not_exactly_listed_by_the_patch_set() {
     fs::write(&fixture.lock, format!("{lock}{}", input_table(&record)))
         .expect("append patch record");
 
-    assert!(failure_text(&fixture.verify()).contains("must exactly list sorted patch input names"));
+    assert!(failure_text(&fixture.verify()).contains("must exactly list unique patch input names"));
 }
 
 #[cfg(unix)]
@@ -1362,21 +1571,97 @@ fn validates_the_locked_telemetry_patch_against_pinned_source_contexts() {
 }
 
 #[test]
+fn validates_the_locked_pwm_patch_only_after_exact_telemetry() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/patches");
+    let telemetry = fs::read(root.join("0001-acer-wmi-add-pt31553-telemetry.patch"))
+        .expect("read locked telemetry patch");
+    let pwm = fs::read(root.join("0002-acer-wmi-enable-pt31553-pwm.patch"))
+        .expect("read locked PWM patch");
+    let source = pinned_acer_wmi_contexts();
+
+    let accepted = validate_pwm_patch(&telemetry, &pwm, &source);
+    assert!(accepted.status.success(), "{}", failure_text(&accepted));
+
+    let pwm_text = String::from_utf8(pwm.clone()).expect("UTF-8 PWM patch");
+    let extra_capability = pwm_text.replace("+\t.pwm = 1,", "+\t.pwm = 1,\n+\t.force_caps = 1,");
+    let rejected = validate_pwm_patch(&telemetry, extra_capability.as_bytes(), &source);
+    assert!(!rejected.status.success());
+    assert!(failure_text(&rejected).contains("locked stage-2 source change"));
+
+    let wrong_context = pwm_text.replace("quirk_acer_predator_pt315_53", "quirk_acer_predator_v4");
+    let rejected = validate_pwm_patch(&telemetry, wrong_context.as_bytes(), &source);
+    assert!(!rejected.status.success());
+    assert!(failure_text(&rejected).contains("locked stage-2 source change"));
+}
+
+#[test]
+fn production_stage_two_scope_rejects_pinned_source_context_drift() {
+    let source = pinned_acer_wmi_contexts();
+    let accepted = verify_stage_two_patch_scope(&source);
+    assert!(accepted.status.success(), "{}", failure_text(&accepted));
+
+    let mut shifted = b"/* unexpected leading line */\n".to_vec();
+    shifted.extend_from_slice(&source);
+    let rejected = verify_stage_two_patch_scope(&shifted);
+    assert!(!rejected.status.success());
+    assert!(failure_text(&rejected).contains("does not apply exactly"));
+}
+
+#[test]
 fn patch_wrapper_allows_only_the_exact_recipe_mutation() {
     let wrapper = fs::read(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/build-candidate"),
     )
     .expect("read locked build wrapper");
-    let accepted = validate_patch_wrapper(&wrapper);
+    let accepted = validate_patch_wrapper(&wrapper, "linux-cachyos-gcc-7.1.8-stage-2-pwm");
     assert!(accepted.status.success(), "{}", failure_text(&accepted));
 
     let mut extra_mutation = wrapper;
     extra_mutation.extend_from_slice(
         b"recipe=\"$package_root/PKG\"\"BUILD\"\nprintf 'source+=(evil.patch)\\n' >>\"$recipe\"\n",
     );
-    let rejected = validate_patch_wrapper(&extra_mutation);
+    let rejected = validate_patch_wrapper(&extra_mutation, "linux-cachyos-gcc-7.1.8-stage-2-pwm");
     assert!(!rejected.status.success());
-    assert!(failure_text(&rejected).contains("locked stage-1 mutation program"));
+    assert!(failure_text(&rejected).contains("locked stage-2 mutation program"));
+}
+
+#[test]
+fn preserves_the_exact_stage_one_wrapper_contract() {
+    let wrapper = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/build-candidate"),
+    )
+    .expect("read Stage-2 wrapper");
+    let stage_one = wrapper
+        .replace("--compile-pwm", "--compile-telemetry")
+        .replace("pwm-compile", "telemetry-compile")
+        .replace(
+            "pwm_patch=\"0002-acer-wmi-enable-pt31553-pwm.patch\"\n",
+            "",
+        )
+        .replace(
+            concat!(
+                "        rm -f -- \"$SOURCE_LOCK_OUTPUT/acer-wmi.o\" \\\n",
+                "            \"$SOURCE_LOCK_OUTPUT/acer-wmi.o.sha256\"\n"
+            ),
+            "",
+        )
+        .replace(
+            "        patch --directory \"$source_root\" -Np1 \\\n            <\"$SOURCE_LOCK_BUNDLE/patches/$pwm_patch\"\n",
+            "",
+        )
+        .replace(
+            "ln -s \"/bundle/patches/$pwm_patch\" \"$package_root/source-cache/$pwm_patch\"\n",
+            "",
+        )
+        .replace(
+            "printf '\\nsource+=(\"%s\" \"%s\")\\nb2sums+=(\"SKIP\" \"SKIP\")\\n' \\\n    \"$telemetry_patch\" \"$pwm_patch\" >>\"$package_root/PKGBUILD\"",
+            "printf '\\nsource+=(\"%s\")\\nb2sums+=(\"SKIP\")\\n' \"$telemetry_patch\" >>\"$package_root/PKGBUILD\"",
+        );
+    let accepted = validate_patch_wrapper(
+        stage_one.as_bytes(),
+        "linux-cachyos-gcc-7.1.8-stage-1-telemetry",
+    );
+    assert!(accepted.status.success(), "{}", failure_text(&accepted));
 }
 
 #[test]
@@ -1567,7 +1852,7 @@ fn verified_build_handoff_ignores_ambient_bash_hooks() {
 #[cfg(unix)]
 #[test]
 fn verified_build_handoff_rejects_unlocked_makepkg_options() {
-    for option in ["--sign", "--compile-telemetry"] {
+    for option in ["--sign", "--compile-telemetry", "--compile-pwm"] {
         let fixture = Fixture::new();
         fixture.make_read_only();
         let output = fixture
@@ -1580,9 +1865,26 @@ fn verified_build_handoff_rejects_unlocked_makepkg_options() {
 
         assert!(!output.status.success());
         assert!(
-            failure_text(&output).contains("only --compile-telemetry or --verifysource is allowed")
+            failure_text(&output)
+                .contains("only the selected compile gate or --verifysource is allowed")
         );
     }
+}
+
+#[test]
+fn stage_two_cli_selects_only_the_pwm_compile_gate() {
+    let candidate = "linux-cachyos-gcc-7.1.8-stage-2-pwm";
+    let accepted = run_verified_cli_gate(candidate, "--compile-pwm");
+    assert!(accepted.status.success(), "{}", failure_text(&accepted));
+    assert!(String::from_utf8_lossy(&accepted.stdout).contains("handoff:--compile-pwm"));
+
+    let rejected = run_verified_cli_gate(candidate, "--compile-telemetry");
+    assert!(!rejected.status.success());
+    assert!(
+        failure_text(&rejected)
+            .contains("only the selected compile gate or --verifysource is allowed")
+    );
+    assert!(!String::from_utf8_lossy(&rejected.stdout).contains("handoff:"));
 }
 
 #[cfg(unix)]
@@ -1736,8 +2038,8 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
     );
     let digest = sha(&manifest);
     assert!(lock.contains(&format!("toolchain_image_digest = \"{digest}\"")));
-    assert!(lock.contains("candidate = \"linux-cachyos-gcc-7.1.8-stage-1-telemetry\""));
-    assert!(lock.contains("patches = [\"pt31553-telemetry\"]"));
+    assert!(lock.contains("candidate = \"linux-cachyos-gcc-7.1.8-stage-2-pwm\""));
+    assert!(lock.contains("patches = [\"pt31553-telemetry\", \"pt31553-pwm\"]"));
 
     let parsed: toml::Value = toml::from_str(&lock).expect("parse checked-in lock");
     let inputs = parsed["inputs"].as_array().expect("lock inputs");
@@ -1770,6 +2072,10 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
         (
             "pt31553-telemetry",
             root.join("patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
+        ),
+        (
+            "pt31553-pwm",
+            root.join("patches/0002-acer-wmi-enable-pt31553-pwm.patch"),
         ),
         (
             "toolchain-image",
@@ -1848,10 +2154,19 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
         );
     }
 
+    let pwm_patch = fs::read_to_string(root.join("patches/0002-acer-wmi-enable-pt31553-pwm.patch"))
+        .expect("read PWM patch");
+    let pwm_additions = pwm_patch
+        .lines()
+        .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+        .collect::<Vec<_>>();
+    assert_eq!(pwm_additions, ["+\t.pwm = 1,"]);
+
     let environment = fs::read_to_string(root.join("build-environment.toml"))
         .expect("read checked-in build environment");
-    assert!(environment.contains("patches = [\"pt31553-telemetry\"]"));
+    assert!(environment.contains("patches = [\"pt31553-telemetry\", \"pt31553-pwm\"]"));
     assert!(environment.contains("\"pt31553-telemetry\""));
+    assert!(environment.contains("\"pt31553-pwm\""));
     let environment_value: toml::Value =
         toml::from_str(&environment).expect("parse checked-in build environment");
     let selected_inputs = environment_value["build_inputs"]
@@ -1878,5 +2193,6 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
     let wrapper =
         fs::read_to_string(root.join("build-candidate")).expect("read checked-in build wrapper");
     assert!(wrapper.contains("/bundle/patches/$telemetry_patch"));
-    assert!(wrapper.contains("source+=(\"%s\")"));
+    assert!(wrapper.contains("/bundle/patches/$pwm_patch"));
+    assert!(wrapper.contains("source+=(\"%s\" \"%s\")"));
 }
