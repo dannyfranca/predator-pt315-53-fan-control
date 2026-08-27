@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 
 set -euo pipefail
-source /usr/lib/pt31553-fan-control/workloads/common
+source "$(dirname -- "${BASH_SOURCE[0]}")/common"
 require_fixed_workload "$@"
 
 start_load() {
