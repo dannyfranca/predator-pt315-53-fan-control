@@ -1,0 +1,43 @@
+# Exact-model compatibility declaration for the unqualified source package.
+# Build-specific image, module, and signing identities are impossible zero
+# sentinels until a qualified release replaces them with measured artifacts.
+# This declaration cannot authorize Custom mode by itself.
+
+schema_version = 1
+
+[hardware]
+dmi_product_name = "Predator PT315-53"
+dmi_board_name = "Civic_TLS"
+bios_version = "V1.17"
+
+[kernel]
+release = "7.1.8-1-cachyos-pt31553"
+package = "linux-cachyos-pt31553"
+source_commit = "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
+image_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+image_signer_fingerprint = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[module]
+name = "acer_wmi"
+path = "/usr/lib/modules/7.1.8-1-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+signer_fingerprint = "0000000000000000000000000000000000000000000000000000000000000000"
+vermagic = "7.1.8-1-cachyos-pt31553 SMP preempt mod_unload"
+provenance = "in-tree"
+
+[secure_boot]
+required = true
+
+[fan_control]
+backend = "acer-hwmon"
+hwmon_name = "acer"
+endpoints = ["pwm1", "pwm1_enable", "fan1_input", "pwm2", "pwm2_enable", "fan2_input"]
+forbidden_capabilities = [
+  "force-caps",
+  "ec-raw-mode",
+  "predator-v4-override",
+  "direct-wmi",
+  "raw-ec",
+  "replacement-wmi-module",
+  "alternate-fan-write-backend",
+]

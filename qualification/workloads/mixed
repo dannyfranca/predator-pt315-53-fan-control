@@ -1,0 +1,94 @@
+#!/usr/bin/bash
+
+set -euo pipefail
+workload_dir=$(/usr/bin/dirname -- "${BASH_SOURCE[0]}")
+source "$workload_dir/common"
+require_fixed_workload "$@"
+
+ACTIVE_WORKLOAD_PID=
+REQUESTED_SEGMENT=load
+REQUESTED_GENERATION=0
+APPLIED_GENERATION=-1
+
+stop_active_segment() {
+  local pid
+  if [[ -n ${ACTIVE_WORKLOAD_PID:-} ]]; then
+    kill -TERM "$ACTIVE_WORKLOAD_PID" 2>/dev/null || true
+    wait "$ACTIVE_WORKLOAD_PID" 2>/dev/null || true
+  fi
+  # A signal can arrive after Bash registers the background segment but before
+  # the following assignment records $!. Contain that unassigned job too.
+  while read -r pid; do
+    if [[ -n $pid ]]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done < <(jobs -pr)
+  ACTIVE_WORKLOAD_PID=
+}
+
+start_load() {
+  stop_active_segment
+  "$workload_dir/combined" --fixed &
+  ACTIVE_WORKLOAD_PID=$!
+}
+
+enter_idle() {
+  stop_active_segment
+  /usr/bin/sleep infinity &
+  ACTIVE_WORKLOAD_PID=$!
+}
+
+transition_to_load() {
+  REQUESTED_SEGMENT=load
+  REQUESTED_GENERATION=$((REQUESTED_GENERATION + 1))
+  if [[ -n ${ACTIVE_WORKLOAD_PID:-} ]]; then
+    kill -TERM "$ACTIVE_WORKLOAD_PID" 2>/dev/null || true
+  fi
+}
+
+transition_to_idle() {
+  REQUESTED_SEGMENT=idle
+  REQUESTED_GENERATION=$((REQUESTED_GENERATION + 1))
+  if [[ -n ${ACTIVE_WORKLOAD_PID:-} ]]; then
+    kill -TERM "$ACTIVE_WORKLOAD_PID" 2>/dev/null || true
+  fi
+}
+
+apply_requested_segment() {
+  local generation segment
+  while [[ $APPLIED_GENERATION -ne $REQUESTED_GENERATION ]]; do
+    generation=$REQUESTED_GENERATION
+    segment=$REQUESTED_SEGMENT
+    stop_active_segment
+    case $segment in
+      load) start_load ;;
+      idle) enter_idle ;;
+    esac
+    APPLIED_GENERATION=$generation
+  done
+}
+
+trap transition_to_load USR1
+trap transition_to_idle USR2
+trap 'stop_active_segment; exit 0' HUP INT TERM
+
+# The endurance harness sends SIGUSR1 for load segments and SIGUSR2 for idle
+# segments. Handlers only request/cancel; this loop alone spawns replacements.
+while true; do
+  apply_requested_segment
+  waited_pid=$ACTIVE_WORKLOAD_PID
+  waited_generation=$APPLIED_GENERATION
+  if wait "$waited_pid"; then
+    status=1
+  else
+    status=$?
+  fi
+  # A transition trap replaces the segment and advances the generation. Any
+  # child failure without that explicit marker must remain visible.
+  if [[ $REQUESTED_GENERATION -ne $waited_generation ]]; then
+    continue
+  fi
+  stop_active_segment
+  exit "$status"
+done

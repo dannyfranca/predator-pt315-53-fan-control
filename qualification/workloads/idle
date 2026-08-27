@@ -1,0 +1,6 @@
+#!/usr/bin/bash
+
+set -euo pipefail
+source "$(/usr/bin/dirname -- "${BASH_SOURCE[0]}")/common"
+require_fixed_workload "$@"
+exec /usr/bin/sleep infinity

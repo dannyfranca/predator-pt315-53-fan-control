@@ -1,0 +1,114 @@
+name: Controller package
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/controller-package.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "compatibility/**"
+      - "config/**"
+      - "crates/**"
+      - "packaging/controller/**"
+      - "qualification/workloads/**"
+      - "schemas/**"
+      - "systemd/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/controller-package.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "compatibility/**"
+      - "config/**"
+      - "crates/**"
+      - "packaging/controller/**"
+      - "qualification/workloads/**"
+      - "schemas/**"
+      - "systemd/**"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build and workload dependencies
+        run: pacman -Syu --noconfirm glmark2 rust stress-ng
+
+      - name: Prepare non-root builder
+        run: |
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          install -d -o root -g root -m 0755 /opt
+          install -d -o builder -g builder -m 0755 /opt/controller-package
+          cp -a "$GITHUB_WORKSPACE/packaging/controller/." /opt/controller-package/
+          chown -R builder:builder /opt/controller-package
+          # cp -a preserves the group-writable checkout directory mode on the
+          # destination itself, so restore the trusted build-prefix boundary.
+          chmod 0755 /opt/controller-package
+
+      - name: Test current package contract
+        run: |
+          su builder -c 'cd "$GITHUB_WORKSPACE/packaging/controller" && makepkg --printsrcinfo | diff -u .SRCINFO -'
+          su builder -c 'cd "$GITHUB_WORKSPACE" && cargo test -p fan-control-core --test controller_package'
+
+      - name: Build and test locked package
+        run: |
+          # GitHub mounts its workspace beneath group-writable runner directories.
+          # Build beneath an explicitly root-confined prefix so ownership-sensitive
+          # tests exercise the same ancestor contract as a real package build host.
+          su builder -c 'cd /opt/controller-package && makepkg --noconfirm --cleanbuild'
+
+      - name: Test contract against locked source
+        run: |
+          su builder -s /bin/bash -c '
+            cd "$GITHUB_WORKSPACE"
+            source packaging/controller/PKGBUILD
+            export PT31553_LOCKED_SOURCE_ROOT="/opt/controller-package/src/predator-pt315-53-fan-control-$_commit"
+            test -d "$PT31553_LOCKED_SOURCE_ROOT"
+            cargo test -p fan-control-core --test controller_package
+          '
+
+      - name: Verify package contents
+        run: |
+          mapfile -t packages < <(su builder -s /bin/bash -c 'cd /opt/controller-package && makepkg --packagelist')
+          test "${#packages[@]}" -eq 1
+          package=${packages[0]}
+          test -f "$package"
+          test "$(find /opt/controller-package -maxdepth 1 -type f -name '*.pkg.tar.zst' -print | wc -l)" -eq 1
+          bsdtar -tf "$package" > /tmp/controller-package-contents
+          bsdtar -tvf "$package" | awk '
+            $3 != "root" || $4 != "root" {
+              print "non-root-owned package entry: " $0 > "/dev/stderr"
+              invalid = 1
+            }
+            END { exit invalid }
+          '
+          for path in \
+            etc/pt31553-fan-control/config.toml \
+            usr/bin/pt31553-fand \
+            usr/bin/pt31553-fan-restore \
+            usr/bin/pt31553-fan-qualify \
+            usr/lib/pt31553-fan-control/compatibility.toml \
+            usr/lib/pt31553-fan-control/workloads/VERSION \
+            usr/lib/pt31553-fan-control/workloads/combined \
+            usr/lib/pt31553-fan-control/workloads/common \
+            usr/lib/pt31553-fan-control/workloads/cpu \
+            usr/lib/pt31553-fan-control/workloads/gpu \
+            usr/lib/pt31553-fan-control/workloads/idle \
+            usr/lib/pt31553-fan-control/workloads/mixed \
+            usr/lib/systemd/system/pt31553-fand.service \
+            usr/lib/systemd/system/pt31553-fan-sleep-guard.service \
+            usr/lib/systemd/system-preset/90-pt31553-fan-control.preset \
+            usr/lib/tmpfiles.d/pt31553-fan-control.conf \
+            usr/share/pt31553-fan-control/schemas/evidence.json \
+            usr/share/pt31553-fan-control/schemas/evidence-v2.json \
+            var/lib/pt31553-fan-control/evidence/; do
+            grep -Fxq "$path" /tmp/controller-package-contents
+          done
+          test "$(bsdtar -tf "$package" | grep -Ec '(^|/)(qualified-envelope\.toml|qualification-record\.json|qualification\.json|protected-policy|promotion|authorization)')" -eq 0

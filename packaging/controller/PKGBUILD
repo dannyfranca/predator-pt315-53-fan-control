@@ -1,0 +1,96 @@
+# Maintainer: Danny Franca
+
+pkgname=pt31553-fan-control
+pkgver=0.1.0
+pkgrel=6
+pkgdesc='Fail-closed PT315-53 fan controller and qualification suite'
+arch=('x86_64')
+url='https://github.com/dannyfranca/predator-pt315-53-fan-control'
+license=('MIT')
+depends=('bash' 'coreutils' 'gcc-libs' 'glibc' 'glmark2' 'stress-ng' 'systemd')
+makedepends=('cargo')
+options=('!debug')
+backup=('etc/pt31553-fan-control/config.toml')
+_commit='590c4ea728a47f7d8ea5b6f68b90c509022867eb'
+source=(
+  "$pkgname-$pkgver.tar.gz::$url/archive/$_commit.tar.gz"
+)
+sha256sums=(
+  '00e9185e4066964a1506589d28f39a168710bbe721bdf1fd478f4d56f8b15e80'
+)
+
+prepare() {
+  umask 0022
+  cd "predator-pt315-53-fan-control-$_commit"
+  # GitHub archives preserve group-writable directories throughout the source
+  # tree. Keep ownership-sensitive tests and build outputs beneath trusted
+  # ancestors, including package-local test fixture directories.
+  chmod go-w "$srcdir"
+  find . -type d -exec chmod go-w {} +
+  cargo fetch --locked --target x86_64-unknown-linux-gnu
+}
+
+build() {
+  umask 0022
+  cd "predator-pt315-53-fan-control-$_commit"
+  cargo build --frozen --release --workspace --bins
+}
+
+check() {
+  umask 0022
+  cd "predator-pt315-53-fan-control-$_commit"
+  # build() creates target directories after prepare() hardens the extracted
+  # tree. Re-harden every directory before ownership-sensitive tests run, then
+  # create their package-local fixture parent with an explicit safe mode.
+  find . -type d -exec chmod go-w {} +
+  install -d -m 0755 crates/fan-control-core/target
+  RUSTFLAGS="${RUSTFLAGS:-} -C debug-assertions=yes" cargo test --frozen --workspace
+}
+
+package() {
+  local source_root="$srcdir/predator-pt315-53-fan-control-$_commit"
+
+  install -Dm755 "$source_root/target/release/fan-control-daemon" \
+    "$pkgdir/usr/bin/pt31553-fand"
+  install -Dm755 "$source_root/target/release/fan-control-restore" \
+    "$pkgdir/usr/bin/pt31553-fan-restore"
+  install -Dm755 "$source_root/target/release/fan-control-qualify" \
+    "$pkgdir/usr/bin/pt31553-fan-qualify"
+
+  install -Dm644 "$source_root/systemd/pt31553-fand.service" \
+    "$pkgdir/usr/lib/systemd/system/pt31553-fand.service"
+  install -Dm644 "$source_root/systemd/pt31553-fan-sleep-guard.service" \
+    "$pkgdir/usr/lib/systemd/system/pt31553-fan-sleep-guard.service"
+  install -Dm644 "$source_root/systemd/90-pt31553-fan-control.preset" \
+    "$pkgdir/usr/lib/systemd/system-preset/90-pt31553-fan-control.preset"
+  install -Dm644 "$source_root/packaging/controller/pt31553-fan-control.tmpfiles" \
+    "$pkgdir/usr/lib/tmpfiles.d/pt31553-fan-control.conf"
+
+  install -Dm640 "$source_root/config/example.toml" \
+    "$pkgdir/etc/pt31553-fan-control/config.toml"
+  install -Dm644 "$source_root/compatibility/pt315-53.toml" \
+    "$pkgdir/usr/lib/pt31553-fan-control/compatibility.toml"
+  install -Dm644 "$source_root/schemas/evidence.json" \
+    "$pkgdir/usr/share/pt31553-fan-control/schemas/evidence.json"
+  install -Dm644 "$source_root/schemas/evidence-v2.json" \
+    "$pkgdir/usr/share/pt31553-fan-control/schemas/evidence-v2.json"
+
+  install -dm755 "$pkgdir/usr/lib/pt31553-fan-control/workloads"
+  install -m644 \
+    "$source_root/qualification/workloads/common" \
+    "$source_root/qualification/workloads/VERSION" \
+    "$pkgdir/usr/lib/pt31553-fan-control/workloads/"
+  install -m755 \
+    "$source_root/qualification/workloads/idle" \
+    "$source_root/qualification/workloads/cpu" \
+    "$source_root/qualification/workloads/gpu" \
+    "$source_root/qualification/workloads/combined" \
+    "$source_root/qualification/workloads/mixed" \
+    "$pkgdir/usr/lib/pt31553-fan-control/workloads/"
+
+  install -dm700 \
+    "$pkgdir/var/lib/pt31553-fan-control" \
+    "$pkgdir/var/lib/pt31553-fan-control/evidence"
+  install -Dm644 "$source_root/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
