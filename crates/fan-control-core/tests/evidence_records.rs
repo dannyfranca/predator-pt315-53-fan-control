@@ -77,6 +77,41 @@ fn published_json_schema_requires_every_fixture_field() {
 }
 
 #[test]
+fn v1_parser_and_schema_reject_all_live_lifecycle_only_fields() {
+    let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    let candidates = [
+        (
+            "/readbacks/0/source_timestamp",
+            fixture["readbacks"][0]["timestamp"].clone(),
+        ),
+        ("/readbacks/0/fresh", true.into()),
+        ("/readbacks/0/boot_id", "boot-before".into()),
+        ("/state_transitions/0/boot_id", "boot-before".into()),
+        ("/faults/0/boot_id", "boot-before".into()),
+    ];
+
+    for (pointer, value) in candidates {
+        for inserted in [value, serde_json::Value::Null] {
+            let mut forged = fixture.clone();
+            let (parent, field) = pointer.rsplit_once('/').unwrap();
+            forged
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), inserted);
+            assert!(!validator.is_valid(&forged), "{pointer}");
+            assert!(
+                parse_evidence_v1(&serde_json::to_string(&forged).unwrap()).is_err(),
+                "{pointer}"
+            );
+        }
+    }
+}
+
+#[test]
 fn published_json_schema_rejects_nested_incomplete_or_unsafe_records() {
     let fixture: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
     let mut candidates = Vec::new();

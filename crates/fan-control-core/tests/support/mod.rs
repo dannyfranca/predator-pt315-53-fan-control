@@ -351,11 +351,13 @@ pub fn completed_calibration_record(mut record: EvidenceRecord, fan: Fan) -> Evi
     record.state_transitions = vec![
         StateTransitionEvidence {
             timestamp: record.started_at,
+            boot_id: None,
             from: "firmware-auto".into(),
             to: "custom-control".into(),
         },
         StateTransitionEvidence {
             timestamp: record.completed_at,
+            boot_id: None,
             from: "custom-control".into(),
             to: "firmware-auto".into(),
         },

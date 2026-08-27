@@ -1223,6 +1223,7 @@ fn malformed_prior_passes_never_receive_repeat_credit() {
     let mut faulted = valid_prior.clone();
     faulted.faults.push(FaultEvidence {
         timestamp: faulted.started_at,
+        boot_id: None,
         code: "controller-fault".into(),
         detail: "injected fault".into(),
     });
@@ -1547,6 +1548,9 @@ fn custom_observation(monotonic_millis: u64, cpu: i32, gpu: i32) -> MatchedWorkl
                 .into_iter()
                 .map(move |(field, value)| FanReadbackEvidence {
                     timestamp: timestamp(monotonic_millis),
+                    source_timestamp: None,
+                    fresh: None,
+                    boot_id: None,
                     fan,
                     field,
                     value: Some(value),

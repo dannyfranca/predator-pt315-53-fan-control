@@ -77,9 +77,126 @@
         { "type": "null" }
       ]
     },
+    "live_lifecycle_cases": {
+      "type": "array",
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/liveLifecycleCaseResult" },
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/liveLifecycleCaseResult" }, { "properties": { "case": { "const": "invalid-configuration" } } }, { "if": { "properties": { "passed": { "const": true } }, "required": ["passed"] }, "then": { "$ref": "#/$defs/passedInvalidConfigurationResult" } }] },
+        { "allOf": [{ "$ref": "#/$defs/liveLifecycleCaseResult" }, { "properties": { "case": { "const": "duplicate-process" } } }, { "if": { "properties": { "passed": { "const": true } }, "required": ["passed"] }, "then": { "$ref": "#/$defs/passedDuplicateProcessResult" } }] },
+        { "allOf": [{ "$ref": "#/$defs/liveLifecycleCaseResult" }, { "properties": { "case": { "const": "normal-stop-restart" } } }, { "if": { "properties": { "passed": { "const": true } }, "required": ["passed"] }, "then": { "$ref": "#/$defs/passedNormalStopRestartResult" } }] },
+        { "allOf": [{ "$ref": "#/$defs/liveLifecycleCaseResult" }, { "properties": { "case": { "const": "process-kill-recovery" } } }, { "if": { "properties": { "passed": { "const": true } }, "required": ["passed"] }, "then": { "$ref": "#/$defs/passedProcessKillRecoveryResult" } }] },
+        { "allOf": [{ "$ref": "#/$defs/liveLifecycleCaseResult" }, { "properties": { "case": { "const": "watchdog-recovery" } } }, { "if": { "properties": { "passed": { "const": true } }, "required": ["passed"] }, "then": { "$ref": "#/$defs/passedWatchdogRecoveryResult" } }] },
+        { "allOf": [{ "$ref": "#/$defs/liveLifecycleCaseResult" }, { "properties": { "case": { "const": "ac-to-battery-transition" } } }, { "if": { "properties": { "passed": { "const": true } }, "required": ["passed"] }, "then": { "$ref": "#/$defs/passedAcToBatteryTransitionResult" } }] },
+        { "allOf": [{ "$ref": "#/$defs/liveLifecycleCaseResult" }, { "properties": { "case": { "const": "suspend-resume" } } }, { "if": { "properties": { "passed": { "const": true } }, "required": ["passed"] }, "then": { "$ref": "#/$defs/passedSuspendResumeResult" } }] },
+        { "allOf": [{ "$ref": "#/$defs/liveLifecycleCaseResult" }, { "properties": { "case": { "const": "reboot" } } }, { "if": { "properties": { "passed": { "const": true } }, "required": ["passed"] }, "then": { "$ref": "#/$defs/passedRebootResult" } }] }
+      ]
+    },
     "outcome": { "$ref": "#/$defs/outcome" }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": { "stage": { "const": "live-lifecycle" } },
+        "required": ["stage"]
+      },
+      "then": {
+        "required": ["live_lifecycle_cases"],
+        "properties": {
+          "workload": { "type": "null" },
+          "samples": { "maxItems": 0 },
+          "commands": { "maxItems": 0 },
+          "readbacks": {
+            "allOf": [{
+              "items": {
+                "required": ["source_timestamp", "fresh"],
+                "not": { "required": ["phase"] }
+              }
+            }],
+            "prefixItems": [
+              { "properties": { "fan": { "const": "cpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "gpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "cpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "gpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "cpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "gpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "cpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "gpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "cpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "gpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "cpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "gpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "cpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "gpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "cpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "gpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "cpu" }, "field": { "const": "enable" } } },
+              { "properties": { "fan": { "const": "gpu" }, "field": { "const": "enable" } } }
+            ]
+          },
+          "state_transitions": {
+            "prefixItems": [
+              { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "invalid-configuration" } } },
+              { "properties": { "from": { "const": "invalid-configuration" }, "to": { "enum": ["firmware-auto", "lifecycle-blocked"] } } },
+              { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "duplicate-process" } } },
+              { "properties": { "from": { "const": "duplicate-process" }, "to": { "enum": ["firmware-auto", "lifecycle-blocked"] } } },
+              { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "normal-stop-restart" } } },
+              { "properties": { "from": { "const": "normal-stop-restart" }, "to": { "enum": ["firmware-auto", "lifecycle-blocked"] } } },
+              { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "process-kill-recovery" } } },
+              { "properties": { "from": { "const": "process-kill-recovery" }, "to": { "enum": ["firmware-auto", "lifecycle-blocked"] } } },
+              { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "watchdog-recovery" } } },
+              { "properties": { "from": { "const": "watchdog-recovery" }, "to": { "enum": ["firmware-auto", "lifecycle-blocked"] } } },
+              { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "ac-to-battery-transition" } } },
+              { "properties": { "from": { "const": "ac-to-battery-transition" }, "to": { "enum": ["firmware-auto", "lifecycle-blocked"] } } },
+              { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "suspend-resume" } } },
+              { "properties": { "from": { "const": "suspend-resume" }, "to": { "enum": ["firmware-auto", "lifecycle-blocked"] } } },
+              { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "reboot" } } },
+              { "properties": { "from": { "const": "reboot" }, "to": { "enum": ["firmware-auto", "lifecycle-blocked"] } } }
+            ]
+          },
+          "restoration_attempts": { "maxItems": 0 },
+          "calibration": { "maxItems": 0 },
+          "thermal_summary": { "type": "null" }
+        },
+        "allOf": [
+          { "not": { "required": ["starting_conditions_captured_at"] } },
+          { "not": { "required": ["workload_started_at"] } },
+          {
+            "oneOf": [
+              { "properties": { "live_lifecycle_cases": { "maxItems": 0 }, "readbacks": { "minItems": 2, "maxItems": 2 }, "state_transitions": { "maxItems": 0 } } },
+              { "properties": { "live_lifecycle_cases": { "minItems": 1, "maxItems": 1 }, "readbacks": { "minItems": 4, "maxItems": 4 }, "state_transitions": { "minItems": 2, "maxItems": 2 } } },
+              { "properties": { "live_lifecycle_cases": { "minItems": 2, "maxItems": 2 }, "readbacks": { "minItems": 6, "maxItems": 6 }, "state_transitions": { "minItems": 4, "maxItems": 4 } } },
+              { "properties": { "live_lifecycle_cases": { "minItems": 3, "maxItems": 3 }, "readbacks": { "minItems": 8, "maxItems": 8 }, "state_transitions": { "minItems": 6, "maxItems": 6 } } },
+              { "properties": { "live_lifecycle_cases": { "minItems": 4, "maxItems": 4 }, "readbacks": { "minItems": 10, "maxItems": 10 }, "state_transitions": { "minItems": 8, "maxItems": 8 } } },
+              { "properties": { "live_lifecycle_cases": { "minItems": 5, "maxItems": 5 }, "readbacks": { "minItems": 12, "maxItems": 12 }, "state_transitions": { "minItems": 10, "maxItems": 10 } } },
+              { "properties": { "live_lifecycle_cases": { "minItems": 6, "maxItems": 6 }, "readbacks": { "minItems": 14, "maxItems": 14 }, "state_transitions": { "minItems": 12, "maxItems": 12 } } },
+              { "properties": { "live_lifecycle_cases": { "minItems": 7, "maxItems": 7 }, "readbacks": { "minItems": 16, "maxItems": 16 }, "state_transitions": { "minItems": 14, "maxItems": 14 } } },
+              { "properties": { "live_lifecycle_cases": { "minItems": 8, "maxItems": 8 }, "readbacks": { "minItems": 18, "maxItems": 18 }, "state_transitions": { "minItems": 16, "maxItems": 16 } } }
+            ]
+          }
+        ]
+      },
+      "else": {
+        "properties": {
+          "readbacks": {
+            "items": {
+              "allOf": [
+                { "not": { "required": ["source_timestamp"] } },
+                { "not": { "required": ["fresh"] } },
+                { "not": { "required": ["boot_id"] } }
+              ]
+            }
+          },
+          "state_transitions": {
+            "items": { "not": { "required": ["boot_id"] } }
+          },
+          "faults": {
+            "items": { "not": { "required": ["boot_id"] } }
+          }
+        },
+        "not": { "required": ["live_lifecycle_cases"] }
+      }
+    },
     {
       "if": {
         "properties": { "stage": { "const": "matched-workload" } },
@@ -157,13 +274,6 @@
       },
       "then": {
         "properties": {
-          "samples": {
-            "minItems": 1,
-            "contains": {
-              "properties": { "freshness": { "const": "fresh" } },
-              "required": ["freshness"]
-            }
-          },
           "readbacks": { "minItems": 1 },
           "outcome": {
             "properties": { "final_firmware_auto_confirmed": { "const": true } }
@@ -173,6 +283,13 @@
           {
             "properties": {
               "stage": { "const": "preflight" },
+              "samples": {
+                "minItems": 1,
+                "contains": {
+                  "properties": { "freshness": { "const": "fresh" } },
+                  "required": ["freshness"]
+                }
+              },
               "workload": { "type": "null" },
               "thermal_summary": { "type": "null" },
               "commands": { "maxItems": 0 },
@@ -190,6 +307,13 @@
           {
             "properties": {
               "stage": { "const": "firmware-auto-baseline" },
+              "samples": {
+                "minItems": 1,
+                "contains": {
+                  "properties": { "freshness": { "const": "fresh" } },
+                  "required": ["freshness"]
+                }
+              },
               "workload": { "$ref": "#/$defs/workload" },
               "thermal_summary": { "$ref": "#/$defs/thermalSummary" },
               "commands": { "maxItems": 0 },
@@ -205,7 +329,93 @@
           },
           {
             "properties": {
-              "stage": { "not": { "enum": ["preflight", "firmware-auto-baseline"] } },
+              "stage": { "const": "live-lifecycle" },
+              "workload": { "type": "null" },
+              "samples": { "maxItems": 0 },
+              "commands": { "maxItems": 0 },
+              "readbacks": {
+                "minItems": 18,
+                "maxItems": 18,
+                "allOf": [{
+                  "items": {
+                    "required": ["source_timestamp", "fresh", "boot_id"],
+                    "properties": { "fresh": { "const": true } }
+                  }
+                }],
+                "prefixItems": [
+                  { "$ref": "#/$defs/cpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/gpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/cpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/gpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/cpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/gpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/cpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/gpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/cpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/gpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/cpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/gpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/cpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/gpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/cpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/gpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/cpuFirmwareAutoReadback" },
+                  { "$ref": "#/$defs/gpuFirmwareAutoReadback" }
+                ]
+              },
+              "state_transitions": {
+                "minItems": 16,
+                "maxItems": 16,
+                "allOf": [{ "items": { "required": ["boot_id"] } }],
+                "prefixItems": [
+                  { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "invalid-configuration" } } },
+                  { "properties": { "from": { "const": "invalid-configuration" }, "to": { "const": "firmware-auto" } } },
+                  { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "duplicate-process" } } },
+                  { "properties": { "from": { "const": "duplicate-process" }, "to": { "const": "firmware-auto" } } },
+                  { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "normal-stop-restart" } } },
+                  { "properties": { "from": { "const": "normal-stop-restart" }, "to": { "const": "firmware-auto" } } },
+                  { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "process-kill-recovery" } } },
+                  { "properties": { "from": { "const": "process-kill-recovery" }, "to": { "const": "firmware-auto" } } },
+                  { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "watchdog-recovery" } } },
+                  { "properties": { "from": { "const": "watchdog-recovery" }, "to": { "const": "firmware-auto" } } },
+                  { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "ac-to-battery-transition" } } },
+                  { "properties": { "from": { "const": "ac-to-battery-transition" }, "to": { "const": "firmware-auto" } } },
+                  { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "suspend-resume" } } },
+                  { "properties": { "from": { "const": "suspend-resume" }, "to": { "const": "firmware-auto" } } },
+                  { "properties": { "from": { "const": "firmware-auto" }, "to": { "const": "reboot" } } },
+                  { "properties": { "from": { "const": "reboot" }, "to": { "const": "firmware-auto" } } }
+                ]
+              },
+              "faults": { "maxItems": 0 },
+              "restoration_attempts": { "maxItems": 0 },
+              "calibration": { "maxItems": 0 },
+              "thermal_summary": { "type": "null" },
+              "live_lifecycle_cases": {
+                "minItems": 8,
+                "maxItems": 8,
+                "prefixItems": [
+                  { "$ref": "#/$defs/passedInvalidConfigurationResult" },
+                  { "$ref": "#/$defs/passedDuplicateProcessResult" },
+                  { "$ref": "#/$defs/passedNormalStopRestartResult" },
+                  { "$ref": "#/$defs/passedProcessKillRecoveryResult" },
+                  { "$ref": "#/$defs/passedWatchdogRecoveryResult" },
+                  { "$ref": "#/$defs/passedAcToBatteryTransitionResult" },
+                  { "$ref": "#/$defs/passedSuspendResumeResult" },
+                  { "$ref": "#/$defs/passedRebootResult" }
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "stage": { "not": { "enum": ["preflight", "firmware-auto-baseline", "live-lifecycle"] } },
+              "samples": {
+                "minItems": 1,
+                "contains": {
+                  "properties": { "freshness": { "const": "fresh" } },
+                  "required": ["freshness"]
+                }
+              },
               "workload": { "$ref": "#/$defs/workload" },
               "thermal_summary": { "$ref": "#/$defs/thermalSummary" },
               "commands": { "minItems": 1 },
@@ -284,6 +494,433 @@
     }
   ],
   "$defs": {
+    "liveLifecycleCaseResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "started_at", "completed_at", "observation", "passed", "detail"],
+      "properties": {
+        "case": {
+          "enum": [
+            "invalid-configuration",
+            "duplicate-process",
+            "normal-stop-restart",
+            "process-kill-recovery",
+            "watchdog-recovery",
+            "ac-to-battery-transition",
+            "suspend-resume",
+            "reboot"
+          ]
+        },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "completed_at": { "$ref": "#/$defs/timestamp" },
+        "observation": {},
+        "passed": { "type": "boolean" },
+        "detail": { "type": "string", "minLength": 1, "pattern": "\\S" }
+      },
+      "oneOf": [
+        { "properties": { "case": { "const": "invalid-configuration" }, "observation": { "anyOf": [{ "$ref": "#/$defs/invalidConfigurationObservation" }, { "type": "null" }] } } },
+        { "properties": { "case": { "const": "duplicate-process" }, "observation": { "anyOf": [{ "$ref": "#/$defs/duplicateProcessObservation" }, { "type": "null" }] } } },
+        { "properties": { "case": { "const": "normal-stop-restart" }, "observation": { "anyOf": [{ "$ref": "#/$defs/normalStopRestartObservation" }, { "type": "null" }] } } },
+        { "properties": { "case": { "const": "process-kill-recovery" }, "observation": { "anyOf": [{ "$ref": "#/$defs/processKillRecoveryObservation" }, { "type": "null" }] } } },
+        { "properties": { "case": { "const": "watchdog-recovery" }, "observation": { "anyOf": [{ "$ref": "#/$defs/watchdogRecoveryObservation" }, { "type": "null" }] } } },
+        { "properties": { "case": { "const": "ac-to-battery-transition" }, "observation": { "anyOf": [{ "$ref": "#/$defs/acToBatteryTransitionObservation" }, { "type": "null" }] } } },
+        { "properties": { "case": { "const": "suspend-resume" }, "observation": { "anyOf": [{ "$ref": "#/$defs/suspendResumeObservation" }, { "type": "null" }] } } },
+        { "properties": { "case": { "const": "reboot" }, "observation": { "anyOf": [{ "$ref": "#/$defs/rebootObservation" }, { "type": "null" }] } } }
+      ]
+    },
+    "liveLifecycleAnyAutoObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_at", "fresh", "enable_readback", "endpoint_identity"],
+      "properties": {
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "fresh": { "type": "boolean" },
+        "enable_readback": { "enum": [0, 1, 2, null] },
+        "endpoint_identity": { "type": "string" }
+      }
+    },
+    "liveLifecycleAnyAutoPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "gpu"],
+      "properties": {
+        "cpu": { "$ref": "#/$defs/liveLifecycleAnyAutoObservation" },
+        "gpu": { "$ref": "#/$defs/liveLifecycleAnyAutoObservation" }
+      }
+    },
+    "liveLifecyclePowerObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_at", "fresh", "source"],
+      "properties": {
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "fresh": { "type": "boolean" },
+        "source": { "enum": ["ac", "battery"] }
+      }
+    },
+    "liveLifecycleProfileObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_at", "fresh", "profile"],
+      "properties": {
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "fresh": { "type": "boolean" },
+        "profile": { "enum": ["ac", "battery"] }
+      }
+    },
+    "invalidConfigurationObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "observed_at", "fresh", "rejected_before_custom_control"],
+      "properties": {
+        "case": { "const": "invalid-configuration" },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "fresh": { "type": "boolean" },
+        "rejected_before_custom_control": { "type": "boolean" }
+      }
+    },
+    "duplicateProcessObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "observed_at", "fresh", "duplicate_rejected", "original_owner_preserved", "original_process_identity", "rejected_process_identity"],
+      "properties": {
+        "case": { "const": "duplicate-process" },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "fresh": { "type": "boolean" },
+        "duplicate_rejected": { "type": "boolean" },
+        "original_owner_preserved": { "type": "boolean" },
+        "original_process_identity": { "type": "string" },
+        "rejected_process_identity": { "type": "string" }
+      }
+    },
+    "normalStopRestartObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "clean_stop", "stopped_at", "auto_before_restart", "restarted_at", "fresh_process", "process_identity_before", "process_identity_after"],
+      "properties": {
+        "case": { "const": "normal-stop-restart" },
+        "clean_stop": { "type": "boolean" },
+        "stopped_at": { "$ref": "#/$defs/timestamp" },
+        "auto_before_restart": { "$ref": "#/$defs/liveLifecycleAnyAutoPair" },
+        "restarted_at": { "$ref": "#/$defs/timestamp" },
+        "fresh_process": { "type": "boolean" },
+        "process_identity_before": { "type": "string" },
+        "process_identity_after": { "type": "string" }
+      }
+    },
+    "processKillRecoveryObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "sigkill_observed", "start_limit_reset_at", "killed_at", "auto_before_restart", "restarted_at", "process_identity_before", "process_identity_after", "restart_delay_millis", "start_limit_burst"],
+      "properties": {
+        "case": { "const": "process-kill-recovery" },
+        "sigkill_observed": { "type": "boolean" },
+        "start_limit_reset_at": { "$ref": "#/$defs/timestamp" },
+        "killed_at": { "$ref": "#/$defs/timestamp" },
+        "auto_before_restart": { "$ref": "#/$defs/liveLifecycleAnyAutoPair" },
+        "restarted_at": { "$ref": "#/$defs/timestamp" },
+        "process_identity_before": { "type": "string" },
+        "process_identity_after": { "type": "string" },
+        "restart_delay_millis": { "type": "integer", "minimum": 0 },
+        "start_limit_burst": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      }
+    },
+    "watchdogRecoveryObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "watchdog_expired", "start_limit_reset_at", "expired_at", "auto_before_restart", "restarted_at", "process_identity_before", "process_identity_after", "restart_delay_millis", "start_limit_burst"],
+      "properties": {
+        "case": { "const": "watchdog-recovery" },
+        "watchdog_expired": { "type": "boolean" },
+        "start_limit_reset_at": { "$ref": "#/$defs/timestamp" },
+        "expired_at": { "$ref": "#/$defs/timestamp" },
+        "auto_before_restart": { "$ref": "#/$defs/liveLifecycleAnyAutoPair" },
+        "restarted_at": { "$ref": "#/$defs/timestamp" },
+        "process_identity_before": { "type": "string" },
+        "process_identity_after": { "type": "string" },
+        "restart_delay_millis": { "type": "integer", "minimum": 0 },
+        "start_limit_burst": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      }
+    },
+    "acToBatteryTransitionObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "before", "after", "selected_profile_after"],
+      "properties": {
+        "case": { "const": "ac-to-battery-transition" },
+        "before": { "$ref": "#/$defs/liveLifecyclePowerObservation" },
+        "after": { "$ref": "#/$defs/liveLifecyclePowerObservation" },
+        "selected_profile_after": { "$ref": "#/$defs/liveLifecycleProfileObservation" }
+      }
+    },
+    "suspendResumeObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "auto_before_sleep", "suspended_at", "suspend_completed", "resumed_at", "process_started_at", "process_identity_before", "process_identity_after"],
+      "properties": {
+        "case": { "const": "suspend-resume" },
+        "auto_before_sleep": { "$ref": "#/$defs/liveLifecycleAnyAutoPair" },
+        "suspended_at": { "$ref": "#/$defs/timestamp" },
+        "suspend_completed": { "type": "boolean" },
+        "resumed_at": { "$ref": "#/$defs/timestamp" },
+        "process_started_at": { "$ref": "#/$defs/timestamp" },
+        "process_identity_before": { "type": "string" },
+        "process_identity_after": { "type": "string" }
+      }
+    },
+    "rebootObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "reboot_completed", "boot_id_before", "boot_id_after", "post_boot_at", "auto_before_arm", "armed_at", "controller_process_identity"],
+      "properties": {
+        "case": { "const": "reboot" },
+        "reboot_completed": { "type": "boolean" },
+        "boot_id_before": { "type": "string" },
+        "boot_id_after": { "type": "string" },
+        "post_boot_at": { "$ref": "#/$defs/timestamp" },
+        "auto_before_arm": { "anyOf": [{ "$ref": "#/$defs/liveLifecycleAnyAutoPair" }, { "type": "null" }] },
+        "armed_at": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "controller_process_identity": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+      }
+    },
+    "liveLifecycleAutoObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_at", "fresh", "enable_readback", "endpoint_identity"],
+      "properties": {
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "fresh": { "const": true },
+        "enable_readback": { "const": 2 },
+        "endpoint_identity": { "type": "string", "minLength": 1 }
+      }
+    },
+    "liveLifecycleAutoPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "gpu"],
+      "properties": {
+        "cpu": { "$ref": "#/$defs/liveLifecycleAutoObservation" },
+        "gpu": { "$ref": "#/$defs/liveLifecycleAutoObservation" }
+      }
+    },
+    "passedInvalidConfigurationResult": {
+      "allOf": [
+        { "$ref": "#/$defs/liveLifecycleCaseResult" },
+        {
+          "properties": {
+            "case": { "const": "invalid-configuration" },
+            "passed": { "const": true },
+            "observation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["case", "observed_at", "fresh", "rejected_before_custom_control"],
+              "properties": {
+                "case": { "const": "invalid-configuration" },
+                "observed_at": { "$ref": "#/$defs/timestamp" },
+                "fresh": { "const": true },
+                "rejected_before_custom_control": { "const": true }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "passedDuplicateProcessResult": {
+      "allOf": [
+        { "$ref": "#/$defs/liveLifecycleCaseResult" },
+        {
+          "properties": {
+            "case": { "const": "duplicate-process" },
+            "passed": { "const": true },
+            "observation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["case", "observed_at", "fresh", "duplicate_rejected", "original_owner_preserved", "original_process_identity", "rejected_process_identity"],
+              "properties": {
+                "case": { "const": "duplicate-process" },
+                "observed_at": { "$ref": "#/$defs/timestamp" },
+                "fresh": { "const": true },
+                "duplicate_rejected": { "const": true },
+                "original_owner_preserved": { "const": true },
+                "original_process_identity": { "type": "string", "minLength": 1 },
+                "rejected_process_identity": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "passedNormalStopRestartResult": {
+      "allOf": [
+        { "$ref": "#/$defs/liveLifecycleCaseResult" },
+        {
+          "properties": {
+            "case": { "const": "normal-stop-restart" },
+            "passed": { "const": true },
+            "observation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["case", "clean_stop", "stopped_at", "auto_before_restart", "restarted_at", "fresh_process", "process_identity_before", "process_identity_after"],
+              "properties": {
+                "case": { "const": "normal-stop-restart" },
+                "clean_stop": { "const": true },
+                "stopped_at": { "$ref": "#/$defs/timestamp" },
+                "auto_before_restart": { "$ref": "#/$defs/liveLifecycleAutoPair" },
+                "restarted_at": { "$ref": "#/$defs/timestamp" },
+                "fresh_process": { "const": true },
+                "process_identity_before": { "type": "string", "minLength": 1 },
+                "process_identity_after": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "passedProcessKillRecoveryResult": {
+      "allOf": [
+        { "$ref": "#/$defs/liveLifecycleCaseResult" },
+        {
+          "properties": {
+            "case": { "const": "process-kill-recovery" },
+            "passed": { "const": true },
+            "observation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["case", "sigkill_observed", "start_limit_reset_at", "killed_at", "auto_before_restart", "restarted_at", "process_identity_before", "process_identity_after", "restart_delay_millis", "start_limit_burst"],
+              "properties": {
+                "case": { "const": "process-kill-recovery" },
+                "sigkill_observed": { "const": true },
+                "start_limit_reset_at": { "$ref": "#/$defs/timestamp" },
+                "killed_at": { "$ref": "#/$defs/timestamp" },
+                "auto_before_restart": { "$ref": "#/$defs/liveLifecycleAutoPair" },
+                "restarted_at": { "$ref": "#/$defs/timestamp" },
+                "process_identity_before": { "type": "string", "minLength": 1 },
+                "process_identity_after": { "type": "string", "minLength": 1 },
+                "restart_delay_millis": { "const": 2000 },
+                "start_limit_burst": { "const": 2 }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "passedWatchdogRecoveryResult": {
+      "allOf": [
+        { "$ref": "#/$defs/liveLifecycleCaseResult" },
+        {
+          "properties": {
+            "case": { "const": "watchdog-recovery" },
+            "passed": { "const": true },
+            "observation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["case", "watchdog_expired", "start_limit_reset_at", "expired_at", "auto_before_restart", "restarted_at", "process_identity_before", "process_identity_after", "restart_delay_millis", "start_limit_burst"],
+              "properties": {
+                "case": { "const": "watchdog-recovery" },
+                "watchdog_expired": { "const": true },
+                "start_limit_reset_at": { "$ref": "#/$defs/timestamp" },
+                "expired_at": { "$ref": "#/$defs/timestamp" },
+                "auto_before_restart": { "$ref": "#/$defs/liveLifecycleAutoPair" },
+                "restarted_at": { "$ref": "#/$defs/timestamp" },
+                "process_identity_before": { "type": "string", "minLength": 1 },
+                "process_identity_after": { "type": "string", "minLength": 1 },
+                "restart_delay_millis": { "const": 2000 },
+                "start_limit_burst": { "const": 2 }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "passedAcToBatteryTransitionResult": {
+      "allOf": [
+        { "$ref": "#/$defs/liveLifecycleCaseResult" },
+        {
+          "properties": {
+            "case": { "const": "ac-to-battery-transition" },
+            "passed": { "const": true },
+            "observation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["case", "before", "after", "selected_profile_after"],
+              "properties": {
+                "case": { "const": "ac-to-battery-transition" },
+                "before": {
+                  "allOf": [
+                    { "$ref": "#/$defs/liveLifecyclePowerObservation" },
+                    { "properties": { "fresh": { "const": true }, "source": { "const": "ac" } } }
+                  ]
+                },
+                "after": {
+                  "allOf": [
+                    { "$ref": "#/$defs/liveLifecyclePowerObservation" },
+                    { "properties": { "fresh": { "const": true }, "source": { "const": "battery" } } }
+                  ]
+                },
+                "selected_profile_after": {
+                  "allOf": [
+                    { "$ref": "#/$defs/liveLifecycleProfileObservation" },
+                    { "properties": { "fresh": { "const": true }, "profile": { "const": "battery" } } }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "passedSuspendResumeResult": {
+      "allOf": [
+        { "$ref": "#/$defs/liveLifecycleCaseResult" },
+        {
+          "properties": {
+            "case": { "const": "suspend-resume" },
+            "passed": { "const": true },
+            "observation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["case", "auto_before_sleep", "suspended_at", "suspend_completed", "resumed_at", "process_started_at", "process_identity_before", "process_identity_after"],
+              "properties": {
+                "case": { "const": "suspend-resume" },
+                "auto_before_sleep": { "$ref": "#/$defs/liveLifecycleAutoPair" },
+                "suspended_at": { "$ref": "#/$defs/timestamp" },
+                "suspend_completed": { "const": true },
+                "resumed_at": { "$ref": "#/$defs/timestamp" },
+                "process_started_at": { "$ref": "#/$defs/timestamp" },
+                "process_identity_before": { "type": "string", "minLength": 1 },
+                "process_identity_after": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "passedRebootResult": {
+      "allOf": [
+        { "$ref": "#/$defs/liveLifecycleCaseResult" },
+        {
+          "properties": {
+            "case": { "const": "reboot" },
+            "passed": { "const": true },
+            "observation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["case", "reboot_completed", "boot_id_before", "boot_id_after", "post_boot_at", "auto_before_arm", "armed_at", "controller_process_identity"],
+              "properties": {
+                "case": { "const": "reboot" },
+                "reboot_completed": { "const": true },
+                "boot_id_before": { "$ref": "#/$defs/identifier" },
+                "boot_id_after": { "$ref": "#/$defs/identifier" },
+                "post_boot_at": { "$ref": "#/$defs/timestamp" },
+                "auto_before_arm": { "$ref": "#/$defs/liveLifecycleAutoPair" },
+                "armed_at": { "$ref": "#/$defs/timestamp" },
+                "controller_process_identity": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      ]
+    },
     "identifier": {
       "type": "string",
       "minLength": 1,
@@ -532,6 +1169,9 @@
       "required": ["timestamp", "fan", "field", "value", "endpoint_identity", "outcome"],
       "properties": {
         "timestamp": { "$ref": "#/$defs/timestamp" },
+        "source_timestamp": { "$ref": "#/$defs/timestamp" },
+        "fresh": { "type": "boolean" },
+        "boot_id": { "$ref": "#/$defs/identifier" },
         "fan": { "$ref": "#/$defs/fan" },
         "field": { "enum": ["pwm", "enable", "rpm"] },
         "value": { "$ref": "#/$defs/nullableU32" },
@@ -585,6 +1225,7 @@
       "required": ["timestamp", "from", "to"],
       "properties": {
         "timestamp": { "$ref": "#/$defs/timestamp" },
+        "boot_id": { "$ref": "#/$defs/identifier" },
         "from": { "$ref": "#/$defs/identifier" },
         "to": { "$ref": "#/$defs/identifier" }
       }
@@ -600,6 +1241,7 @@
       "required": ["timestamp", "code", "detail"],
       "properties": {
         "timestamp": { "$ref": "#/$defs/timestamp" },
+        "boot_id": { "$ref": "#/$defs/identifier" },
         "code": { "$ref": "#/$defs/identifier" },
         "detail": { "type": "string", "minLength": 1 }
       }
