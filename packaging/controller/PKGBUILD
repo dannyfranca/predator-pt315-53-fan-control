@@ -1,0 +1,71 @@
+# Maintainer: Danny Franca
+
+pkgname=pt31553-fan-control
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Fail-closed PT315-53 fan controller and qualification suite'
+arch=('x86_64')
+url='https://github.com/dannyfranca/predator-pt315-53-fan-control'
+license=('MIT')
+depends=('gcc-libs' 'glibc' 'systemd')
+makedepends=('cargo')
+backup=('etc/pt31553-fan-control/controller.toml')
+_commit='c75d72cb17c8503644799accb286e70c42d3cee7'
+source=(
+  "$pkgname-$pkgver.tar.gz::$url/archive/$_commit.tar.gz"
+  'controller.toml'
+  'pt31553-fan-control.tmpfiles'
+)
+sha256sums=(
+  '4385d64c6cf6dc7ac675c194076a6a89f09c19fc04651ae48951a8cc3abc784a'
+  '11b6ff1c3b3b8da256cafa31c0933be3ff24ff4bea4c06c6261a40e9af62a2e0'
+  '3da184239b5d4472c4bee3857f62443ba9734dd70fa614971900852f1689851c'
+)
+
+prepare() {
+  cd "predator-pt315-53-fan-control-$_commit"
+  cargo fetch --locked --target x86_64-unknown-linux-gnu
+}
+
+build() {
+  cd "predator-pt315-53-fan-control-$_commit"
+  cargo build --frozen --release --workspace --bins
+}
+
+check() {
+  cd "predator-pt315-53-fan-control-$_commit"
+  RUSTFLAGS="${RUSTFLAGS:-} -C debug-assertions=yes" cargo test --frozen --workspace
+}
+
+package() {
+  local source_root="$srcdir/predator-pt315-53-fan-control-$_commit"
+
+  install -Dm755 "$source_root/target/release/fan-control-daemon" \
+    "$pkgdir/usr/bin/pt31553-fand"
+  install -Dm755 "$source_root/target/release/fan-control-restore" \
+    "$pkgdir/usr/bin/pt31553-fan-restore"
+  install -Dm755 "$source_root/target/release/fan-control-qualify" \
+    "$pkgdir/usr/bin/pt31553-fan-qualify"
+
+  install -Dm644 "$source_root/systemd/pt31553-fand.service" \
+    "$pkgdir/usr/lib/systemd/system/pt31553-fand.service"
+  install -Dm644 "$source_root/systemd/pt31553-fan-sleep-guard.service" \
+    "$pkgdir/usr/lib/systemd/system/pt31553-fan-sleep-guard.service"
+  install -Dm644 "$source_root/systemd/90-pt31553-fan-control.preset" \
+    "$pkgdir/usr/lib/systemd/system-preset/90-pt31553-fan-control.preset"
+  install -Dm644 "$srcdir/pt31553-fan-control.tmpfiles" \
+    "$pkgdir/usr/lib/tmpfiles.d/pt31553-fan-control.conf"
+
+  install -Dm640 "$srcdir/controller.toml" \
+    "$pkgdir/etc/pt31553-fan-control/controller.toml"
+  install -Dm644 "$source_root/schemas/evidence.json" \
+    "$pkgdir/usr/share/pt31553-fan-control/schemas/evidence.json"
+  install -Dm644 "$source_root/schemas/evidence-v2.json" \
+    "$pkgdir/usr/share/pt31553-fan-control/schemas/evidence-v2.json"
+
+  install -dm700 \
+    "$pkgdir/var/lib/pt31553-fan-control" \
+    "$pkgdir/var/lib/pt31553-fan-control/evidence"
+  install -Dm644 "$source_root/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
