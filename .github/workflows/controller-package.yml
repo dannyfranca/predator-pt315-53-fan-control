@@ -44,9 +44,10 @@ jobs:
         run: |
           useradd --create-home builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
-          install -d -o builder -g builder -m 0755 /home/builder/controller-package
-          cp -a "$GITHUB_WORKSPACE/packaging/controller/." /home/builder/controller-package/
-          chown -R builder:builder /home/builder/controller-package
+          install -d -o root -g root -m 0755 /opt
+          install -d -o builder -g builder -m 0755 /opt/controller-package
+          cp -a "$GITHUB_WORKSPACE/packaging/controller/." /opt/controller-package/
+          chown -R builder:builder /opt/controller-package
 
       - name: Test current package contract
         run: |
@@ -56,27 +57,27 @@ jobs:
       - name: Build and test locked package
         run: |
           # GitHub mounts its workspace beneath group-writable runner directories.
-          # Build beneath the builder's trusted home so ownership-sensitive tests
-          # exercise the same ancestor contract as a real package build host.
-          su builder -c 'cd /home/builder/controller-package && makepkg --noconfirm --cleanbuild'
+          # Build beneath an explicitly root-confined prefix so ownership-sensitive
+          # tests exercise the same ancestor contract as a real package build host.
+          su builder -c 'cd /opt/controller-package && makepkg --noconfirm --cleanbuild'
 
       - name: Test contract against locked source
         run: |
           su builder -s /bin/bash -c '
             cd "$GITHUB_WORKSPACE"
             source packaging/controller/PKGBUILD
-            export PT31553_LOCKED_SOURCE_ROOT="/home/builder/controller-package/src/predator-pt315-53-fan-control-$_commit"
+            export PT31553_LOCKED_SOURCE_ROOT="/opt/controller-package/src/predator-pt315-53-fan-control-$_commit"
             test -d "$PT31553_LOCKED_SOURCE_ROOT"
             cargo test -p fan-control-core --test controller_package
           '
 
       - name: Verify package contents
         run: |
-          mapfile -t packages < <(su builder -s /bin/bash -c 'cd /home/builder/controller-package && makepkg --packagelist')
+          mapfile -t packages < <(su builder -s /bin/bash -c 'cd /opt/controller-package && makepkg --packagelist')
           test "${#packages[@]}" -eq 1
           package=${packages[0]}
           test -f "$package"
-          test "$(find /home/builder/controller-package -maxdepth 1 -type f -name '*.pkg.tar.zst' -print | wc -l)" -eq 1
+          test "$(find /opt/controller-package -maxdepth 1 -type f -name '*.pkg.tar.zst' -print | wc -l)" -eq 1
           bsdtar -tf "$package" > /tmp/controller-package-contents
           bsdtar -tvf "$package" | awk '
             $3 != "root" || $4 != "root" {
