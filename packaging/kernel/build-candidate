@@ -127,10 +127,10 @@ if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
     )
     [[ "${#produced_package_paths[@]}" -eq "${#expected_packages[@]}" ]]
     declare -A produced_packages=()
-    for package in "${produced_package_paths[@]}"; do
-        package=$(realpath "$package")
-        [[ "$package" == "$SOURCE_LOCK_OUTPUT/"* && -f "$package" ]]
-        produced_packages["$package"]=1
+    for produced in "${produced_package_paths[@]}"; do
+        produced=$(realpath "$produced")
+        [[ "$produced" == "$SOURCE_LOCK_OUTPUT/"* && -f "$produced" ]]
+        produced_packages["$produced"]=1
     done
     [[ "${#produced_packages[@]}" -eq "${#expected_packages[@]}" ]]
     for package in "${package_paths[@]}"; do

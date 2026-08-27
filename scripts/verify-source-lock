@@ -72,7 +72,7 @@ STAGE1_PATCH_SHA256 = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9ca
 STAGE2_PATCH_SHA256 = "67b0d9fcd62451ae717e452d63f6419c02d8f4a34a82a060229cde5b3a96009d"
 STAGE1_BUILD_WRAPPER_SHA256 = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
 STAGE2_BUILD_WRAPPER_SHA256 = "5b47af002478f06de04575ba56e233959d83d855758ce13ad0a0c919675f42f7"
-PACKAGE_BUILD_WRAPPER_SHA256 = "8230022adc33c683798662d3fd63ae46b844fff9262556ddd8db9b0ec3bfdae5"
+PACKAGE_BUILD_WRAPPER_SHA256 = "2d64e4cdd2c207c827d15f9914c130d5f88386f2045bad8fcd1d7c57eaeea486"
 STAGE1_BC_SHA256 = "b3740d2c34090685b6ffe1b6a6b4631c45edd4801dc7a2bde1049de92165b0d3"
 STAGE1_BC_PATH = "build-tools/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
 STAGE1_BC_REVISION = "1.08.2-1.1"
@@ -1397,11 +1397,12 @@ def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> Non
                 'makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --skippgpcheck \\\n        --skipchecksums --noconfirm --cleanbuild 2>&1 \\': "does not run the locked clean package build",
                 '| tee "$SOURCE_LOCK_OUTPUT/build.log"': "does not retain the package build log",
                 'makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --printsrcinfo': "does not retain effective source metadata",
-                'if ! makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --packagelist \\\n+        >"$package_list"; then': "does not propagate package-plan failures",
+                'if ! makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --packagelist \\\n        >"$package_list"; then': "does not propagate package-plan failures",
                 'bsdtar -xOf "$package" "$entry" >"$metadata/$entry"': "does not retain package metadata",
                 'sha256sum "$package"': "does not retain package hashes",
                 'grep -Fxq "pkgname = $package_name" "$metadata/.PKGINFO"': "does not bind archive metadata to expected package names",
                 '[[ "$package" == "$SOURCE_LOCK_OUTPUT/"* && -f "$package" ]]': "does not confine package outputs",
+                '[[ "$produced" == "$SOURCE_LOCK_OUTPUT/"* && -f "$produced" ]]': "does not confine emitted package outputs",
                 'find "$SOURCE_LOCK_OUTPUT" -mindepth 1 -maxdepth 1 -print -quit': "does not reject stale package evidence",
                 "mapfile -d '' -t produced_package_paths": "does not enumerate the complete emitted package set",
                 '[[ "${#produced_package_paths[@]}" -eq "${#expected_packages[@]}" ]]': "does not reject additional or missing package archives",

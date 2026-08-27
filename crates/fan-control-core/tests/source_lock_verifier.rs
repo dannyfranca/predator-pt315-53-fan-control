@@ -831,6 +831,30 @@ fn validate_patch_wrapper(wrapper: &[u8], candidate: &str) -> Output {
     output
 }
 
+fn validate_checked_in_build_metadata() -> Output {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel");
+    Command::new("python3")
+        .args([
+            "-c",
+            r#"import io,pathlib,runpy,sys
+m=runpy.run_path(sys.argv[1], run_name='checked_in_build_metadata_test')
+root=pathlib.Path(sys.argv[2])
+lock,_raw=m['load_manifest'](root/'source-lock.toml')
+inputs=m['validate_manifest'](lock)
+class CheckedInBundle:
+ def open_regular(self,path,_context):
+  candidate=root/path
+  if candidate.is_file(): return candidate.open('rb')
+  return io.BytesIO(b'{"os":"linux","architecture":"amd64"}')
+m['verify_build_metadata'](CheckedInBundle(),lock,inputs)
+"#,
+        ])
+        .arg(verifier())
+        .arg(root)
+        .output()
+        .expect("validate checked-in build metadata")
+}
+
 fn validate_checked_in_stage_two_manifest(mutation: &str) -> Output {
     let lock =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/source-lock.toml");
@@ -1855,6 +1879,9 @@ fn package_wrapper_preserves_the_exact_package_set_contract() {
         "linux-cachyos-pt31553-7.1.8-1-package-set",
     );
     assert!(accepted.status.success(), "{}", failure_text(&accepted));
+
+    let metadata = validate_checked_in_build_metadata();
+    assert!(metadata.status.success(), "{}", failure_text(&metadata));
 }
 
 #[test]

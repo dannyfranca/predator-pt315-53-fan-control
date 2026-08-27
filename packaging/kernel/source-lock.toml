@@ -153,9 +153,9 @@ name = "build-wrapper"
 kind = "build-wrapper"
 path = "build-candidate"
 origin = "repository:packaging/kernel/build-candidate"
-revision = "8230022adc33c683798662d3fd63ae46b844fff9262556ddd8db9b0ec3bfdae5"
-sha256 = "8230022adc33c683798662d3fd63ae46b844fff9262556ddd8db9b0ec3bfdae5"
-size = 10997
+revision = "2d64e4cdd2c207c827d15f9914c130d5f88386f2045bad8fcd1d7c57eaeea486"
+sha256 = "2d64e4cdd2c207c827d15f9914c130d5f88386f2045bad8fcd1d7c57eaeea486"
+size = 11003
 
 [[inputs]]
 name = "makepkg-config"
