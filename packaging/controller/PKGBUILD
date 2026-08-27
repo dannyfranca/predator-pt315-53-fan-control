@@ -2,7 +2,7 @@
 
 pkgname=pt31553-fan-control
 pkgver=0.1.0
-pkgrel=5
+pkgrel=6
 pkgdesc='Fail-closed PT315-53 fan controller and qualification suite'
 arch=('x86_64')
 url='https://github.com/dannyfranca/predator-pt315-53-fan-control'
@@ -39,9 +39,10 @@ build() {
 check() {
   umask 0022
   cd "predator-pt315-53-fan-control-$_commit"
-  # The ownership tests intentionally reject group-writable ancestors. Create
-  # their package-local fixture parent explicitly instead of inheriting a build
-  # host's directory-creation policy.
+  # build() creates target directories after prepare() hardens the extracted
+  # tree. Re-harden every directory before ownership-sensitive tests run, then
+  # create their package-local fixture parent with an explicit safe mode.
+  find . -type d -exec chmod go-w {} +
   install -d -m 0755 crates/fan-control-core/target
   RUSTFLAGS="${RUSTFLAGS:-} -C debug-assertions=yes" cargo test --frozen --workspace
 }

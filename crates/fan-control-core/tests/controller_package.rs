@@ -191,7 +191,7 @@ fn prepare_hardens_reused_source_ancestors() {
     let output = Command::new("/bin/bash")
         .args([
             "-c",
-            "set -euo pipefail; source \"$1\"; cargo() { test \"$(umask)\" = 0022; test \"$(stat -c %a \"$srcdir\")\" = 755; test \"$(stat -c %a \"$PWD\")\" = 755; test \"$(stat -c %a \"$PWD/crates/fan-control-core\")\" = 755; }; (umask 0002; prepare); (umask 0002; build); (umask 0002; check)",
+            "set -euo pipefail; source \"$1\"; cargo() { test \"$(umask)\" = 0022; test \"$(stat -c %a \"$srcdir\")\" = 755; test \"$(stat -c %a \"$PWD\")\" = 755; test \"$(stat -c %a \"$PWD/crates/fan-control-core\")\" = 755; if test \"$1\" = build; then install -d -m 0775 target; elif test \"$1\" = test; then test \"$(stat -c %a target)\" = 755; fi; }; (umask 0002; prepare); (umask 0002; build); (umask 0002; check)",
             "package-prepare-test",
         ])
         .arg(package_root().join("PKGBUILD"))
@@ -208,6 +208,7 @@ fn prepare_hardens_reused_source_ancestors() {
     assert_eq!(mode(&srcdir), 0o755);
     assert_eq!(mode(&source_root), 0o755);
     assert_eq!(mode(&nested_crate), 0o755);
+    assert_eq!(mode(source_root.join("target")), 0o755);
     assert_eq!(mode(nested_crate.join("target")), 0o755);
 
     fs::remove_dir_all(root).unwrap();
