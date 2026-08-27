@@ -491,7 +491,7 @@ fn require_equal<T: PartialEq>(
     }
 }
 
-fn sha256_hex(source: &[u8]) -> String {
+pub(crate) fn sha256_hex(source: &[u8]) -> String {
     format!("{:x}", Sha256::digest(source))
 }
 

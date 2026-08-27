@@ -1,11 +1,10 @@
 use crate::{
     CompatibilityDeclarationV1, EnvelopeValidationError, KernelIdentity, ModuleIdentity,
     QualificationRecordV2, ValidatedConfig,
-    authority::{requalification_policy_snapshot, validate_record_identity},
+    authority::{requalification_policy_snapshot, sha256_hex, validate_record_identity},
     compatibility::validate_declaration,
     validate_against_protected_envelope,
 };
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 /// Evidence that the physical fans and board have not been replaced since qualification.
@@ -74,7 +73,7 @@ impl AbbreviatedRecheckResults {
         Self {
             baseline_qualification,
             candidate_compatibility,
-            protected_policy_sha256: policy_source_sha256(protected_policy_source),
+            protected_policy_sha256: sha256_hex(protected_policy_source.as_bytes()),
             combined_ac_workload,
             outcomes,
         }
@@ -265,10 +264,6 @@ pub fn decide_requalification(
     }
 
     RequalificationDecision::EligibleAfterAbbreviatedRequalification
-}
-
-fn policy_source_sha256(source: &str) -> String {
-    format!("{:x}", Sha256::digest(source.as_bytes()))
 }
 
 /// Exhaustively partitions compatibility fields into material drift and the only fields a

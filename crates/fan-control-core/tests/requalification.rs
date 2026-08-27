@@ -12,22 +12,6 @@ use support::{HASH_B, PROTECTED_POLICY, compatibility_declaration, matching_reco
 
 fn decision(
     candidate_compatibility: &CompatibilityDeclarationV1,
-    candidate_policy: &str,
-    candidate_config: &str,
-    physical_hardware: PhysicalHardwareContinuity,
-    abbreviated_rechecks: Option<&AbbreviatedRecheckResults>,
-) -> RequalificationDecision {
-    decision_with_policy_identity(
-        candidate_compatibility,
-        candidate_policy,
-        candidate_config,
-        physical_hardware,
-        abbreviated_rechecks,
-    )
-}
-
-fn decision_with_policy_identity(
-    candidate_compatibility: &CompatibilityDeclarationV1,
     candidate_policy_source: &str,
     candidate_config: &str,
     physical_hardware: PhysicalHardwareContinuity,
@@ -145,7 +129,7 @@ fn protected_policy_metadata_or_calibration_drift_requires_full_requalification(
         1,
     );
     assert_eq!(
-        decision_with_policy_identity(
+        decision(
             &baseline_compatibility(),
             &changed_policy,
             &protected_configuration(),
