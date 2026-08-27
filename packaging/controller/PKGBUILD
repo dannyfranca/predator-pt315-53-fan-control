@@ -2,7 +2,7 @@
 
 pkgname=pt31553-fan-control
 pkgver=0.1.0
-pkgrel=3
+pkgrel=4
 pkgdesc='Fail-closed PT315-53 fan controller and qualification suite'
 arch=('x86_64')
 url='https://github.com/dannyfranca/predator-pt315-53-fan-control'
@@ -21,9 +21,11 @@ sha256sums=(
 prepare() {
   umask 0022
   cd "predator-pt315-53-fan-control-$_commit"
-  # GitHub archives may preserve a group-writable top-level directory. Keep
-  # ownership-sensitive tests and build outputs beneath trusted ancestors.
-  chmod go-w "$srcdir" .
+  # GitHub archives preserve group-writable directories throughout the source
+  # tree. Keep ownership-sensitive tests and build outputs beneath trusted
+  # ancestors, including package-local test fixture directories.
+  chmod go-w "$srcdir"
+  find . -type d -exec chmod go-w {} +
   cargo fetch --locked --target x86_64-unknown-linux-gnu
 }
 

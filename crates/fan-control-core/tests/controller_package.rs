@@ -157,14 +157,21 @@ fn prepare_hardens_reused_source_ancestors() {
     ));
     let srcdir = root.join("src");
     let source_root = srcdir.join(format!("predator-pt315-53-fan-control-{SOURCE_COMMIT}"));
-    fs::create_dir_all(&source_root).unwrap();
+    let nested_crate = source_root.join("crates/fan-control-core");
+    fs::create_dir_all(&nested_crate).unwrap();
     fs::set_permissions(&srcdir, fs::Permissions::from_mode(0o775)).unwrap();
     fs::set_permissions(&source_root, fs::Permissions::from_mode(0o775)).unwrap();
+    fs::set_permissions(
+        source_root.join("crates"),
+        fs::Permissions::from_mode(0o775),
+    )
+    .unwrap();
+    fs::set_permissions(&nested_crate, fs::Permissions::from_mode(0o775)).unwrap();
 
     let output = Command::new("/bin/bash")
         .args([
             "-c",
-            "set -euo pipefail; source \"$1\"; cargo() { test \"$(umask)\" = 0022; test \"$(stat -c %a \"$srcdir\")\" = 755; test \"$(stat -c %a \"$PWD\")\" = 755; }; (umask 0002; prepare); (umask 0002; build); (umask 0002; check)",
+            "set -euo pipefail; source \"$1\"; cargo() { test \"$(umask)\" = 0022; test \"$(stat -c %a \"$srcdir\")\" = 755; test \"$(stat -c %a \"$PWD\")\" = 755; test \"$(stat -c %a \"$PWD/crates/fan-control-core\")\" = 755; }; (umask 0002; prepare); (umask 0002; build); (umask 0002; check)",
             "package-prepare-test",
         ])
         .arg(package_root().join("PKGBUILD"))
@@ -180,6 +187,7 @@ fn prepare_hardens_reused_source_ancestors() {
     );
     assert_eq!(mode(&srcdir), 0o755);
     assert_eq!(mode(&source_root), 0o755);
+    assert_eq!(mode(&nested_crate), 0o755);
 
     fs::remove_dir_all(root).unwrap();
 }

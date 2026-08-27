@@ -1,7 +1,7 @@
 pkgbase = pt31553-fan-control
 	pkgdesc = Fail-closed PT315-53 fan controller and qualification suite
 	pkgver = 0.1.0
-	pkgrel = 3
+	pkgrel = 4
 	url = https://github.com/dannyfranca/predator-pt315-53-fan-control
 	arch = x86_64
 	license = MIT
