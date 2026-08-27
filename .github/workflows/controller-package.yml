@@ -48,6 +48,9 @@ jobs:
           install -d -o builder -g builder -m 0755 /opt/controller-package
           cp -a "$GITHUB_WORKSPACE/packaging/controller/." /opt/controller-package/
           chown -R builder:builder /opt/controller-package
+          # cp -a preserves the group-writable checkout directory mode on the
+          # destination itself, so restore the trusted build-prefix boundary.
+          chmod 0755 /opt/controller-package
 
       - name: Test current package contract
         run: |

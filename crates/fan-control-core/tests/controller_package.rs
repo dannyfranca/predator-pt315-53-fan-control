@@ -127,6 +127,28 @@ fn source_metadata_is_exact_and_reproducible() {
 }
 
 #[test]
+fn ci_rehardens_the_build_prefix_after_copying_archived_recipe_metadata() {
+    let workflow =
+        fs::read_to_string(repository_root().join(".github/workflows/controller-package.yml"))
+            .unwrap();
+    let copy = workflow
+        .find("cp -a \"$GITHUB_WORKSPACE/packaging/controller/.\" /opt/controller-package/")
+        .unwrap();
+    let harden = workflow.find("chmod 0755 /opt/controller-package").unwrap();
+    let locked_package_build = workflow
+        .find("su builder -c 'cd /opt/controller-package && makepkg --noconfirm --cleanbuild'")
+        .unwrap();
+
+    assert_eq!(
+        workflow
+            .matches("chmod 0755 /opt/controller-package")
+            .count(),
+        1
+    );
+    assert!(copy < harden && harden < locked_package_build);
+}
+
+#[test]
 fn editable_example_is_valid_but_explicitly_not_authority() {
     let source = fs::read_to_string(contract_source_root().join("config/example.toml")).unwrap();
     validate_config_v1(parse_config_v1(&source).unwrap()).unwrap();
