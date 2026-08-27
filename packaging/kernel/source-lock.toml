@@ -1,5 +1,5 @@
 format = 1
-candidate = "linux-cachyos-gcc-7.1.8-stage-2-pwm"
+candidate = "linux-cachyos-pt31553-7.1.8-1-package-set"
 release_tag = "cachyos-7.1.8-1"
 source_commit = "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
 source_tree = "a51d0ee1eeafc983129ec95f39cde1405e12eb28"
@@ -86,6 +86,33 @@ sha256 = "ef721ae680109993eca463c8847553cf8c2775f6626da4ea9b460f0588b7969b"
 size = 293290
 
 [[inputs]]
+name = "nvidia-open-source"
+kind = "nvidia-source"
+path = "NVIDIA-kernel-module-source-610.57.04.tar.xz"
+origin = "https://download.nvidia.com/XFree86/NVIDIA-kernel-module-source/NVIDIA-kernel-module-source-610.57.04.tar.xz"
+revision = "610.57.04"
+sha256 = "0be1ce1905f579e68c1701c1286e15ddf02f5243e625773f5a997a8325dc856d"
+size = 26177484
+
+[[inputs]]
+name = "nvidia-patch-dsc"
+kind = "nvidia-patch"
+path = "nvidia/0002-fix-dsc-correct-RC-parameter-tables-to-match-VESA-DS.patch"
+origin = "https://raw.githubusercontent.com/CachyOS/kernel-patches/fcdc4806b62f86b62a61b92c4b7213a1759537e5/7.1/misc/nvidia/0002-fix-dsc-correct-RC-parameter-tables-to-match-VESA-DS.patch"
+revision = "fcdc4806b62f86b62a61b92c4b7213a1759537e5"
+sha256 = "71008a4f65cd598c2346e22046e87f88aaa8c04f04402f025ebc9888c8fa443b"
+size = 5951
+
+[[inputs]]
+name = "nvidia-patch-vr"
+kind = "nvidia-patch"
+path = "nvidia/0004-fix-dp-add-Bigscreen-Beyond-VR-headset-to-WAR-databa.patch"
+origin = "https://raw.githubusercontent.com/CachyOS/kernel-patches/fcdc4806b62f86b62a61b92c4b7213a1759537e5/7.1/misc/nvidia/0004-fix-dp-add-Bigscreen-Beyond-VR-headset-to-WAR-databa.patch"
+revision = "fcdc4806b62f86b62a61b92c4b7213a1759537e5"
+sha256 = "bb652257e5cb0dea432a83c971d01406b7acf9cbdb054adf8954c564be0e4e74"
+size = 1821
+
+[[inputs]]
 name = "pt31553-telemetry"
 kind = "patch"
 path = "patches/0001-acer-wmi-add-pt31553-telemetry.patch"
@@ -117,18 +144,18 @@ name = "build-environment"
 kind = "build-environment"
 path = "build-environment.toml"
 origin = "repository:packaging/kernel/build-environment.toml"
-revision = "307869448e3d43e42420b8bd45bcb0f8932bb15c2fff8269c54c7ef85ea0ff9f"
-sha256 = "307869448e3d43e42420b8bd45bcb0f8932bb15c2fff8269c54c7ef85ea0ff9f"
-size = 1438
+revision = "07edbd518f75b1e4d333d2fce75100e1dd8c927b42db0e5769eec95d82cc6ab6"
+sha256 = "07edbd518f75b1e4d333d2fce75100e1dd8c927b42db0e5769eec95d82cc6ab6"
+size = 2024
 
 [[inputs]]
 name = "build-wrapper"
 kind = "build-wrapper"
 path = "build-candidate"
 origin = "repository:packaging/kernel/build-candidate"
-revision = "5b47af002478f06de04575ba56e233959d83d855758ce13ad0a0c919675f42f7"
-sha256 = "5b47af002478f06de04575ba56e233959d83d855758ce13ad0a0c919675f42f7"
-size = 6457
+revision = "8230022adc33c683798662d3fd63ae46b844fff9262556ddd8db9b0ec3bfdae5"
+sha256 = "8230022adc33c683798662d3fd63ae46b844fff9262556ddd8db9b0ec3bfdae5"
+size = 10997
 
 [[inputs]]
 name = "makepkg-config"

@@ -38,7 +38,13 @@ SINGLETON_KINDS = {
     "makepkg-config",
     "toolchain-image",
 }
-KINDS = SINGLETON_KINDS | {"build-tool", "patch", "toolchain-blob"}
+KINDS = SINGLETON_KINDS | {
+    "build-tool",
+    "nvidia-patch",
+    "nvidia-source",
+    "patch",
+    "toolchain-blob",
+}
 TOP_LEVEL = {
     "format",
     "candidate",
@@ -61,10 +67,12 @@ OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW
 STAGE0_CANDIDATE = "linux-cachyos-gcc-7.1.8-stage-0"
 STAGE1_CANDIDATE = "linux-cachyos-gcc-7.1.8-stage-1-telemetry"
 STAGE2_CANDIDATE = "linux-cachyos-gcc-7.1.8-stage-2-pwm"
+PACKAGE_CANDIDATE = "linux-cachyos-pt31553-7.1.8-1-package-set"
 STAGE1_PATCH_SHA256 = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9cab052b63"
 STAGE2_PATCH_SHA256 = "67b0d9fcd62451ae717e452d63f6419c02d8f4a34a82a060229cde5b3a96009d"
 STAGE1_BUILD_WRAPPER_SHA256 = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
 STAGE2_BUILD_WRAPPER_SHA256 = "5b47af002478f06de04575ba56e233959d83d855758ce13ad0a0c919675f42f7"
+PACKAGE_BUILD_WRAPPER_SHA256 = "8230022adc33c683798662d3fd63ae46b844fff9262556ddd8db9b0ec3bfdae5"
 STAGE1_BC_SHA256 = "b3740d2c34090685b6ffe1b6a6b4631c45edd4801dc7a2bde1049de92165b0d3"
 STAGE1_BC_PATH = "build-tools/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
 STAGE1_BC_REVISION = "1.08.2-1.1"
@@ -148,11 +156,17 @@ def load_json(stream, context: str) -> tuple[dict, bytes]:
     return value, content
 
 
-def load_manifest(path: Path) -> dict:
+def load_manifest(path: Path) -> tuple[dict, bytes]:
     with read_regular(path, "source lock") as stream:
-        value = load_toml(stream, "source lock")
+        content = stream.read()
+    try:
+        value = tomllib.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        fail(f"source lock: invalid TOML: {error}")
+    if not isinstance(value, dict):
+        fail("source lock: expected a TOML table")
     exact_keys(value, TOP_LEVEL, "source lock")
-    return value
+    return value, content
 
 
 def validate_origin(origin: object, revision: str, sha256: str, release_tag: str, context: str) -> None:
@@ -211,6 +225,7 @@ def validate_manifest(lock: dict) -> list[dict]:
         STAGE0_CANDIDATE: [],
         STAGE1_CANDIDATE: ["pt31553-telemetry"],
         STAGE2_CANDIDATE: ["pt31553-telemetry", "pt31553-pwm"],
+        PACKAGE_CANDIDATE: ["pt31553-telemetry", "pt31553-pwm"],
     }
     if candidate not in candidate_patches:
         fail("source lock.candidate: unsupported qualification stage")
@@ -224,6 +239,8 @@ def validate_manifest(lock: dict) -> list[dict]:
     paths: set[str] = set()
     patch_names: set[str] = set()
     build_tools: list[dict] = []
+    nvidia_sources: list[dict] = []
+    nvidia_patches: list[dict] = []
     kind_counts = {kind: 0 for kind in SINGLETON_KINDS}
     expected_revision = {
         "kernel-source": source_commit,
@@ -257,10 +274,14 @@ def validate_manifest(lock: dict) -> list[dict]:
             patch_names.add(name)
         elif kind == "build-tool":
             build_tools.append(item)
+        elif kind == "nvidia-source":
+            nvidia_sources.append(item)
+        elif kind == "nvidia-patch":
+            nvidia_patches.append(item)
         sha256 = require_hash(item["sha256"], HEX64, f"{context}.sha256")
         revision = require_string(item["revision"], f"{context}.revision")
         required_revision = expected_revision.get(kind, sha256)
-        if kind != "build-tool" and revision != required_revision:
+        if kind not in {"build-tool", "nvidia-patch", "nvidia-source"} and revision != required_revision:
             fail(f"{context}.revision: does not match the identity required for kind {kind}")
         validate_origin(item["origin"], revision, sha256, release_tag, f"{context}.origin")
         if type(item["size"]) is not int or item["size"] < 0:
@@ -272,7 +293,7 @@ def validate_manifest(lock: dict) -> list[dict]:
         fail("source lock.patches: must exactly list unique patch input names")
     if candidate == STAGE0_CANDIDATE and build_tools:
         fail("source lock build tools: stage 0 must not select build tools")
-    if candidate in {STAGE1_CANDIDATE, STAGE2_CANDIDATE}:
+    if candidate in {STAGE1_CANDIDATE, STAGE2_CANDIDATE, PACKAGE_CANDIDATE}:
         if len(build_tools) != 1:
             fail("source lock build tools: patched stages require exactly the pinned bc package")
         bc_tool = build_tools[0]
@@ -290,6 +311,52 @@ def validate_manifest(lock: dict) -> list[dict]:
         }
         if bc_tool != expected_bc:
             fail("source lock build tools: patched-stage bc package identity is not exact")
+    if candidate != PACKAGE_CANDIDATE and (nvidia_sources or nvidia_patches):
+        fail("source lock NVIDIA inputs: only the package-set candidate may select NVIDIA inputs")
+    if candidate == PACKAGE_CANDIDATE:
+        expected_nvidia_sources = [
+            {
+                "name": "nvidia-open-source",
+                "kind": "nvidia-source",
+                "path": "NVIDIA-kernel-module-source-610.57.04.tar.xz",
+                "origin": (
+                    "https://download.nvidia.com/XFree86/NVIDIA-kernel-module-source/"
+                    "NVIDIA-kernel-module-source-610.57.04.tar.xz"
+                ),
+                "revision": "610.57.04",
+                "sha256": "0be1ce1905f579e68c1701c1286e15ddf02f5243e625773f5a997a8325dc856d",
+                "size": 26177484,
+            }
+        ]
+        nvidia_commit = "fcdc4806b62f86b62a61b92c4b7213a1759537e5"
+        expected_nvidia_patches = [
+            {
+                "name": "nvidia-patch-dsc",
+                "kind": "nvidia-patch",
+                "path": "nvidia/0002-fix-dsc-correct-RC-parameter-tables-to-match-VESA-DS.patch",
+                "origin": (
+                    f"https://raw.githubusercontent.com/CachyOS/kernel-patches/{nvidia_commit}/"
+                    "7.1/misc/nvidia/0002-fix-dsc-correct-RC-parameter-tables-to-match-VESA-DS.patch"
+                ),
+                "revision": nvidia_commit,
+                "sha256": "71008a4f65cd598c2346e22046e87f88aaa8c04f04402f025ebc9888c8fa443b",
+                "size": 5951,
+            },
+            {
+                "name": "nvidia-patch-vr",
+                "kind": "nvidia-patch",
+                "path": "nvidia/0004-fix-dp-add-Bigscreen-Beyond-VR-headset-to-WAR-databa.patch",
+                "origin": (
+                    f"https://raw.githubusercontent.com/CachyOS/kernel-patches/{nvidia_commit}/"
+                    "7.1/misc/nvidia/0004-fix-dp-add-Bigscreen-Beyond-VR-headset-to-WAR-databa.patch"
+                ),
+                "revision": nvidia_commit,
+                "sha256": "bb652257e5cb0dea432a83c971d01406b7acf9cbdb054adf8954c564be0e4e74",
+                "size": 1821,
+            },
+        ]
+        if nvidia_sources != expected_nvidia_sources or nvidia_patches != expected_nvidia_patches:
+            fail("source lock NVIDIA inputs: package-set identities are not exact")
     return inputs
 
 
@@ -959,9 +1026,13 @@ def verify_patch_wrapper(wrapper: str, candidate: str) -> None:
             'printf \'\\nsource+=("%s")\\nb2sums+=("SKIP")\\n\' '
             '"$telemetry_patch" >>"$package_root/PKGBUILD"'
         )
-    elif candidate == STAGE2_CANDIDATE:
-        expected_hash = STAGE2_BUILD_WRAPPER_SHA256
-        stage = "stage-2"
+    elif candidate in {STAGE2_CANDIDATE, PACKAGE_CANDIDATE}:
+        expected_hash = (
+            PACKAGE_BUILD_WRAPPER_SHA256
+            if candidate == PACKAGE_CANDIDATE
+            else STAGE2_BUILD_WRAPPER_SHA256
+        )
+        stage = "package-set" if candidate == PACKAGE_CANDIDATE else "stage-2"
         patch_fragments = {
             'telemetry_patch="0001-acer-wmi-add-pt31553-telemetry.patch"': "does not name the locked telemetry patch",
             'pwm_patch="0002-acer-wmi-enable-pt31553-pwm.patch"': "does not name the locked PWM patch",
@@ -973,6 +1044,16 @@ def verify_patch_wrapper(wrapper: str, candidate: str) -> None:
             '"$telemetry_patch" "$pwm_patch" >>"$package_root/PKGBUILD"': "does not preserve telemetry-before-PWM recipe order",
         }
         expected_mutation = '"$telemetry_patch" "$pwm_patch" >>"$package_root/PKGBUILD"'
+        if candidate == PACKAGE_CANDIDATE:
+            patch_fragments.update(
+                {
+                    'pkgbase="linux-cachyos-pt31553"': "does not assign the unique package base",
+                    '_kernuname="${pkgver}-cachyos-pt31553"': "does not assign the unique kernel release suffix",
+                    'ln -s "/bundle/$nvidia_source" "$package_root/source-cache/$nvidia_source"': "does not stage the locked NVIDIA source",
+                    'ln -s "/bundle/nvidia/$nvidia_patch_dsc" "$package_root/source-cache/$nvidia_patch_dsc"': "does not stage the locked NVIDIA DSC patch",
+                    'ln -s "/bundle/nvidia/$nvidia_patch_vr" "$package_root/source-cache/$nvidia_patch_vr"': "does not stage the locked NVIDIA VR patch",
+                }
+            )
     else:
         fail("build wrapper: patch mutation is unsupported for this candidate")
 
@@ -981,6 +1062,9 @@ def verify_patch_wrapper(wrapper: str, candidate: str) -> None:
     for fragment, message in patch_fragments.items():
         if wrapper.count(fragment) != 1:
             fail(f"build wrapper: {message}")
+
+    if candidate == PACKAGE_CANDIDATE:
+        return
 
     pkgbuild_mentions = [
         line.strip() for line in wrapper.splitlines() if "PKGBUILD" in line
@@ -1074,6 +1158,7 @@ def verify_patch_scope(bundle: Bundle, lock: dict, inputs: list[dict]) -> None:
     expected_patches = {
         STAGE1_CANDIDATE: ["pt31553-telemetry"],
         STAGE2_CANDIDATE: ["pt31553-telemetry", "pt31553-pwm"],
+        PACKAGE_CANDIDATE: ["pt31553-telemetry", "pt31553-pwm"],
     }
     if lock["patches"] != expected_patches.get(lock["candidate"]):
         fail("source lock.patches: patch set does not match the exact qualification stage")
@@ -1101,7 +1186,7 @@ def verify_patch_scope(bundle: Bundle, lock: dict, inputs: list[dict]) -> None:
         except (KeyError, tarfile.TarError) as error:
             fail(f"kernel source: missing pinned acer-wmi source: {error}")
     telemetry_source = validate_telemetry_patch(telemetry_patch, source)
-    if lock["candidate"] == STAGE2_CANDIDATE:
+    if lock["candidate"] in {STAGE2_CANDIDATE, PACKAGE_CANDIDATE}:
         pwm_input = next(item for item in inputs if item["name"] == "pt31553-pwm")
         if (
             pwm_input["kind"] != "patch"
@@ -1126,15 +1211,31 @@ def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> Non
         "toolchain_image_digest", "makepkg_config", "build_inputs", "patches",
         "build_wrapper",
     }
+    package_environment_fields = {
+        "kernel_release_suffix",
+        "nvidia_open_version",
+        "package_names",
+        "recovery_kernel_package",
+        "recovery_kernel_release",
+        "recovery_pwm_capable",
+        "retained_evidence",
+    }
+    if lock["candidate"] == PACKAGE_CANDIDATE:
+        environment_fields |= package_environment_fields
     exact_keys(environment, environment_fields, "build environment")
     if type(environment["format"]) is not int or environment["format"] != 1 or environment["candidate"] != lock["candidate"]:
         fail("build environment: format or candidate does not match source lock")
     for field in ("architecture", "cpu_target", "pkgbase", "use_llvm_lto", "processor_opt", "makepkg_config"):
         require_string(environment[field], f"build environment.{field}")
+    expected_pkgbase = (
+        "linux-cachyos-pt31553"
+        if lock["candidate"] == PACKAGE_CANDIDATE
+        else "linux-cachyos-gcc"
+    )
     if (
         environment["architecture"] != "x86_64"
         or environment["processor_opt"] != "generic_v4"
-        or environment["pkgbase"] != "linux-cachyos-gcc"
+        or environment["pkgbase"] != expected_pkgbase
     ):
         fail("build environment: candidate requires the pinned x86_64-v4 processor selection")
     expected_options = {
@@ -1165,8 +1266,35 @@ def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> Non
             fail(f"build environment.{field}: does not match source lock")
     if environment["clean_chroot"] is not True or environment["sync_database"] is not False:
         fail("build environment: clean offline build settings are required")
-    if environment["build_nvidia_open"] is not False or environment["use_llvm_lto"] != "none":
-        fail("build environment: candidate must not select unrecorded NVIDIA or LLVM patch inputs")
+    expected_nvidia = lock["candidate"] == PACKAGE_CANDIDATE
+    if environment["build_nvidia_open"] is not expected_nvidia or environment["use_llvm_lto"] != "none":
+        fail("build environment: NVIDIA and LLVM selection does not match the candidate")
+    if lock["candidate"] == PACKAGE_CANDIDATE:
+        expected_package_metadata = {
+            "kernel_release_suffix": "cachyos-pt31553",
+            "nvidia_open_version": "610.57.04",
+            "package_names": [
+                "linux-cachyos-pt31553",
+                "linux-cachyos-pt31553-headers",
+                "linux-cachyos-pt31553-nvidia-open",
+            ],
+            "recovery_kernel_package": "linux-cachyos-lts",
+            "recovery_kernel_release": "6.18",
+            "recovery_pwm_capable": False,
+            "retained_evidence": [
+                "build-environment.toml",
+                "build.log",
+                "package-set.SRCINFO",
+                "packages/*/.BUILDINFO",
+                "packages/*/.MTREE",
+                "packages/*/.PKGINFO",
+                "SHA256SUMS",
+                "source-lock.toml",
+            ],
+        }
+        for field, expected in expected_package_metadata.items():
+            if environment[field] != expected:
+                fail(f"build environment.{field}: package-set contract is not exact")
     if not isinstance(environment["build_inputs"], list) or any(
         not isinstance(item, str) for item in environment["build_inputs"]
     ):
@@ -1220,7 +1348,7 @@ def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> Non
         "_use_gcc_suffix": "yes",
         "_use_kcfi": "no",
         "_build_zfs": "no",
-        "_build_nvidia_open": "no",
+        "_build_nvidia_open": "yes" if expected_nvidia else "no",
         "_build_r8125": "no",
         "_build_debug": "no",
         "_autofdo": "no",
@@ -1239,7 +1367,6 @@ def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> Non
         "unset CI GITHUB_RUN_ID": "does not clear ambient CI controls",
         'ln -s /bundle/cachyos-7.1.8-1.tar.gz "$package_root/source-cache/cachyos-7.1.8-1.tar.gz"': "does not stage the locked source archive",
         'ln -s /bundle/config "$package_root/source-cache/config"': "does not stage the locked kernel config",
-        'exec makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --skippgpcheck --skipchecksums --noconfirm --cleanbuild "$@"': "makepkg invocation does not consume the locked configuration",
         '--root "$work_root/podman-root"': "does not isolate Podman image storage",
         '--runroot "$work_root/podman-runroot"': "does not isolate Podman runtime storage",
         "--storage-driver=overlay": "does not select an explicit ephemeral storage driver",
@@ -1248,7 +1375,11 @@ def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> Non
         "--userns=keep-id:uid=1000,gid=1000": "does not map the pinned non-root toolchain user",
         '--entrypoint /bundle/build-candidate': "does not re-enter the locked wrapper inside the container",
     }
-    if lock["candidate"] in {STAGE1_CANDIDATE, STAGE2_CANDIDATE}:
+    if lock["candidate"] in {
+        STAGE1_CANDIDATE,
+        STAGE2_CANDIDATE,
+        PACKAGE_CANDIDATE,
+    }:
         required_fragments.update(
             {
                 'bc_package="bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"': "does not select the locked bc build tool",
@@ -1258,6 +1389,30 @@ def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> Non
                 'install -m 0444 "$source_root/drivers/platform/x86/acer-wmi.o" \\\n            "$SOURCE_LOCK_OUTPUT/acer-wmi.o"': "does not retain the acer-wmi compile artifact",
             }
         )
+    if lock["candidate"] == PACKAGE_CANDIDATE:
+        required_fragments.update(
+            {
+                "expected_packages=(\n        linux-cachyos-pt31553\n        linux-cachyos-pt31553-headers\n        linux-cachyos-pt31553-nvidia-open\n    )": "does not require the exact three-package set",
+                '[[ "$_kernuname" == 7.1.8-cachyos-pt31553 ]]': "does not require the unique kernel release",
+                'makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --skippgpcheck \\\n        --skipchecksums --noconfirm --cleanbuild 2>&1 \\': "does not run the locked clean package build",
+                '| tee "$SOURCE_LOCK_OUTPUT/build.log"': "does not retain the package build log",
+                'makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --printsrcinfo': "does not retain effective source metadata",
+                'if ! makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --packagelist \\\n+        >"$package_list"; then': "does not propagate package-plan failures",
+                'bsdtar -xOf "$package" "$entry" >"$metadata/$entry"': "does not retain package metadata",
+                'sha256sum "$package"': "does not retain package hashes",
+                'grep -Fxq "pkgname = $package_name" "$metadata/.PKGINFO"': "does not bind archive metadata to expected package names",
+                '[[ "$package" == "$SOURCE_LOCK_OUTPUT/"* && -f "$package" ]]': "does not confine package outputs",
+                'find "$SOURCE_LOCK_OUTPUT" -mindepth 1 -maxdepth 1 -print -quit': "does not reject stale package evidence",
+                "mapfile -d '' -t produced_package_paths": "does not enumerate the complete emitted package set",
+                '[[ "${#produced_package_paths[@]}" -eq "${#expected_packages[@]}" ]]': "does not reject additional or missing package archives",
+                '[[ ${produced_packages["$package"]+present} ]]': "does not bind predicted package paths to emitted archives",
+                'evidence_root=$(mktemp -d "$SOURCE_LOCK_OUTPUT/.evidence.XXXXXX")': "does not stage completion evidence atomically",
+            }
+        )
+    else:
+        required_fragments[
+            'exec makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --skippgpcheck --skipchecksums --noconfirm --cleanbuild "$@"'
+        ] = "makepkg invocation does not consume the locked configuration"
     for fragment, message in required_fragments.items():
         if wrapper.count(fragment) != 1:
             fail(f"build wrapper: {message}")
@@ -1322,7 +1477,9 @@ def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> Non
         fail("toolchain image config: candidate requires linux/amd64")
 
 
-def build_from_verified_snapshot(bundle: Bundle, inputs: list[dict], build_args: list[str]) -> int:
+def build_from_verified_snapshot(
+    bundle: Bundle, inputs: list[dict], build_args: list[str], lock_bytes: bytes
+) -> int:
     wrapper = by_kind(inputs, "build-wrapper")["path"]
     with tempfile.TemporaryDirectory(prefix="source-lock-verified-") as temporary:
         snapshot = Path(temporary) / "bundle"
@@ -1344,6 +1501,9 @@ def build_from_verified_snapshot(bundle: Bundle, inputs: list[dict], build_args:
             if size != item["size"] or digest.hexdigest() != item["sha256"]:
                 fail(f"verified snapshot input {item['name']}: changed during handoff")
             target.chmod(0o555 if item["path"] == wrapper else 0o444)
+        lock_target = snapshot / "source-lock.toml"
+        lock_target.write_bytes(lock_bytes)
+        lock_target.chmod(0o444)
         for directory in sorted(
             (path for path in directories if path == snapshot or snapshot in path.parents),
             key=lambda path: len(path.parts),
@@ -1384,7 +1544,7 @@ def main() -> int:
     try:
         if args.build_args and not args.exec_verified:
             fail("build arguments require --exec-verified")
-        lock = load_manifest(args.lock)
+        lock, lock_bytes = load_manifest(args.lock)
         inputs = validate_manifest(lock)
         bundle = Bundle(args.inputs)
         verify_hashes(bundle, inputs)
@@ -1443,11 +1603,11 @@ def main() -> int:
             allowed_build_args = [[], ["--verifysource"]]
             if lock["candidate"] == STAGE1_CANDIDATE:
                 allowed_build_args.append(["--compile-telemetry"])
-            elif lock["candidate"] == STAGE2_CANDIDATE:
+            elif lock["candidate"] in {STAGE2_CANDIDATE, PACKAGE_CANDIDATE}:
                 allowed_build_args.append(["--compile-pwm"])
             if build_args not in allowed_build_args:
                 fail("verified build arguments: only the selected compile gate or --verifysource is allowed")
-            return build_from_verified_snapshot(bundle, inputs, build_args)
+            return build_from_verified_snapshot(bundle, inputs, build_args, lock_bytes)
         print(f"source lock verified: {len(inputs)} immutable inputs")
     except VerificationError as error:
         print(f"source lock verification failed: {error}", file=sys.stderr)

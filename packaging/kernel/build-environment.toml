@@ -1,10 +1,30 @@
 format = 1
-candidate = "linux-cachyos-gcc-7.1.8-stage-2-pwm"
+candidate = "linux-cachyos-pt31553-7.1.8-1-package-set"
 architecture = "x86_64"
 cpu_target = "x86-64-v4"
 source_date_epoch = 1786378335
 clean_chroot = true
-pkgbase = "linux-cachyos-gcc"
+pkgbase = "linux-cachyos-pt31553"
+kernel_release_suffix = "cachyos-pt31553"
+package_names = [
+  "linux-cachyos-pt31553",
+  "linux-cachyos-pt31553-headers",
+  "linux-cachyos-pt31553-nvidia-open",
+]
+nvidia_open_version = "610.57.04"
+recovery_kernel_package = "linux-cachyos-lts"
+recovery_kernel_release = "6.18"
+recovery_pwm_capable = false
+retained_evidence = [
+  "build-environment.toml",
+  "build.log",
+  "package-set.SRCINFO",
+  "packages/*/.BUILDINFO",
+  "packages/*/.MTREE",
+  "packages/*/.PKGINFO",
+  "SHA256SUMS",
+  "source-lock.toml",
+]
 cachy_config = true
 cpu_scheduler = "cachyos"
 makenconfig = false
@@ -18,7 +38,7 @@ hz_ticks = 1000
 tickrate = "full"
 preempt = "full"
 hugepage = "always"
-build_nvidia_open = false
+build_nvidia_open = true
 build_zfs = false
 build_r8125 = false
 build_debug = false
@@ -36,6 +56,9 @@ build_inputs = [
   "kernel-config",
   "kernel-source",
   "makepkg-config",
+  "nvidia-open-source",
+  "nvidia-patch-dsc",
+  "nvidia-patch-vr",
   "packaging-snapshot",
   "pt31553-pwm",
   "pt31553-telemetry",
