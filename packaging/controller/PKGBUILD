@@ -10,12 +10,12 @@ license=('MIT')
 depends=('bash' 'coreutils' 'gcc-libs' 'glibc' 'glmark2' 'stress-ng' 'systemd')
 makedepends=('cargo')
 backup=('etc/pt31553-fan-control/config.toml')
-_commit='b944afb0d6400853003b2e529f3f0cb2485df32d'
+_commit='590c4ea728a47f7d8ea5b6f68b90c509022867eb'
 source=(
   "$pkgname-$pkgver.tar.gz::$url/archive/$_commit.tar.gz"
 )
 sha256sums=(
-  'b59f24fc52cbb4dd5d9151cecfd568485332d466eb5d6d4b3f183982906f2393'
+  '00e9185e4066964a1506589d28f39a168710bbe721bdf1fd478f4d56f8b15e80'
 )
 
 prepare() {

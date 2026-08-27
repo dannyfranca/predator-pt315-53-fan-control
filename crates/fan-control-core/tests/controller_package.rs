@@ -8,8 +8,8 @@ use std::{
 
 use fan_control_core::{parse_compatibility_v1, parse_config_v1, validate_config_v1};
 
-const SOURCE_COMMIT: &str = "b944afb0d6400853003b2e529f3f0cb2485df32d";
-const SOURCE_SHA256: &str = "b59f24fc52cbb4dd5d9151cecfd568485332d466eb5d6d4b3f183982906f2393";
+const SOURCE_COMMIT: &str = "590c4ea728a47f7d8ea5b6f68b90c509022867eb";
+const SOURCE_SHA256: &str = "00e9185e4066964a1506589d28f39a168710bbe721bdf1fd478f4d56f8b15e80";
 const EXPECTED_TMPFILES: &str = "\
 # Type Path                                           Mode User Group Age Argument
 d /var/lib/pt31553-fan-control                        0700 root root -   -
