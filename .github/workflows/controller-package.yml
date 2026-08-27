@@ -6,6 +6,8 @@ on:
       - ".github/workflows/controller-package.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "compatibility/**"
+      - "config/**"
       - "crates/**"
       - "packaging/controller/**"
       - "schemas/**"
@@ -16,6 +18,8 @@ on:
       - ".github/workflows/controller-package.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "compatibility/**"
+      - "config/**"
       - "crates/**"
       - "packaging/controller/**"
       - "schemas/**"
@@ -54,10 +58,23 @@ jobs:
           # exercise the same ancestor contract as a real package build host.
           su builder -c 'cd /home/builder/controller-package && makepkg --noconfirm --cleanbuild'
 
+      - name: Test contract against locked source
+        run: |
+          su builder -s /bin/bash -c '
+            cd "$GITHUB_WORKSPACE"
+            source packaging/controller/PKGBUILD
+            export PT31553_LOCKED_SOURCE_ROOT="/home/builder/controller-package/src/predator-pt315-53-fan-control-$_commit"
+            test -d "$PT31553_LOCKED_SOURCE_ROOT"
+            cargo test -p fan-control-core --test controller_package
+          '
+
       - name: Verify package contents
         run: |
-          package=$(find /home/builder/controller-package -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)
-          test -n "$package"
+          mapfile -t packages < <(su builder -s /bin/bash -c 'cd /home/builder/controller-package && makepkg --packagelist')
+          test "${#packages[@]}" -eq 1
+          package=${packages[0]}
+          test -f "$package"
+          test "$(find /home/builder/controller-package -maxdepth 1 -type f -name '*.pkg.tar.zst' -print | wc -l)" -eq 1
           bsdtar -tf "$package" > /tmp/controller-package-contents
           bsdtar -tvf "$package" | awk '
             $3 != "root" || $4 != "root" {
@@ -67,10 +84,11 @@ jobs:
             END { exit invalid }
           '
           for path in \
-            etc/pt31553-fan-control/controller.toml \
+            etc/pt31553-fan-control/config.toml \
             usr/bin/pt31553-fand \
             usr/bin/pt31553-fan-restore \
             usr/bin/pt31553-fan-qualify \
+            usr/lib/pt31553-fan-control/compatibility.toml \
             usr/lib/systemd/system/pt31553-fand.service \
             usr/lib/systemd/system/pt31553-fan-sleep-guard.service \
             usr/lib/systemd/system-preset/90-pt31553-fan-control.preset \
@@ -80,4 +98,4 @@ jobs:
             var/lib/pt31553-fan-control/evidence/; do
             grep -Fxq "$path" /tmp/controller-package-contents
           done
-          test "$(bsdtar -tf "$package" | grep -Ec '(^|/)(qualification\.json|protected-policy|promotion|authorization)')" -eq 0
+          test "$(bsdtar -tf "$package" | grep -Ec '(^|/)(qualified-envelope\.toml|qualification-record\.json|qualification\.json|protected-policy|promotion|authorization)')" -eq 0
