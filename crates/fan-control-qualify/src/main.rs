@@ -1,9 +1,7 @@
 use std::{
     env,
     error::Error,
-    fs,
     io::{Read, Write},
-    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -13,13 +11,13 @@ use std::{
 use fan_control_core::{
     CapturedMatchedWorkloadStartingConditions, EvidenceFan, EvidenceProfile, EvidenceRecord,
     EvidenceTimestamp, MatchedWorkloadFanRestoration, MatchedWorkloadObservation,
-    MatchedWorkloadTachometerCalibrations, QUALIFICATION_RECORD_PATH, RestorationOutcome,
-    RootOwnedQualificationRecordAccess, SUPERVISED_ENDURANCE_WORKLOAD_ID, StartupStatus,
-    SupervisedEnduranceEnvironment, SupervisedEndurancePlan,
+    MatchedWorkloadTachometerCalibrations, ProtectedFileRequirement, QUALIFICATION_RECORD_PATH,
+    RestorationOutcome, RootOwnedQualificationRecordAccess, SUPERVISED_ENDURANCE_WORKLOAD_ID,
+    StartupStatus, SupervisedEnduranceEnvironment, SupervisedEndurancePlan,
     SupervisedEnduranceProcessStopConfirmation, SupervisedEnduranceSegment,
     SupervisedEnduranceSegmentConfirmation, SystemOwnershipPlatform, WorkloadEvidence,
     parse_evidence_v2, run_supervised_endurance, validate_root_owned_output_destination,
-    write_qualification_record_after_endurance,
+    validate_root_owned_protected_file, write_qualification_record_after_endurance,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -162,32 +160,7 @@ fn read_protected_file(path: &Path) -> Result<String, Box<dyn Error>> {
 }
 
 fn validate_protected_executable(path: &Path) -> Result<(), Box<dyn Error>> {
-    validate_protected_path(path, true)
-}
-
-fn validate_protected_path(path: &Path, executable: bool) -> Result<(), Box<dyn Error>> {
-    if !path.is_absolute() {
-        return Err(format!("protected path must be absolute: {}", path.display()).into());
-    }
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        let metadata = fs::symlink_metadata(&current)?;
-        if metadata.file_type().is_symlink()
-            || metadata.uid() != 0
-            || metadata.permissions().mode() & 0o022 != 0
-        {
-            return Err(format!(
-                "path is not root-owned and protected: {}",
-                current.display()
-            )
-            .into());
-        }
-    }
-    let metadata = fs::metadata(path)?;
-    if !metadata.is_file() || (executable && metadata.permissions().mode() & 0o111 == 0) {
-        return Err(format!("path is not a suitable regular file: {}", path.display()).into());
-    }
+    validate_root_owned_protected_file(path, ProtectedFileRequirement::Executable)?;
     Ok(())
 }
 
@@ -351,7 +324,10 @@ impl SupervisedEnduranceEnvironment for HarnessEnvironment {
         self.invoke("contain-workload", json!({}), deadline)
     }
 
-    fn force_contain_workload(&mut self, deadline: u64) -> Result<EvidenceTimestamp, String> {
+    fn force_contain_workload(
+        &mut self,
+        deadline: u64,
+    ) -> Result<SupervisedEnduranceProcessStopConfirmation, String> {
         self.invoke("force-contain-workload", json!({}), deadline)
     }
 
@@ -369,7 +345,10 @@ impl SupervisedEnduranceEnvironment for HarnessEnvironment {
         self.invoke("contain-service", json!({}), deadline)
     }
 
-    fn force_contain_service(&mut self, deadline: u64) -> Result<EvidenceTimestamp, String> {
+    fn force_contain_service(
+        &mut self,
+        deadline: u64,
+    ) -> Result<SupervisedEnduranceProcessStopConfirmation, String> {
         self.invoke("force-contain-service", json!({}), deadline)
     }
 

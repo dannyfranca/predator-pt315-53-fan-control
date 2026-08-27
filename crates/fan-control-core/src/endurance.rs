@@ -2,24 +2,19 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fmt,
-    path::Path,
 };
 
 use crate::{
     CPU_ABSOLUTE_ABORT_MILLICELSIUS, CapturedMatchedWorkloadStartingConditions,
     EVIDENCE_SCHEMA_VERSION_V2, EnduranceThermalEnvelopeEvidence, EvidenceExternalPower,
     EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceRecordStatus, EvidenceTimestamp,
-    EvidenceValidationError, EvidenceWriteError, FanReadbackEvidence, FanReadbackField,
-    FaultEvidence, MatchedWorkloadFanRestoration, MatchedWorkloadObservation,
+    EvidenceValidationError, FanReadbackEvidence, FanReadbackField, FaultEvidence,
+    MatchedWorkloadFanRestoration, MatchedWorkloadObservation,
     MatchedWorkloadTachometerCalibrations, ObservationOutcome, ProcessStopEvidence,
     QualificationEnvelopeIdentityV1, RestorationAttemptEvidence, RestorationOutcome,
     RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness, StateTransitionEvidence, StoppedProcess,
     ThermalSummaryEvidence, WorkloadEvidence,
-    evidence::{
-        precise_final_thermal_slopes, summarize_thermal_evidence,
-        validate_root_owned_output_destination, validate_workload,
-        write_root_owned_evidence_atomically,
-    },
+    evidence::{precise_final_thermal_slopes, summarize_thermal_evidence, validate_workload},
     matched_workload::{
         ControlEvidenceState, MAX_PLAUSIBLE_AMBIENT_MILLICELSIUS,
         MAX_PLAUSIBLE_COMPONENT_TEMPERATURE_MILLICELSIUS, MatchedWorkloadClass,
@@ -30,8 +25,10 @@ use crate::{
         matched_workload_matches_calibrations, plausible_temperature, validate_observation,
     },
 };
-use serde::{Deserialize, Deserializer, Serialize, de};
-use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+use crate::{QualificationRecordV2, SupervisedEnduranceAuthorizationV1};
 
 pub const SUPERVISED_ENDURANCE_DURATION_MILLIS: u64 = 60 * 60 * 1_000;
 pub const SUPERVISED_ENDURANCE_SAMPLE_COUNT: usize = 1_800;
@@ -224,7 +221,7 @@ pub trait SupervisedEnduranceEnvironment {
     fn force_contain_workload(
         &mut self,
         deadline_monotonic_millis: u64,
-    ) -> Result<EvidenceTimestamp, String>;
+    ) -> Result<SupervisedEnduranceProcessStopConfirmation, String>;
 
     fn stop_service(
         &mut self,
@@ -243,7 +240,7 @@ pub trait SupervisedEnduranceEnvironment {
     fn force_contain_service(
         &mut self,
         deadline_monotonic_millis: u64,
-    ) -> Result<EvidenceTimestamp, String>;
+    ) -> Result<SupervisedEnduranceProcessStopConfirmation, String>;
 
     fn restore_fan(
         &mut self,
@@ -316,96 +313,6 @@ impl SupervisedEnduranceReport {
 
     pub fn into_record(self) -> EvidenceRecord {
         self.record
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct QualificationRecordV2 {
-    #[serde(deserialize_with = "deserialize_qualification_schema_version")]
-    pub(crate) schema_version: u32,
-    pub(crate) qualification_id: String,
-    pub(crate) policy_version: String,
-    pub(crate) protected_policy_sha256: String,
-    pub(crate) compatibility: crate::CompatibilityDeclarationV1,
-    pub(crate) supervised_endurance: SupervisedEnduranceAuthorizationV1,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SupervisedEnduranceAuthorizationV1 {
-    #[serde(deserialize_with = "deserialize_endurance_authorization_schema_version")]
-    pub(crate) schema_version: u32,
-    pub(crate) evidence_sha256: String,
-    pub(crate) evidence_path: String,
-    pub(crate) evidence_schema_version: u32,
-    pub(crate) stage: String,
-    pub(crate) record_status: EvidenceRecordStatus,
-    pub(crate) outcome: RunOutcomeStatus,
-    pub(crate) final_firmware_auto_confirmed: bool,
-    pub(crate) workload_stopped: bool,
-    pub(crate) service_stopped: bool,
-    pub(crate) completed_at: EvidenceTimestamp,
-}
-
-impl QualificationRecordV2 {
-    pub const fn schema_version(&self) -> u32 {
-        self.schema_version
-    }
-    pub fn qualification_id(&self) -> &str {
-        &self.qualification_id
-    }
-    pub fn policy_version(&self) -> &str {
-        &self.policy_version
-    }
-    pub fn protected_policy_sha256(&self) -> &str {
-        &self.protected_policy_sha256
-    }
-    pub fn compatibility(&self) -> &crate::CompatibilityDeclarationV1 {
-        &self.compatibility
-    }
-    pub fn supervised_endurance(&self) -> &SupervisedEnduranceAuthorizationV1 {
-        &self.supervised_endurance
-    }
-}
-
-impl SupervisedEnduranceAuthorizationV1 {
-    pub fn evidence_sha256(&self) -> &str {
-        &self.evidence_sha256
-    }
-}
-
-#[derive(Debug)]
-pub enum QualificationAuthorizationError {
-    InvalidPlan(SupervisedEndurancePlanError),
-    EnduranceNotAccepted,
-    Write(EvidenceWriteError),
-}
-
-impl fmt::Display for QualificationAuthorizationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidPlan(error) => {
-                write!(formatter, "qualification envelope rejected: {error}")
-            }
-            Self::EnduranceNotAccepted => {
-                formatter.write_str("supervised endurance evidence is not complete and passing")
-            }
-            Self::Write(error) => write!(
-                formatter,
-                "cannot publish root-owned qualification record: {error}"
-            ),
-        }
-    }
-}
-
-impl Error for QualificationAuthorizationError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidPlan(error) => Some(error),
-            Self::Write(error) => Some(error),
-            Self::EnduranceNotAccepted => None,
-        }
     }
 }
 
@@ -863,6 +770,7 @@ where
         }
     }
 
+    let mut workload_stopped = !workload_attempted;
     if workload_attempted {
         let scheduled_stop_endpoint = if samples.len() == SUPERVISED_ENDURANCE_SAMPLE_COUNT {
             workload_started_at.and_then(|started| {
@@ -909,6 +817,7 @@ where
             |environment, deadline| environment.stop_workload(deadline),
         ) {
             process_stops.push(stop);
+            workload_stopped = true;
         } else if let Some(stop) = perform_confirmed_stop(
             environment,
             &mut faults,
@@ -922,6 +831,7 @@ where
             |environment, deadline| environment.contain_workload(deadline),
         ) {
             process_stops.push(stop);
+            workload_stopped = true;
         } else if let Some(stop) = perform_confirmed_stop(
             environment,
             &mut faults,
@@ -932,23 +842,13 @@ where
                 identity: workload.command.first().expect("validated command"),
                 fixed_deadline: None,
             },
-            |environment, deadline| {
-                environment
-                    .force_contain_workload(deadline)
-                    .map(|observed_at| SupervisedEnduranceProcessStopConfirmation {
-                        observed_at,
-                        process_identity: workload
-                            .command
-                            .first()
-                            .expect("validated command")
-                            .clone(),
-                        running: false,
-                    })
-            },
+            |environment, deadline| environment.force_contain_workload(deadline),
         ) {
             process_stops.push(stop);
+            workload_stopped = true;
         }
     }
+    let mut service_stopped = !custom_attempted;
     if custom_attempted {
         if let Some(stop) = perform_confirmed_stop(
             environment,
@@ -963,6 +863,7 @@ where
             |environment, deadline| environment.stop_service(deadline),
         ) {
             process_stops.push(stop);
+            service_stopped = true;
         } else if let Some(stop) = perform_confirmed_stop(
             environment,
             &mut faults,
@@ -976,6 +877,7 @@ where
             |environment, deadline| environment.contain_service(deadline),
         ) {
             process_stops.push(stop);
+            service_stopped = true;
         } else if let Some(stop) = perform_confirmed_stop(
             environment,
             &mut faults,
@@ -986,21 +888,14 @@ where
                 identity: "pt31553-fan-control.service",
                 fixed_deadline: None,
             },
-            |environment, deadline| {
-                environment
-                    .force_contain_service(deadline)
-                    .map(|observed_at| SupervisedEnduranceProcessStopConfirmation {
-                        observed_at,
-                        process_identity: "pt31553-fan-control.service".into(),
-                        running: false,
-                    })
-            },
+            |environment, deadline| environment.force_contain_service(deadline),
         ) {
             process_stops.push(stop);
+            service_stopped = true;
         }
     }
 
-    let both_fans_restored = if custom_attempted {
+    let both_fans_observed_auto = if custom_attempted {
         restore_both_fans(
             environment,
             &mut readbacks,
@@ -1012,6 +907,9 @@ where
     } else {
         false
     };
+    // This field attests the observed final hardware state, not overall run success. A failed run
+    // may still truthfully confirm Auto; acceptance separately requires every safety gate.
+    let final_firmware_auto_confirmed = both_fans_observed_auto;
     if custom_attempted {
         let from = transitions
             .last()
@@ -1021,7 +919,7 @@ where
             timestamp: lifecycle_not_before,
             boot_id: None,
             from,
-            to: if both_fans_restored {
+            to: if final_firmware_auto_confirmed {
                 "firmware-auto"
             } else {
                 "restoration-failed"
@@ -1053,7 +951,9 @@ where
     let completed_at = later_timestamp(observed_completed_at, lifecycle_not_before);
     let accepted = faults.is_empty()
         && samples.len() == SUPERVISED_ENDURANCE_SAMPLE_COUNT
-        && both_fans_restored;
+        && workload_stopped
+        && service_stopped
+        && final_firmware_auto_confirmed;
     let reason = if accepted {
         "supervised endurance completed; unattended authorization may be published".into()
     } else {
@@ -1062,29 +962,12 @@ where
             |fault| fault.detail.clone(),
         )
     };
-    let record = EvidenceRecord {
-        schema_version: EVIDENCE_SCHEMA_VERSION_V2,
-        record_status: EvidenceRecordStatus::Complete,
-        qualification_envelope: envelope,
-        stage: "supervised-endurance".into(),
+    let mut record = EvidenceRecord::complete_v2(
+        envelope,
+        "supervised-endurance",
         started_at,
         completed_at,
-        starting_conditions_captured_at,
-        workload_started_at,
-        baseline_binding_sha256: None,
-        workload: Some(workload),
-        samples,
-        commands,
-        readbacks,
-        state_transitions: transitions,
-        faults,
-        restoration_attempts,
-        process_stops,
-        calibration: Vec::new(),
-        thermal_summary: Some(thermal_summary),
-        endurance_thermal_envelope: Some(endurance_thermal_envelope),
-        live_lifecycle_cases: None,
-        outcome: RunOutcomeEvidence {
+        RunOutcomeEvidence {
             status: if accepted {
                 RunOutcomeStatus::Passed
             } else {
@@ -1092,98 +975,28 @@ where
             },
             reason,
             another_passing_run_required: false,
-            final_firmware_auto_confirmed: both_fans_restored,
+            final_firmware_auto_confirmed,
         },
-    };
+    );
+    record.starting_conditions_captured_at = starting_conditions_captured_at;
+    record.workload_started_at = workload_started_at;
+    record.workload = Some(workload);
+    record.samples = samples;
+    record.commands = commands;
+    record.readbacks = readbacks;
+    record.state_transitions = transitions;
+    record.faults = faults;
+    record.restoration_attempts = restoration_attempts;
+    record.process_stops = process_stops;
+    record.thermal_summary = Some(thermal_summary);
+    record.endurance_thermal_envelope = Some(endurance_thermal_envelope);
     record
         .validate()
         .map_err(SupervisedEndurancePlanError::InvalidGeneratedEvidence)?;
     Ok(SupervisedEnduranceReport { record })
 }
 
-pub fn write_qualification_record_after_endurance(
-    destination: &Path,
-    evidence_path: &Path,
-    plan: &SupervisedEndurancePlan<'_>,
-    report: &SupervisedEnduranceReport,
-) -> Result<QualificationRecordV2, QualificationAuthorizationError> {
-    let envelope =
-        validate_qualification_plan(plan).map_err(QualificationAuthorizationError::InvalidPlan)?;
-    report.record.validate().map_err(|error| {
-        QualificationAuthorizationError::InvalidPlan(
-            SupervisedEndurancePlanError::InvalidGeneratedEvidence(error),
-        )
-    })?;
-    if !report.accepted()
-        || report.record.qualification_envelope != envelope
-        || !supervised_endurance_is_complete(&report.record)
-    {
-        return Err(QualificationAuthorizationError::EnduranceNotAccepted);
-    }
-    if report.record.endurance_thermal_envelope.as_ref()
-        != Some(
-            &endurance_thermal_envelope(plan.baselines)
-                .map_err(QualificationAuthorizationError::InvalidPlan)?,
-        )
-    {
-        return Err(QualificationAuthorizationError::EnduranceNotAccepted);
-    }
-    validate_endurance_thermal_limits_against_baselines(
-        report
-            .record
-            .thermal_summary
-            .as_ref()
-            .expect("complete endurance has a summary"),
-        &report.record.samples,
-        plan.baselines,
-    )
-    .map_err(QualificationAuthorizationError::InvalidPlan)?;
-
-    if !evidence_path.is_absolute() {
-        return Err(QualificationAuthorizationError::EnduranceNotAccepted);
-    }
-    validate_root_owned_output_destination(evidence_path)
-        .map_err(QualificationAuthorizationError::Write)?;
-    validate_root_owned_output_destination(destination)
-        .map_err(QualificationAuthorizationError::Write)?;
-    let mut evidence_payload =
-        serde_json::to_vec_pretty(&report.record).expect("validated endurance evidence serializes");
-    evidence_payload.push(b'\n');
-    let evidence_sha256 = format!("{:x}", Sha256::digest(&evidence_payload));
-    let qualification = QualificationRecordV2 {
-        schema_version: 2,
-        qualification_id: envelope.qualification_id,
-        policy_version: envelope.policy_version,
-        protected_policy_sha256: envelope.protected_policy_sha256,
-        compatibility: envelope.compatibility,
-        supervised_endurance: SupervisedEnduranceAuthorizationV1 {
-            schema_version: 1,
-            evidence_sha256,
-            evidence_path: evidence_path.to_string_lossy().into_owned(),
-            evidence_schema_version: EVIDENCE_SCHEMA_VERSION_V2,
-            stage: "supervised-endurance".into(),
-            record_status: report.record.record_status,
-            outcome: report.record.outcome.status,
-            final_firmware_auto_confirmed: report.record.outcome.final_firmware_auto_confirmed,
-            workload_stopped: matches!(
-                report.record.process_stops.first(),
-                Some(stop) if stop.process == StoppedProcess::Workload && !stop.running
-            ),
-            service_stopped: matches!(
-                report.record.process_stops.get(1),
-                Some(stop) if stop.process == StoppedProcess::Service && !stop.running
-            ),
-            completed_at: report.record.completed_at,
-        },
-    };
-    write_root_owned_evidence_atomically(evidence_path, &report.record)
-        .map_err(QualificationAuthorizationError::Write)?;
-    crate::evidence::write_root_owned_json_atomically(destination, &qualification)
-        .map_err(QualificationAuthorizationError::Write)?;
-    Ok(qualification)
-}
-
-fn validate_qualification_plan(
+pub(crate) fn validate_qualification_plan(
     plan: &SupervisedEndurancePlan<'_>,
 ) -> Result<QualificationEnvelopeIdentityV1, SupervisedEndurancePlanError> {
     validate_required_record("preflight", plan.preflight, "preflight")?;
@@ -1760,7 +1573,7 @@ fn validate_endurance_thermal_limits(
     }
 }
 
-fn validate_endurance_thermal_limits_against_baselines(
+pub(crate) fn validate_endurance_thermal_limits_against_baselines(
     summary: &ThermalSummaryEvidence,
     samples: &[crate::TelemetrySampleEvidence],
     baselines: &[&EvidenceRecord],
@@ -1769,7 +1582,7 @@ fn validate_endurance_thermal_limits_against_baselines(
     validate_endurance_thermal_limits_against_envelope(summary, samples, &envelope)
 }
 
-fn endurance_thermal_envelope(
+pub(crate) fn endurance_thermal_envelope(
     baselines: &[&EvidenceRecord],
 ) -> Result<EnduranceThermalEnvelopeEvidence, SupervisedEndurancePlanError> {
     let summaries = baselines
@@ -2065,34 +1878,6 @@ fn push_fault(
     });
 }
 
-fn deserialize_qualification_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let version = u32::deserialize(deserializer)?;
-    if version == 2 {
-        Ok(version)
-    } else {
-        Err(de::Error::custom("schema_version must be 2"))
-    }
-}
-
-fn deserialize_endurance_authorization_schema_version<'de, D>(
-    deserializer: D,
-) -> Result<u32, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let version = u32::deserialize(deserializer)?;
-    if version == 1 {
-        Ok(version)
-    } else {
-        Err(de::Error::custom(
-            "supervised_endurance.schema_version must be 1",
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2167,12 +1952,18 @@ mod tests {
             })
         }
 
-        fn force_contain_workload(&mut self, deadline: u64) -> Result<EvidenceTimestamp, String> {
-            self.stop_workload(deadline).map(|stop| stop.observed_at)
+        fn force_contain_workload(
+            &mut self,
+            deadline: u64,
+        ) -> Result<SupervisedEnduranceProcessStopConfirmation, String> {
+            self.stop_workload(deadline)
         }
 
-        fn force_contain_service(&mut self, deadline: u64) -> Result<EvidenceTimestamp, String> {
-            self.stop_service(deadline).map(|stop| stop.observed_at)
+        fn force_contain_service(
+            &mut self,
+            deadline: u64,
+        ) -> Result<SupervisedEnduranceProcessStopConfirmation, String> {
+            self.stop_service(deadline)
         }
 
         fn restore_fan(&mut self, fan: EvidenceFan, _: u64) -> MatchedWorkloadFanRestoration {

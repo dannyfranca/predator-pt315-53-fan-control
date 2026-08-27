@@ -17,10 +17,11 @@ use fan_control_core::{
     QualificationAuthorizationError, QualificationEnvelopeIdentityV1, QualificationRecordV2,
     RestorationOutcome, RootOwnedQualificationRecordAccess, RunOutcomeEvidence, RunOutcomeStatus,
     SUPERVISED_ENDURANCE_SAMPLE_COUNT, SUPERVISED_ENDURANCE_SEGMENTS,
-    SUPERVISED_ENDURANCE_WORKLOAD_ID, SampleFreshness, SupervisedEnduranceEnvironment,
-    SupervisedEndurancePlan, SupervisedEnduranceProcessStopConfirmation,
-    SupervisedEnduranceSegment, SupervisedEnduranceSegmentConfirmation, SystemOwnershipPlatform,
-    TelemetrySampleEvidence, WorkloadEvidence, parse_evidence_v2, run_firmware_auto_baseline,
+    SUPERVISED_ENDURANCE_WORKLOAD_ID, SampleFreshness, StoppedProcess,
+    SupervisedEnduranceEnvironment, SupervisedEndurancePlan,
+    SupervisedEnduranceProcessStopConfirmation, SupervisedEnduranceSegment,
+    SupervisedEnduranceSegmentConfirmation, SystemOwnershipPlatform, TelemetrySampleEvidence,
+    WorkloadEvidence, parse_evidence_v2, run_firmware_auto_baseline,
     run_live_lifecycle_qualification, run_matched_custom_workload, run_supervised_endurance,
     write_qualification_record_after_endurance,
 };
@@ -775,6 +776,29 @@ fn runtime_failures_preserve_ordered_cleanup_evidence() {
             })
     );
 
+    let mut failed_starting_conditions_environment = EnduranceEnvironment {
+        fail_starting_conditions: true,
+        ..EnduranceEnvironment::default()
+    };
+    let failed_starting_conditions =
+        run_supervised_endurance(&mut failed_starting_conditions_environment, &plan)
+            .expect("starting-condition failure is retained as failed evidence");
+    assert!(!failed_starting_conditions.accepted());
+    assert!(failed_starting_conditions.record().commands.is_empty());
+    assert!(
+        failed_starting_conditions
+            .record()
+            .restoration_attempts
+            .is_empty()
+    );
+    assert!(
+        !failed_starting_conditions
+            .record()
+            .outcome
+            .final_firmware_auto_confirmed
+    );
+    assert!(failed_starting_conditions_environment.events.is_empty());
+
     let mut regressed_capture_environment = EnduranceEnvironment {
         regress_after_wait: true,
         ..EnduranceEnvironment::default()
@@ -841,6 +865,31 @@ fn runtime_failures_preserve_ordered_cleanup_evidence() {
     assert_eq!(uncontained.record().process_stops.len(), 2);
     assert_eq!(uncontained.record().restoration_attempts.len(), 2);
     serde_json::to_string(uncontained.record()).expect("failed containment evidence serializes");
+
+    let mut unconfirmed_terminal_containment_environment = EnduranceEnvironment {
+        stop_workload_running: true,
+        containment_running: true,
+        force_workload_running: true,
+        ..EnduranceEnvironment::default()
+    };
+    let unconfirmed_terminal_containment =
+        run_supervised_endurance(&mut unconfirmed_terminal_containment_environment, &plan)
+            .expect("unconfirmed terminal containment is retained as failed evidence");
+    assert!(!unconfirmed_terminal_containment.accepted());
+    assert!(
+        unconfirmed_terminal_containment
+            .record()
+            .process_stops
+            .iter()
+            .all(|stop| stop.process != StoppedProcess::Workload)
+    );
+    assert!(
+        unconfirmed_terminal_containment
+            .record()
+            .faults
+            .iter()
+            .any(|fault| fault.code == "workload-terminal-containment")
+    );
 
     let mut service_contained_environment = EnduranceEnvironment {
         stop_service_running: true,
@@ -1439,14 +1488,17 @@ struct EnduranceEnvironment {
     out_of_range_sample_utilization: bool,
     segment_delay_millis: u64,
     capture_delay_millis: u64,
+    fail_starting_conditions: bool,
     regress_after_wait: bool,
     stop_workload_delay_millis: u64,
     stop_workload_running: bool,
     containment_running: bool,
     force_workload_failure: bool,
+    force_workload_running: bool,
     stop_service_running: bool,
     service_containment_running: bool,
     force_service_failure: bool,
+    force_service_running: bool,
 }
 
 impl SupervisedEnduranceEnvironment for EnduranceEnvironment {
@@ -1457,6 +1509,9 @@ impl SupervisedEnduranceEnvironment for EnduranceEnvironment {
         &mut self,
         _: u64,
     ) -> Result<CapturedMatchedWorkloadStartingConditions, String> {
+        if self.fail_starting_conditions {
+            return Err("starting conditions unavailable".into());
+        }
         Ok(CapturedMatchedWorkloadStartingConditions {
             conditions: MatchedWorkloadStartingConditions {
                 ambient_millicelsius: 24_000,
@@ -1569,13 +1624,20 @@ impl SupervisedEnduranceEnvironment for EnduranceEnvironment {
             running: self.containment_running,
         })
     }
-    fn force_contain_workload(&mut self, _: u64) -> Result<EvidenceTimestamp, String> {
+    fn force_contain_workload(
+        &mut self,
+        _: u64,
+    ) -> Result<SupervisedEnduranceProcessStopConfirmation, String> {
         self.events.push("force-contain-workload");
         self.now += 1;
         if self.force_workload_failure {
             Err("terminal workload containment failed".into())
         } else {
-            Ok(timestamp(self.now))
+            Ok(SupervisedEnduranceProcessStopConfirmation {
+                observed_at: timestamp(self.now),
+                process_identity: "/usr/lib/pt31553-fan-control/workloads/mixed".into(),
+                running: self.force_workload_running,
+            })
         }
     }
     fn stop_service(
@@ -1602,13 +1664,20 @@ impl SupervisedEnduranceEnvironment for EnduranceEnvironment {
             running: self.service_containment_running,
         })
     }
-    fn force_contain_service(&mut self, _: u64) -> Result<EvidenceTimestamp, String> {
+    fn force_contain_service(
+        &mut self,
+        _: u64,
+    ) -> Result<SupervisedEnduranceProcessStopConfirmation, String> {
         self.events.push("force-contain-service");
         self.now += 1;
         if self.force_service_failure {
             Err("terminal service containment failed".into())
         } else {
-            Ok(timestamp(self.now))
+            Ok(SupervisedEnduranceProcessStopConfirmation {
+                observed_at: timestamp(self.now),
+                process_identity: "pt31553-fan-control.service".into(),
+                running: self.force_service_running,
+            })
         }
     }
     fn restore_fan(&mut self, fan: EvidenceFan, _: u64) -> MatchedWorkloadFanRestoration {

@@ -78,6 +78,55 @@ pub trait RootOwnedQualificationRecordAccess {
     ) -> Result<(), PlatformError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectedFileRequirement {
+    Regular,
+    Executable,
+}
+
+pub fn validate_root_owned_protected_file(
+    path: &Path,
+    requirement: ProtectedFileRequirement,
+) -> Result<(), PlatformError> {
+    if !path.is_absolute() {
+        return Err(PlatformError::new(
+            PlatformErrorKind::PermissionDenied,
+            "protected file path must be absolute",
+        ));
+    }
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            io_platform_error(&format!("cannot inspect {}", current.display()), error)
+        })?;
+        if metadata.file_type().is_symlink()
+            || metadata.uid() != 0
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(PlatformError::new(
+                PlatformErrorKind::PermissionDenied,
+                format!(
+                    "protected file path is not root-owned and protected: {}",
+                    current.display()
+                ),
+            ));
+        }
+    }
+    let metadata = fs::metadata(path)
+        .map_err(|error| io_platform_error(&format!("cannot inspect {}", path.display()), error))?;
+    if !metadata.is_file()
+        || (requirement == ProtectedFileRequirement::Executable
+            && metadata.permissions().mode() & 0o111 == 0)
+    {
+        return Err(PlatformError::new(
+            PlatformErrorKind::PermissionDenied,
+            "protected path is not a suitable regular file",
+        ));
+    }
+    Ok(())
+}
+
 fn verify_supervised_endurance_evidence_source(
     source: &str,
     expected_sha256: &str,
@@ -540,31 +589,7 @@ impl RootOwnedQualificationRecordAccess for SystemOwnershipPlatform {
         &mut self,
         path: &Path,
     ) -> Result<String, PlatformError> {
-        if !path.is_absolute() {
-            return Err(PlatformError::new(
-                PlatformErrorKind::PermissionDenied,
-                "qualification record path must be absolute",
-            ));
-        }
-        let mut current = PathBuf::new();
-        for component in path.components() {
-            current.push(component.as_os_str());
-            let metadata = fs::symlink_metadata(&current).map_err(|error| {
-                io_platform_error(&format!("cannot inspect {}", current.display()), error)
-            })?;
-            if metadata.file_type().is_symlink()
-                || metadata.uid() != 0
-                || metadata.permissions().mode() & 0o022 != 0
-            {
-                return Err(PlatformError::new(
-                    PlatformErrorKind::PermissionDenied,
-                    format!(
-                        "qualification record path is not root-owned and protected: {}",
-                        current.display()
-                    ),
-                ));
-            }
-        }
+        validate_root_owned_protected_file(path, ProtectedFileRequirement::Regular)?;
         let mut file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
