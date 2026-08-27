@@ -6,7 +6,9 @@ source "$workload_dir/common"
 require_fixed_workload "$@"
 
 ACTIVE_WORKLOAD_PID=
-TRANSITION_GENERATION=0
+REQUESTED_SEGMENT=load
+REQUESTED_GENERATION=0
+APPLIED_GENERATION=-1
 
 stop_active_segment() {
   local pid
@@ -38,13 +40,33 @@ enter_idle() {
 }
 
 transition_to_load() {
-  start_load
-  TRANSITION_GENERATION=$((TRANSITION_GENERATION + 1))
+  REQUESTED_SEGMENT=load
+  REQUESTED_GENERATION=$((REQUESTED_GENERATION + 1))
+  if [[ -n ${ACTIVE_WORKLOAD_PID:-} ]]; then
+    kill -TERM "$ACTIVE_WORKLOAD_PID" 2>/dev/null || true
+  fi
 }
 
 transition_to_idle() {
-  enter_idle
-  TRANSITION_GENERATION=$((TRANSITION_GENERATION + 1))
+  REQUESTED_SEGMENT=idle
+  REQUESTED_GENERATION=$((REQUESTED_GENERATION + 1))
+  if [[ -n ${ACTIVE_WORKLOAD_PID:-} ]]; then
+    kill -TERM "$ACTIVE_WORKLOAD_PID" 2>/dev/null || true
+  fi
+}
+
+apply_requested_segment() {
+  local generation segment
+  while [[ $APPLIED_GENERATION -ne $REQUESTED_GENERATION ]]; do
+    generation=$REQUESTED_GENERATION
+    segment=$REQUESTED_SEGMENT
+    stop_active_segment
+    case $segment in
+      load) start_load ;;
+      idle) enter_idle ;;
+    esac
+    APPLIED_GENERATION=$generation
+  done
 }
 
 trap transition_to_load USR1
@@ -52,11 +74,11 @@ trap transition_to_idle USR2
 trap 'stop_active_segment; exit 0' HUP INT TERM
 
 # The endurance harness sends SIGUSR1 for load segments and SIGUSR2 for idle
-# segments. The canonical schedule begins under load.
-start_load
+# segments. Handlers only request/cancel; this loop alone spawns replacements.
 while true; do
+  apply_requested_segment
   waited_pid=$ACTIVE_WORKLOAD_PID
-  waited_generation=$TRANSITION_GENERATION
+  waited_generation=$APPLIED_GENERATION
   if wait "$waited_pid"; then
     status=1
   else
@@ -64,7 +86,7 @@ while true; do
   fi
   # A transition trap replaces the segment and advances the generation. Any
   # child failure without that explicit marker must remain visible.
-  if [[ $TRANSITION_GENERATION -ne $waited_generation ]]; then
+  if [[ $REQUESTED_GENERATION -ne $waited_generation ]]; then
     continue
   fi
   stop_active_segment

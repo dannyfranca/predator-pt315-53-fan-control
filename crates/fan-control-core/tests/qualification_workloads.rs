@@ -158,3 +158,69 @@ fn mixed_propagates_a_signaled_segment_failure_without_busy_looping() {
     assert_eq!(status.code(), Some(143));
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn mixed_serializes_opposing_transitions_during_pid_assignment() {
+    let directory = scratch_directory("mixed-opposing-transitions");
+    let load_pids = directory.join("load-pids");
+    let idle_pid = directory.join("idle-pid");
+    fs::copy(workload_root().join("common"), directory.join("common")).unwrap();
+    fs::copy(workload_root().join("mixed"), directory.join("mixed")).unwrap();
+    write_executable(
+        &directory.join("combined"),
+        "#!/usr/bin/bash\nprintf '%s\\n' \"$$\" >> \"$MIXED_LOAD_PIDS\"\nexec /usr/bin/sleep 30\n",
+    );
+    let bash_env = directory.join("bash-env");
+    fs::write(
+        &bash_env,
+        r#"set -T
+MIXED_ASSIGNMENTS=0
+trap 'if [[ ${BASH_COMMAND:-} == "ACTIVE_WORKLOAD_PID=\$!" ]]; then
+  MIXED_ASSIGNMENTS=$((MIXED_ASSIGNMENTS + 1))
+  case $MIXED_ASSIGNMENTS in
+    1)
+      while [[ ! -s $MIXED_LOAD_PIDS ]]; do /usr/bin/sleep 0.001; done
+      kill -USR2 $$
+      ;;
+    2)
+      printf '%s\n' "$!" > "$MIXED_IDLE_PID"
+      kill -USR1 $$
+      ;;
+    3)
+      while [[ $(/usr/bin/wc -l < "$MIXED_LOAD_PIDS") -lt 2 ]]; do /usr/bin/sleep 0.001; done
+      trap - DEBUG
+      kill -TERM $$
+      ;;
+  esac
+fi' DEBUG
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("/usr/bin/bash")
+        .arg(directory.join("mixed"))
+        .arg("--fixed")
+        .env("BASH_ENV", &bash_env)
+        .env("MIXED_LOAD_PIDS", &load_pids)
+        .env("MIXED_IDLE_PID", &idle_pid)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut children = fs::read_to_string(&load_pids).unwrap();
+    children.push_str(&fs::read_to_string(&idle_pid).unwrap());
+    for child in children.lines() {
+        let status = Command::new("/bin/kill")
+            .args(["-0", child])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!status.success(), "transition child {child} survived");
+    }
+    assert_eq!(children.lines().count(), 3);
+    fs::remove_dir_all(directory).unwrap();
+}
