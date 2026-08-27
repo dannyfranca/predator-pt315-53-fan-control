@@ -1,0 +1,77 @@
+name: Controller package
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/controller-package.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "packaging/controller/**"
+      - "schemas/**"
+      - "systemd/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/controller-package.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "packaging/controller/**"
+      - "schemas/**"
+      - "systemd/**"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: pacman -Syu --noconfirm rust
+
+      - name: Prepare non-root builder
+        run: |
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Test current package contract
+        run: |
+          su builder -c 'cd "$GITHUB_WORKSPACE/packaging/controller" && makepkg --printsrcinfo | diff -u .SRCINFO -'
+          su builder -c 'cd "$GITHUB_WORKSPACE" && cargo test -p fan-control-core --test controller_package'
+
+      - name: Build and test locked package
+        run: |
+          su builder -c 'cd "$GITHUB_WORKSPACE/packaging/controller" && makepkg --noconfirm --cleanbuild'
+
+      - name: Verify package contents
+        run: |
+          package=$(find packaging/controller -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)
+          test -n "$package"
+          bsdtar -tf "$package" > /tmp/controller-package-contents
+          bsdtar -tvf "$package" | awk '
+            $3 != "root" || $4 != "root" {
+              print "non-root-owned package entry: " $0 > "/dev/stderr"
+              invalid = 1
+            }
+            END { exit invalid }
+          '
+          for path in \
+            etc/pt31553-fan-control/controller.toml \
+            usr/bin/pt31553-fand \
+            usr/bin/pt31553-fan-restore \
+            usr/bin/pt31553-fan-qualify \
+            usr/lib/systemd/system/pt31553-fand.service \
+            usr/lib/systemd/system/pt31553-fan-sleep-guard.service \
+            usr/lib/systemd/system-preset/90-pt31553-fan-control.preset \
+            usr/lib/tmpfiles.d/pt31553-fan-control.conf \
+            usr/share/pt31553-fan-control/schemas/evidence.json \
+            usr/share/pt31553-fan-control/schemas/evidence-v2.json \
+            var/lib/pt31553-fan-control/evidence/; do
+            grep -Fxq "$path" /tmp/controller-package-contents
+          done
+          test "$(bsdtar -tf "$package" | grep -Ec '(^|/)(qualification\.json|protected-policy|promotion|authorization)')" -eq 0
