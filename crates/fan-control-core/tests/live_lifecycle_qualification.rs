@@ -227,6 +227,179 @@ fn kill_and_watchdog_recovery_require_a_new_process_identity() {
 }
 
 #[test]
+fn kill_and_watchdog_recovery_reject_every_shared_proof_boundary() {
+    let mut environment = LifecycleEnvironment::default();
+    let report = run_live_lifecycle_qualification(&mut environment, &envelope()).unwrap();
+    let value = serde_json::to_value(report.record()).unwrap();
+    assert!(parse_evidence_v2(&serde_json::to_string(&value).unwrap()).is_ok());
+
+    for (case_index, event_field, discriminator) in [
+        (3, "killed_at", "sigkill_observed"),
+        (4, "expired_at", "watchdog_expired"),
+    ] {
+        let case_pointer = format!("/live_lifecycle_cases/{case_index}");
+        let observation_pointer = format!("{case_pointer}/observation");
+        let started_at = value
+            .pointer(&format!("{case_pointer}/started_at"))
+            .unwrap();
+        let started_wall = started_at["wall_unix_millis"].as_u64().unwrap();
+        let event_at = value
+            .pointer(&format!("{observation_pointer}/{event_field}"))
+            .unwrap();
+        let event_wall = event_at["wall_unix_millis"].as_u64().unwrap();
+        let identity_before = value
+            .pointer(&format!("{observation_pointer}/process_identity_before"))
+            .unwrap();
+
+        let mut forged_records = Vec::new();
+
+        let mut forged = value.clone();
+        *forged
+            .pointer_mut(&format!("{observation_pointer}/start_limit_reset_at"))
+            .unwrap() = started_at.clone();
+        forged_records.push(("reset at case start", forged));
+
+        let mut forged = value.clone();
+        *forged
+            .pointer_mut(&format!("{observation_pointer}/start_limit_reset_at"))
+            .unwrap() = event_at.clone();
+        forged_records.push(("reset at recovery event", forged));
+
+        let mut forged = value.clone();
+        *forged
+            .pointer_mut(&format!(
+                "{observation_pointer}/start_limit_reset_at/wall_unix_millis"
+            ))
+            .unwrap() = (event_wall + 1).into();
+        forged_records.push(("reset wall clock after event", forged));
+
+        let mut forged = value.clone();
+        *forged
+            .pointer_mut(&format!(
+                "{observation_pointer}/start_limit_reset_at/wall_unix_millis"
+            ))
+            .unwrap() = started_wall.saturating_sub(1).into();
+        forged_records.push(("reset wall clock before case", forged));
+
+        let mut forged = value.clone();
+        *forged
+            .pointer_mut(&format!("{observation_pointer}/restarted_at"))
+            .unwrap() = value
+            .pointer(&format!(
+                "{observation_pointer}/auto_before_restart/cpu/observed_at"
+            ))
+            .unwrap()
+            .clone();
+        forged_records.push(("restart at CPU Auto boundary", forged));
+
+        for fan in ["cpu", "gpu"] {
+            let mut forged = value.clone();
+            *forged
+                .pointer_mut(&format!(
+                    "{observation_pointer}/auto_before_restart/{fan}/fresh"
+                ))
+                .unwrap() = false.into();
+            forged_records.push(("stale Auto observation", forged));
+
+            let mut forged = value.clone();
+            *forged
+                .pointer_mut(&format!(
+                    "{observation_pointer}/auto_before_restart/{fan}/observed_at"
+                ))
+                .unwrap() = event_at.clone();
+            forged_records.push(("Auto observation at event boundary", forged));
+
+            let mut forged = value.clone();
+            *forged
+                .pointer_mut(&format!(
+                    "{observation_pointer}/auto_before_restart/{fan}/endpoint_identity"
+                ))
+                .unwrap() = format!("wrong-{fan}-endpoint").into();
+            forged_records.push(("wrong Auto endpoint identity", forged));
+        }
+
+        let mut forged = value.clone();
+        *forged
+            .pointer_mut(&format!("{observation_pointer}/process_identity_before"))
+            .unwrap() = " ".into();
+        forged_records.push(("blank process identity", forged));
+
+        let mut forged = value.clone();
+        *forged
+            .pointer_mut(&format!("{observation_pointer}/process_identity_after"))
+            .unwrap() = " ".into();
+        forged_records.push(("blank restarted process identity", forged));
+
+        let mut forged = value.clone();
+        *forged
+            .pointer_mut(&format!("{observation_pointer}/process_identity_after"))
+            .unwrap() = identity_before.clone();
+        forged_records.push(("unchanged process identity", forged));
+
+        let other_case_index = if case_index == 3 { 4 } else { 3 };
+        let mut forged = value.clone();
+        *forged.pointer_mut(&observation_pointer).unwrap() =
+            value["live_lifecycle_cases"][other_case_index]["observation"].clone();
+        forged_records.push(("other recovery case observation", forged));
+
+        for (field, contract_value) in [
+            (discriminator, serde_json::Value::Bool(false)),
+            ("restart_delay_millis", 3_000.into()),
+            ("start_limit_burst", 3.into()),
+        ] {
+            let mut forged = value.clone();
+            *forged
+                .pointer_mut(&format!("{observation_pointer}/{field}"))
+                .unwrap() = contract_value;
+            forged_records.push(("wrong recovery contract value", forged));
+        }
+
+        for (description, forged) in forged_records {
+            assert!(
+                parse_evidence_v2(&serde_json::to_string(&forged).unwrap()).is_err(),
+                "case index {case_index}: {description}"
+            );
+        }
+    }
+}
+
+#[test]
+fn recovery_validation_failures_identify_the_failed_case_in_run_evidence() {
+    for invalid_recovery_proof in [
+        LiveLifecycleCase::ProcessKillRecovery,
+        LiveLifecycleCase::WatchdogRecovery,
+    ] {
+        let mut environment = LifecycleEnvironment {
+            invalid_recovery_proof: Some(invalid_recovery_proof),
+            ..LifecycleEnvironment::default()
+        };
+
+        let report = run_live_lifecycle_qualification(&mut environment, &envelope()).unwrap();
+
+        assert!(!report.accepted());
+        assert!(report.record().faults.iter().any(|fault| {
+            fault.code == "live-lifecycle-case-failed"
+                && fault.detail.contains(invalid_recovery_proof.id())
+        }));
+        assert!(
+            report
+                .record()
+                .outcome
+                .reason
+                .contains(invalid_recovery_proof.id())
+        );
+        assert!(
+            report
+                .cases()
+                .last()
+                .unwrap()
+                .detail()
+                .contains(invalid_recovery_proof.id())
+        );
+    }
+}
+
+#[test]
 fn early_cases_require_fresh_window_bound_and_identity_bound_proof() {
     let mut environment = LifecycleEnvironment::default();
     let report = run_live_lifecycle_qualification(&mut environment, &envelope()).unwrap();
@@ -1014,6 +1187,7 @@ struct LifecycleEnvironment {
     empty_identity_call: Option<usize>,
     case_error: Option<LiveLifecycleCase>,
     malformed_case: Option<LiveLifecycleCase>,
+    invalid_recovery_proof: Option<LiveLifecycleCase>,
     reboot_fault: Option<RebootFault>,
     reset_monotonic_on_reboot: bool,
     regress_monotonic_after_case: Option<LiveLifecycleCase>,
@@ -1356,7 +1530,22 @@ impl LiveLifecycleEnvironment for LifecycleEnvironment {
         if self.malformed_case == Some(case) {
             return Ok(self.malformed_observation(case));
         }
-        let observation = self.passing_observation(case);
+        let mut observation = self.passing_observation(case);
+        if self.invalid_recovery_proof == Some(case) {
+            match &mut observation {
+                LiveLifecycleCaseObservation::ProcessKillRecovery {
+                    start_limit_reset_at,
+                    killed_at,
+                    ..
+                } => *start_limit_reset_at = *killed_at,
+                LiveLifecycleCaseObservation::WatchdogRecovery {
+                    start_limit_reset_at,
+                    expired_at,
+                    ..
+                } => *start_limit_reset_at = *expired_at,
+                _ => unreachable!("only recovery cases can request invalid recovery proof"),
+            }
+        }
         if self.regress_monotonic_after_case == Some(case) {
             self.now = 0;
         }

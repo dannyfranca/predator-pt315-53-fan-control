@@ -1006,6 +1006,45 @@ fn validate_reboot_continuation(
     }
 }
 
+struct BoundedRecoveryProof<'a> {
+    start_limit_reset_at: EvidenceTimestamp,
+    event_at: EvidenceTimestamp,
+    auto_before_restart: &'a LiveLifecycleFanAutoPair,
+    restarted_at: EvidenceTimestamp,
+    process_identity_before: &'a str,
+    process_identity_after: &'a str,
+}
+
+fn validate_bounded_recovery(
+    proof: BoundedRecoveryProof<'_>,
+    started_at: EvidenceTimestamp,
+    completed_at: EvidenceTimestamp,
+    expected_identities: &(String, String),
+) -> Result<(), String> {
+    if started_at.monotonic_millis >= proof.start_limit_reset_at.monotonic_millis
+        || started_at.wall_unix_millis > proof.start_limit_reset_at.wall_unix_millis
+        || proof.start_limit_reset_at.monotonic_millis >= proof.event_at.monotonic_millis
+        || proof.start_limit_reset_at.wall_unix_millis > proof.event_at.wall_unix_millis
+        || proof.process_identity_before.trim().is_empty()
+        || proof.process_identity_after.trim().is_empty()
+        || proof.process_identity_before == proof.process_identity_after
+    {
+        return Err(
+            "bounded recovery must reset the start limit before the event and restart a new process"
+                .into(),
+        );
+    }
+    validate_auto_after_event_before_boundary(
+        proof.auto_before_restart,
+        proof.event_at,
+        proof.restarted_at,
+        started_at,
+        completed_at,
+        expected_identities,
+        "restart",
+    )
+}
+
 fn validate_case_observation(
     expected_case: LiveLifecycleCase,
     observation: &LiveLifecycleCaseObservation,
@@ -1078,24 +1117,20 @@ fn validate_case_observation(
                 restart_delay_millis: LIVE_RESTART_DELAY_MILLIS,
                 start_limit_burst: LIVE_START_LIMIT_BURST,
             },
-        ) if started_at.monotonic_millis < start_limit_reset_at.monotonic_millis
-            && started_at.wall_unix_millis <= start_limit_reset_at.wall_unix_millis
-            && start_limit_reset_at.monotonic_millis < killed_at.monotonic_millis
-            && start_limit_reset_at.wall_unix_millis <= killed_at.wall_unix_millis
-            && !process_identity_before.trim().is_empty()
-            && !process_identity_after.trim().is_empty()
-            && process_identity_before != process_identity_after =>
-        {
-            validate_auto_after_event_before_boundary(
+        ) => validate_bounded_recovery(
+            BoundedRecoveryProof {
+                start_limit_reset_at: *start_limit_reset_at,
+                event_at: *killed_at,
                 auto_before_restart,
-                *killed_at,
-                *restarted_at,
-                started_at,
-                completed_at,
-                expected_identities,
-                "restart",
-            )
-        }
+                restarted_at: *restarted_at,
+                process_identity_before,
+                process_identity_after,
+            },
+            started_at,
+            completed_at,
+            expected_identities,
+        )
+        .map_err(|detail| format!("{} failed: {detail}", expected_case.id())),
         (
             LiveLifecycleCase::WatchdogRecovery,
             LiveLifecycleCaseObservation::WatchdogRecovery {
@@ -1109,24 +1144,20 @@ fn validate_case_observation(
                 restart_delay_millis: LIVE_RESTART_DELAY_MILLIS,
                 start_limit_burst: LIVE_START_LIMIT_BURST,
             },
-        ) if started_at.monotonic_millis < start_limit_reset_at.monotonic_millis
-            && started_at.wall_unix_millis <= start_limit_reset_at.wall_unix_millis
-            && start_limit_reset_at.monotonic_millis < expired_at.monotonic_millis
-            && start_limit_reset_at.wall_unix_millis <= expired_at.wall_unix_millis
-            && !process_identity_before.trim().is_empty()
-            && !process_identity_after.trim().is_empty()
-            && process_identity_before != process_identity_after =>
-        {
-            validate_auto_after_event_before_boundary(
+        ) => validate_bounded_recovery(
+            BoundedRecoveryProof {
+                start_limit_reset_at: *start_limit_reset_at,
+                event_at: *expired_at,
                 auto_before_restart,
-                *expired_at,
-                *restarted_at,
-                started_at,
-                completed_at,
-                expected_identities,
-                "restart",
-            )
-        }
+                restarted_at: *restarted_at,
+                process_identity_before,
+                process_identity_after,
+            },
+            started_at,
+            completed_at,
+            expected_identities,
+        )
+        .map_err(|detail| format!("{} failed: {detail}", expected_case.id())),
         (
             LiveLifecycleCase::AcToBatteryTransition,
             LiveLifecycleCaseObservation::AcToBatteryTransition {
