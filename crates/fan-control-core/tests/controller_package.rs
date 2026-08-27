@@ -8,8 +8,8 @@ use std::{
 
 use fan_control_core::{parse_compatibility_v1, parse_config_v1, validate_config_v1};
 
-const SOURCE_COMMIT: &str = "1b65bd5b14e88572d9ef3b0d67fd919fb68550f4";
-const SOURCE_SHA256: &str = "ffaea9d7dfdf3f374e6eead456dd59c38d82b4112673c30c6a3227a2486118c0";
+const SOURCE_COMMIT: &str = "b944afb0d6400853003b2e529f3f0cb2485df32d";
+const SOURCE_SHA256: &str = "b59f24fc52cbb4dd5d9151cecfd568485332d466eb5d6d4b3f183982906f2393";
 const EXPECTED_TMPFILES: &str = "\
 # Type Path                                           Mode User Group Age Argument
 d /var/lib/pt31553-fan-control                        0700 root root -   -
@@ -65,6 +65,9 @@ fn source_metadata_is_exact_and_reproducible() {
 
     assert!(pkgbuild.contains(&format!("_commit='{SOURCE_COMMIT}'")));
     assert!(pkgbuild.contains(SOURCE_SHA256));
+    assert!(pkgbuild.contains(
+        "depends=('bash' 'coreutils' 'gcc-libs' 'glibc' 'glmark2' 'stress-ng' 'systemd')"
+    ));
     assert!(!pkgbuild.contains("SKIP"));
     assert!(!pkgbuild.contains("pkgver()"));
     assert!(pkgbuild.contains("cargo build --frozen --release --workspace --bins"));
@@ -73,6 +76,22 @@ fn source_metadata_is_exact_and_reproducible() {
     ));
     assert!(srcinfo.contains(&format!("archive/{SOURCE_COMMIT}.tar.gz")));
     assert!(srcinfo.contains(SOURCE_SHA256));
+    let dependencies = srcinfo
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("depends = "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        dependencies,
+        [
+            "bash",
+            "coreutils",
+            "gcc-libs",
+            "glibc",
+            "glmark2",
+            "stress-ng",
+            "systemd"
+        ]
+    );
     assert!(
         !srcinfo
             .lines()
@@ -197,6 +216,13 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
         "config/example.toml",
         "compatibility/pt315-53.toml",
         "packaging/controller/pt31553-fan-control.tmpfiles",
+        "qualification/workloads/VERSION",
+        "qualification/workloads/common",
+        "qualification/workloads/idle",
+        "qualification/workloads/cpu",
+        "qualification/workloads/gpu",
+        "qualification/workloads/combined",
+        "qualification/workloads/mixed",
         "LICENSE",
     ];
     for relative in pinned_assets {
@@ -271,6 +297,14 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
             "schemas/evidence-v2.json",
         ),
         ("usr/share/licenses/pt31553-fan-control/LICENSE", "LICENSE"),
+        (
+            "usr/lib/pt31553-fan-control/workloads/VERSION",
+            "qualification/workloads/VERSION",
+        ),
+        (
+            "usr/lib/pt31553-fan-control/workloads/common",
+            "qualification/workloads/common",
+        ),
     ] {
         assert_eq!(
             fs::read(pkgdir.join(installed)).unwrap(),
@@ -291,12 +325,47 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
         "usr/lib/systemd/system/pt31553-fan-sleep-guard.service",
         "usr/lib/systemd/system-preset/90-pt31553-fan-control.preset",
         "usr/lib/tmpfiles.d/pt31553-fan-control.conf",
+        "usr/lib/pt31553-fan-control/workloads/VERSION",
+        "usr/lib/pt31553-fan-control/workloads/common",
         "usr/share/pt31553-fan-control/schemas/evidence.json",
         "usr/share/pt31553-fan-control/schemas/evidence-v2.json",
         "usr/share/licenses/pt31553-fan-control/LICENSE",
     ] {
         assert_eq!(mode(pkgdir.join(asset)), 0o644, "unsafe mode for {asset}");
     }
+    for workload in ["idle", "cpu", "gpu", "combined", "mixed"] {
+        let installed = format!("usr/lib/pt31553-fan-control/workloads/{workload}");
+        let source = format!("qualification/workloads/{workload}");
+        assert_eq!(mode(pkgdir.join(&installed)), 0o755);
+        assert_eq!(
+            fs::read(pkgdir.join(&installed)).unwrap(),
+            fs::read(repository.join(source)).unwrap()
+        );
+        assert_eq!(
+            Command::new(pkgdir.join(&installed))
+                .arg("--not-fixed")
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .code(),
+            Some(64),
+            "{workload} accepted a non-canonical invocation"
+        );
+        assert_eq!(
+            Command::new(pkgdir.join(&installed))
+                .args(["--fixed", "extra"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .code(),
+            Some(64),
+            "{workload} accepted extra arguments"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(pkgdir.join("usr/lib/pt31553-fan-control/workloads/VERSION")).unwrap(),
+        "1.0.0\n"
+    );
     assert!(
         fs::read_dir(pkgdir.join("var/lib/pt31553-fan-control/evidence"))
             .unwrap()
@@ -315,6 +384,13 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
             "usr/bin/pt31553-fan-restore",
             "usr/bin/pt31553-fand",
             "usr/lib/pt31553-fan-control/compatibility.toml",
+            "usr/lib/pt31553-fan-control/workloads/VERSION",
+            "usr/lib/pt31553-fan-control/workloads/combined",
+            "usr/lib/pt31553-fan-control/workloads/common",
+            "usr/lib/pt31553-fan-control/workloads/cpu",
+            "usr/lib/pt31553-fan-control/workloads/gpu",
+            "usr/lib/pt31553-fan-control/workloads/idle",
+            "usr/lib/pt31553-fan-control/workloads/mixed",
             "usr/lib/systemd/system-preset/90-pt31553-fan-control.preset",
             "usr/lib/systemd/system/pt31553-fan-sleep-guard.service",
             "usr/lib/systemd/system/pt31553-fand.service",
