@@ -5,12 +5,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     CPU_ABSOLUTE_ABORT_MILLICELSIUS, EVIDENCE_SCHEMA_VERSION_V2, EvidenceExternalPower,
-    EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceRecordStatus, EvidenceTimestamp,
-    EvidenceValidationError, Fan, FanCalibrationEvidence, FanCommandEvidence, FanControlField,
-    FanReadbackEvidence, FanReadbackField, FaultEvidence, GPU_ABSOLUTE_ABORT_MILLICELSIUS,
-    ObservationOutcome, Pwm, RestorationAttemptEvidence, RestorationOutcome, RunOutcomeEvidence,
-    RunOutcomeStatus, SampleFreshness, StateTransitionEvidence, TelemetrySampleEvidence,
-    WorkloadEvidence,
+    EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceTimestamp, EvidenceValidationError, Fan,
+    FanCalibrationEvidence, FanCommandEvidence, FanControlField, FanReadbackEvidence,
+    FanReadbackField, FaultEvidence, GPU_ABSOLUTE_ABORT_MILLICELSIUS, ObservationOutcome, Pwm,
+    RestorationAttemptEvidence, RestorationOutcome, RunOutcomeEvidence, RunOutcomeStatus,
+    SampleFreshness, StateTransitionEvidence, TelemetrySampleEvidence, WorkloadEvidence,
     evidence::{precise_final_thermal_slopes, summarize_thermal_evidence},
     tachometer::{expected_rpm_from_evidence, pwm_to_basis_points, rpm_in_band},
 };
@@ -853,32 +852,12 @@ where
             .map(|fault| fault.detail.clone())
             .unwrap_or_else(|| "Custom workload incomplete".to_owned())
     };
-    let record = EvidenceRecord {
-        schema_version: EVIDENCE_SCHEMA_VERSION_V2,
-        record_status: EvidenceRecordStatus::Complete,
-        qualification_envelope: plan.baseline.qualification_envelope.clone(),
-        stage: "matched-workload".into(),
+    let mut record = EvidenceRecord::complete_v2(
+        plan.baseline.qualification_envelope.clone(),
+        "matched-workload",
         started_at,
         completed_at,
-        starting_conditions_captured_at,
-        workload_started_at,
-        baseline_binding_sha256: Some(baseline_fingerprint(plan.baseline)),
-        workload: Some(workload),
-        samples,
-        commands,
-        readbacks,
-        state_transitions,
-        faults,
-        restoration_attempts,
-        process_stops: Vec::new(),
-        calibration: vec![
-            calibration_for_fan(plan.tachometer_calibrations, EvidenceFan::Cpu).clone(),
-            calibration_for_fan(plan.tachometer_calibrations, EvidenceFan::Gpu).clone(),
-        ],
-        thermal_summary: Some(thermal_summary),
-        endurance_thermal_envelope: None,
-        live_lifecycle_cases: None,
-        outcome: RunOutcomeEvidence {
+        RunOutcomeEvidence {
             status: if accepted {
                 RunOutcomeStatus::Passed
             } else {
@@ -888,7 +867,22 @@ where
             another_passing_run_required,
             final_firmware_auto_confirmed: both_fans_restored,
         },
-    };
+    );
+    record.starting_conditions_captured_at = starting_conditions_captured_at;
+    record.workload_started_at = workload_started_at;
+    record.baseline_binding_sha256 = Some(baseline_fingerprint(plan.baseline));
+    record.workload = Some(workload);
+    record.samples = samples;
+    record.commands = commands;
+    record.readbacks = readbacks;
+    record.state_transitions = state_transitions;
+    record.faults = faults;
+    record.restoration_attempts = restoration_attempts;
+    record.calibration = vec![
+        calibration_for_fan(plan.tachometer_calibrations, EvidenceFan::Cpu).clone(),
+        calibration_for_fan(plan.tachometer_calibrations, EvidenceFan::Gpu).clone(),
+    ];
+    record.thermal_summary = Some(thermal_summary);
     record
         .validate()
         .map_err(MatchedWorkloadPlanError::InvalidGeneratedEvidence)?;

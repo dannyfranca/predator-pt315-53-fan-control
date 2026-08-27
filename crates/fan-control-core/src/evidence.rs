@@ -613,6 +613,39 @@ impl EvidenceWriteError {
 }
 
 impl EvidenceRecord {
+    pub(crate) fn complete_v2(
+        qualification_envelope: QualificationEnvelopeIdentityV1,
+        stage: impl Into<String>,
+        started_at: EvidenceTimestamp,
+        completed_at: EvidenceTimestamp,
+        outcome: RunOutcomeEvidence,
+    ) -> Self {
+        Self {
+            schema_version: EVIDENCE_SCHEMA_VERSION_V2,
+            record_status: EvidenceRecordStatus::Complete,
+            qualification_envelope,
+            stage: stage.into(),
+            started_at,
+            completed_at,
+            starting_conditions_captured_at: None,
+            workload_started_at: None,
+            baseline_binding_sha256: None,
+            workload: None,
+            samples: Vec::new(),
+            commands: Vec::new(),
+            readbacks: Vec::new(),
+            state_transitions: Vec::new(),
+            faults: Vec::new(),
+            restoration_attempts: Vec::new(),
+            process_stops: Vec::new(),
+            calibration: Vec::new(),
+            thermal_summary: None,
+            endurance_thermal_envelope: None,
+            live_lifecycle_cases: None,
+            outcome,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), EvidenceValidationError> {
         if !matches!(
             self.schema_version,
