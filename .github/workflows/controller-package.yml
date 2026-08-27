@@ -38,6 +38,9 @@ jobs:
         run: |
           useradd --create-home builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
+          install -d -o builder -g builder -m 0755 /home/builder/controller-package
+          cp -a "$GITHUB_WORKSPACE/packaging/controller/." /home/builder/controller-package/
+          chown -R builder:builder /home/builder/controller-package
 
       - name: Test current package contract
         run: |
@@ -46,11 +49,14 @@ jobs:
 
       - name: Build and test locked package
         run: |
-          su builder -c 'cd "$GITHUB_WORKSPACE/packaging/controller" && makepkg --noconfirm --cleanbuild'
+          # GitHub mounts its workspace beneath group-writable runner directories.
+          # Build beneath the builder's trusted home so ownership-sensitive tests
+          # exercise the same ancestor contract as a real package build host.
+          su builder -c 'cd /home/builder/controller-package && makepkg --noconfirm --cleanbuild'
 
       - name: Verify package contents
         run: |
-          package=$(find packaging/controller -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)
+          package=$(find /home/builder/controller-package -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)
           test -n "$package"
           bsdtar -tf "$package" > /tmp/controller-package-contents
           bsdtar -tvf "$package" | awk '
