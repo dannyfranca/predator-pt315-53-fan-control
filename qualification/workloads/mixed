@@ -8,11 +8,20 @@ require_fixed_workload "$@"
 ACTIVE_WORKLOAD_PID=
 
 stop_active_segment() {
+  local pid
   if [[ -n ${ACTIVE_WORKLOAD_PID:-} ]]; then
     kill -TERM "$ACTIVE_WORKLOAD_PID" 2>/dev/null || true
     wait "$ACTIVE_WORKLOAD_PID" 2>/dev/null || true
-    ACTIVE_WORKLOAD_PID=
   fi
+  # A signal can arrive after Bash registers the background segment but before
+  # the following assignment records $!. Contain that unassigned job too.
+  while read -r pid; do
+    if [[ -n $pid ]]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done < <(jobs -pr)
+  ACTIVE_WORKLOAD_PID=
 }
 
 start_load() {
