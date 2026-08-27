@@ -27,6 +27,7 @@ mod platform;
 mod policy;
 mod preflight;
 mod qualification;
+mod requalification;
 mod restoration;
 mod sampling;
 mod sensor_recovery;
@@ -151,6 +152,11 @@ pub use preflight::{
 pub use qualification::{
     QualificationAuthorizationError, QualificationRecordV2, SupervisedEnduranceAuthorizationV1,
     write_qualification_record_after_endurance,
+};
+pub use requalification::{
+    ABBREVIATED_RECHECKS, AbbreviatedRecheck, AbbreviatedRecheckOutcome, AbbreviatedRecheckResults,
+    FullRequalificationReason, PhysicalHardwareContinuity, QualificationBaseline,
+    QualificationCandidate, RequalificationDecision, decide_requalification,
 };
 pub use restoration::{
     EmergencyContainmentReport, EmergencyFanStatus, FanModeFailure, FanRestorationStatus,

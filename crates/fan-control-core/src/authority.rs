@@ -53,6 +53,14 @@ struct ValidatedPolicyAuthority {
     endurance_evidence_sha256: String,
 }
 
+pub(crate) struct RequalificationPolicySnapshot {
+    pub(crate) qualification_id: String,
+    pub(crate) policy_version: String,
+    pub(crate) compatibility: CompatibilityDeclarationV1,
+    pub(crate) protected_policy_sha256: String,
+    pub(crate) protected: ValidatedConfig,
+}
+
 impl ValidatedPolicyAuthority {
     fn bind_to_ownership(self, ownership_id: u64) -> AdmittedPolicyAuthority {
         AdmittedPolicyAuthority {
@@ -359,6 +367,21 @@ fn validate_policy_authority(
     })
 }
 
+pub(crate) fn requalification_policy_snapshot(
+    protected_policy_source: &str,
+) -> Result<RequalificationPolicySnapshot, PolicyAuthorityError> {
+    let manifest = parse_protected_policy_v2(protected_policy_source)?;
+    let protected = validate_config_v1(manifest.protected)
+        .map_err(PolicyAuthorityError::InvalidProtectedPolicy)?;
+    Ok(RequalificationPolicySnapshot {
+        qualification_id: manifest.qualification_id,
+        policy_version: manifest.policy_version,
+        compatibility: manifest.compatibility,
+        protected_policy_sha256: sha256_hex(protected_policy_source.as_bytes()),
+        protected,
+    })
+}
+
 fn validate_manifest_identity(
     manifest: &ProtectedPolicyManifestV2,
 ) -> Result<(), PolicyAuthorityError> {
@@ -381,7 +404,9 @@ fn validate_manifest_identity(
     validate_compatibility("protected policy", &manifest.compatibility)
 }
 
-fn validate_record_identity(record: &QualificationRecordV2) -> Result<(), PolicyAuthorityError> {
+pub(crate) fn validate_record_identity(
+    record: &QualificationRecordV2,
+) -> Result<(), PolicyAuthorityError> {
     if record.schema_version != 2 {
         return Err(PolicyAuthorityError::InvalidIdentity {
             artifact: "qualification record",
