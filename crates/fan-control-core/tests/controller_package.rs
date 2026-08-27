@@ -130,6 +130,43 @@ fn compatibility_declaration_is_exact_model_but_cannot_claim_qualified_artifacts
 
 #[cfg(unix)]
 #[test]
+fn prepare_hardens_reused_source_ancestors() {
+    let root = std::env::temp_dir().join(format!(
+        "pt31553-controller-prepare-{}-{}",
+        std::process::id(),
+        NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    let srcdir = root.join("src");
+    let source_root = srcdir.join(format!("predator-pt315-53-fan-control-{SOURCE_COMMIT}"));
+    fs::create_dir_all(&source_root).unwrap();
+    fs::set_permissions(&srcdir, fs::Permissions::from_mode(0o775)).unwrap();
+    fs::set_permissions(&source_root, fs::Permissions::from_mode(0o775)).unwrap();
+
+    let output = Command::new("/bin/bash")
+        .args([
+            "-c",
+            "set -euo pipefail; source \"$1\"; cargo() { test \"$(stat -c %a \"$srcdir\")\" = 755; test \"$(stat -c %a \"$PWD\")\" = 755; }; prepare",
+            "package-prepare-test",
+        ])
+        .arg(package_root().join("PKGBUILD"))
+        .current_dir(&srcdir)
+        .env("srcdir", &srcdir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(mode(&srcdir), 0o755);
+    assert_eq!(mode(&source_root), 0o755);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn package_layout_keeps_authority_and_state_boundaries_separate() {
     let root = std::env::temp_dir().join(format!(
         "pt31553-controller-package-{}-{}",
