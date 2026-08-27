@@ -2,7 +2,8 @@
 
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, Once},
+    io::Read,
+    sync::{Arc, Mutex, Once, OnceLock},
 };
 
 use fan_control_core::{
@@ -14,6 +15,7 @@ use fan_control_core::{
     RunOutcomeStatus, StateTransitionEvidence, ValidatedConfig, parse_compatibility_v1,
     parse_config_v1, validate_config_v1,
 };
+use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use tracing::{Event, Subscriber, field::Visit};
 use tracing_subscriber::{Layer, layer::Context, prelude::*};
@@ -220,15 +222,56 @@ pub fn matching_observation(declaration: &CompatibilityDeclarationV1) -> Compati
 }
 
 pub fn matching_record(policy: &str) -> String {
-    format!(
-        r#"{{"schema_version":1,"qualification_id":"pt31553-v1","policy_version":"1.0.0","protected_policy_sha256":"{}","compatibility":{{"schema_version":1,"hardware":{{"dmi_product_name":"Predator PT315-53","dmi_board_name":"Civic_TLS","bios_version":"V1.17"}},"kernel":{{"release":"7.1.8-1-cachyos-pt31553","package":"linux-cachyos-pt31553","source_commit":"{}","image_sha256":"{}","image_signer_fingerprint":"{}"}},"module":{{"name":"acer_wmi","path":"/usr/lib/modules/7.1.8-1-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst","sha256":"{}","signer_fingerprint":"{}","vermagic":"7.1.8-1-cachyos-pt31553 SMP preempt mod_unload","provenance":"in-tree"}},"secure_boot":{{"required":true}},"fan_control":{{"backend":"acer-hwmon","hwmon_name":"acer","endpoints":["pwm1","pwm1_enable","fan1_input","pwm2","pwm2_enable","fan2_input"],"forbidden_capabilities":["force-caps","ec-raw-mode","predator-v4-override","direct-wmi","raw-ec","replacement-wmi-module","alternate-fan-write-backend"]}}}}}}"#,
-        sha256(policy),
-        SOURCE_COMMIT,
-        HASH_A,
-        HASH_B,
-        HASH_A,
-        HASH_B,
-    )
+    let evidence_sha256 = sha256(&matching_endurance_evidence(policy));
+    serde_json::to_string(&serde_json::json!({
+        "schema_version": 2,
+        "qualification_id": "pt31553-v1",
+        "policy_version": "1.0.0",
+        "protected_policy_sha256": sha256(policy),
+        "compatibility": compatibility_declaration(PROTECTED_POLICY),
+        "supervised_endurance": {
+            "schema_version": 1,
+            "evidence_sha256": evidence_sha256,
+            "evidence_path": fan_control_core::SUPERVISED_ENDURANCE_EVIDENCE_PATH,
+            "evidence_schema_version": 2,
+            "stage": "supervised-endurance",
+            "record_status": "complete",
+            "outcome": "passed",
+            "final_firmware_auto_confirmed": true,
+            "workload_stopped": true,
+            "service_stopped": true,
+            "completed_at": {
+                "monotonic_millis": 3_600_000,
+                "wall_unix_millis": 3_600_000
+            }
+        }
+    }))
+    .expect("qualification fixture serializes")
+}
+
+pub fn matching_endurance_evidence(policy: &str) -> String {
+    static CACHE: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+
+    let protected_policy_sha256 = sha256(policy);
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some(source) = cache.lock().unwrap().get(&protected_policy_sha256).cloned() {
+        return source;
+    }
+
+    let mut compressed = GzDecoder::new(
+        &include_bytes!("../../../../qualification/supervised-endurance-v2.json.gz")[..],
+    );
+    let mut source = String::new();
+    compressed.read_to_string(&mut source).unwrap();
+    let mut record: serde_json::Value = serde_json::from_str(&source).unwrap();
+    record["qualification_envelope"]["protected_policy_sha256"] =
+        protected_policy_sha256.clone().into();
+    let source = serde_json::to_string(&record).unwrap();
+    cache
+        .lock()
+        .unwrap()
+        .insert(protected_policy_sha256, source.clone());
+    source
 }
 
 pub fn sha256(source: &str) -> String {

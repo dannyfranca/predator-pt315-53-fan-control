@@ -894,6 +894,8 @@ fn observation(
             selected_profile: Some(EvidenceProfile::Ac),
             cpu_source_demand_basis_points: Some(4_000),
             gpu_source_demand_basis_points: Some(3_000),
+            cpu_utilization_basis_points: None,
+            gpu_utilization_basis_points: None,
             commanded_demand_basis_points: Some(4_000),
             cpu_thermal_throttling: Some(false),
             gpu_thermal_throttling: Some(false),

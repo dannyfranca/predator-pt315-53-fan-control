@@ -712,8 +712,10 @@ where
         state_transitions: transitions,
         faults,
         restoration_attempts: Vec::new(),
+        process_stops: Vec::new(),
         calibration: Vec::new(),
         thermal_summary: None,
+        endurance_thermal_envelope: None,
         live_lifecycle_cases: Some(cases.clone()),
         outcome: RunOutcomeEvidence {
             status: if accepted {

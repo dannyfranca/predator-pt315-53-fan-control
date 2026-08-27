@@ -414,6 +414,8 @@
         "selected_profile": { "enum": ["ac", "battery", null] },
         "cpu_source_demand_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
         "gpu_source_demand_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
+        "cpu_utilization_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
+        "gpu_utilization_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
         "commanded_demand_basis_points": { "$ref": "#/$defs/nullableBasisPoints" },
         "cpu_thermal_throttling": { "$ref": "#/$defs/nullableBoolean" },
         "gpu_thermal_throttling": { "$ref": "#/$defs/nullableBoolean" }

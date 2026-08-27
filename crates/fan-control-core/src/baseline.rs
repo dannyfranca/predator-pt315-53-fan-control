@@ -596,8 +596,10 @@ where
         state_transitions: Vec::new(),
         faults,
         restoration_attempts: Vec::new(),
+        process_stops: Vec::new(),
         calibration: Vec::new(),
         thermal_summary: Some(thermal_summary),
+        endurance_thermal_envelope: None,
         live_lifecycle_cases: None,
         outcome: RunOutcomeEvidence {
             status: if accepted {
