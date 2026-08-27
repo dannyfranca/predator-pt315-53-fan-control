@@ -1,0 +1,8 @@
+#!/usr/bin/bash
+
+set -euo pipefail
+source /usr/lib/pt31553-fan-control/workloads/common
+require_fixed_workload "$@"
+start_cpu_workload
+start_gpu_workload
+wait_for_fixed_workload

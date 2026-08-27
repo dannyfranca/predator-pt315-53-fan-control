@@ -1,0 +1,28 @@
+#!/usr/bin/bash
+
+set -euo pipefail
+source /usr/lib/pt31553-fan-control/workloads/common
+require_fixed_workload "$@"
+
+start_load() {
+  stop_fixed_workload
+  start_cpu_workload
+  start_gpu_workload
+}
+
+enter_idle() {
+  stop_fixed_workload
+}
+
+trap start_load USR1
+trap enter_idle USR2
+trap 'stop_fixed_workload; exit 0' HUP INT TERM
+
+# The endurance harness sends SIGUSR1 for load segments and SIGUSR2 for idle
+# segments. The canonical schedule begins under load.
+start_load
+while true; do
+  wait "${CPU_WORKLOAD_PID:-}" "${GPU_WORKLOAD_PID:-}" 2>/dev/null || true
+  /usr/bin/sleep infinity &
+  wait $! || true
+done

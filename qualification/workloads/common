@@ -1,0 +1,48 @@
+#!/usr/bin/bash
+
+set -euo pipefail
+
+require_fixed_workload() {
+  if [[ $# -ne 1 || $1 != --fixed ]]; then
+    printf 'usage: %s --fixed\n' "${0##*/}" >&2
+    exit 64
+  fi
+}
+
+start_cpu_workload() {
+  /usr/bin/stress-ng \
+    --cpu 0 \
+    --cpu-method matrixprod \
+    --verify \
+    --quiet &
+  CPU_WORKLOAD_PID=$!
+}
+
+start_gpu_workload() {
+  /usr/bin/glmark2 \
+    --off-screen \
+    --run-forever \
+    --benchmark 'shading:duration=5.0:shading=phong' &
+  GPU_WORKLOAD_PID=$!
+}
+
+stop_fixed_workload() {
+  local pid
+  for pid in "${CPU_WORKLOAD_PID:-}" "${GPU_WORKLOAD_PID:-}"; do
+    if [[ -n $pid ]]; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  for pid in "${CPU_WORKLOAD_PID:-}" "${GPU_WORKLOAD_PID:-}"; do
+    if [[ -n $pid ]]; then
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+  CPU_WORKLOAD_PID=
+  GPU_WORKLOAD_PID=
+}
+
+wait_for_fixed_workload() {
+  trap 'stop_fixed_workload; exit 0' HUP INT TERM
+  wait -n "${CPU_WORKLOAD_PID:-}" "${GPU_WORKLOAD_PID:-}"
+}

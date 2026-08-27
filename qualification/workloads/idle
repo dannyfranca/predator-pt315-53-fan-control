@@ -1,0 +1,6 @@
+#!/usr/bin/bash
+
+set -euo pipefail
+source /usr/lib/pt31553-fan-control/workloads/common
+require_fixed_workload "$@"
+exec /usr/bin/sleep infinity
