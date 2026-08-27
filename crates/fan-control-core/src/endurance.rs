@@ -415,10 +415,11 @@ where
             );
         }
         let requested_at = later_timestamp(observed_at, lifecycle_not_before);
-        if faults.is_empty()
-            && let Some(deadline) =
-                operation_deadline(requested_at, &mut faults, "custom-control-entry")
-        {
+        let deadline = faults
+            .is_empty()
+            .then(|| operation_deadline(requested_at, &mut faults, "custom-control-entry"))
+            .flatten();
+        if let Some(deadline) = deadline {
             custom_attempted = true;
             let result = environment.enter_custom_control(deadline);
             let observed_completed_at = environment.timestamp();
@@ -470,10 +471,11 @@ where
             );
         }
         let requested_at = later_timestamp(observed_at, lifecycle_not_before);
-        if faults.is_empty()
-            && let Some(deadline) =
-                operation_deadline(requested_at, &mut faults, "endurance-segment")
-        {
+        let deadline = faults
+            .is_empty()
+            .then(|| operation_deadline(requested_at, &mut faults, "endurance-segment"))
+            .flatten();
+        if let Some(deadline) = deadline {
             let result = environment.begin_segment(segment, deadline);
             let observed_completed_at = environment.timestamp();
             if observed_completed_at.monotonic_millis < requested_at.monotonic_millis {
@@ -530,9 +532,11 @@ where
             );
         }
         let requested_at = later_timestamp(observed_at, lifecycle_not_before);
-        if faults.is_empty()
-            && let Some(deadline) = operation_deadline(requested_at, &mut faults, "workload-start")
-        {
+        let deadline = faults
+            .is_empty()
+            .then(|| operation_deadline(requested_at, &mut faults, "workload-start"))
+            .flatten();
+        if let Some(deadline) = deadline {
             workload_attempted = true;
             let result = environment.start_workload(&workload, deadline);
             let observed_completed_at = environment.timestamp();
