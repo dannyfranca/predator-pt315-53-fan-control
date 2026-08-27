@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 
 set -euo pipefail
-workload_dir=$(dirname -- "${BASH_SOURCE[0]}")
+workload_dir=$(/usr/bin/dirname -- "${BASH_SOURCE[0]}")
 source "$workload_dir/common"
 require_fixed_workload "$@"
 

@@ -10,6 +10,7 @@ on:
       - "config/**"
       - "crates/**"
       - "packaging/controller/**"
+      - "qualification/workloads/**"
       - "schemas/**"
       - "systemd/**"
   push:
@@ -22,6 +23,7 @@ on:
       - "config/**"
       - "crates/**"
       - "packaging/controller/**"
+      - "qualification/workloads/**"
       - "schemas/**"
       - "systemd/**"
 
@@ -89,6 +91,13 @@ jobs:
             usr/bin/pt31553-fan-restore \
             usr/bin/pt31553-fan-qualify \
             usr/lib/pt31553-fan-control/compatibility.toml \
+            usr/lib/pt31553-fan-control/workloads/VERSION \
+            usr/lib/pt31553-fan-control/workloads/combined \
+            usr/lib/pt31553-fan-control/workloads/common \
+            usr/lib/pt31553-fan-control/workloads/cpu \
+            usr/lib/pt31553-fan-control/workloads/gpu \
+            usr/lib/pt31553-fan-control/workloads/idle \
+            usr/lib/pt31553-fan-control/workloads/mixed \
             usr/lib/systemd/system/pt31553-fand.service \
             usr/lib/systemd/system/pt31553-fan-sleep-guard.service \
             usr/lib/systemd/system-preset/90-pt31553-fan-control.preset \

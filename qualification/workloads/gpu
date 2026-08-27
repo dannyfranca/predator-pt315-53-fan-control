@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 
 set -euo pipefail
-source "$(dirname -- "${BASH_SOURCE[0]}")/common"
+source "$(/usr/bin/dirname -- "${BASH_SOURCE[0]}")/common"
 require_fixed_workload "$@"
 start_gpu_workload
 wait_for_fixed_workload
