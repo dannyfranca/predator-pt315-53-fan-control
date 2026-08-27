@@ -598,6 +598,7 @@ where
         restoration_attempts: Vec::new(),
         calibration: Vec::new(),
         thermal_summary: Some(thermal_summary),
+        live_lifecycle_cases: None,
         outcome: RunOutcomeEvidence {
             status: if accepted {
                 RunOutcomeStatus::Passed
@@ -821,6 +822,9 @@ fn observe_firmware_auto(
                     observed.push(format!("{fan_name}={value}"));
                     readbacks.push(FanReadbackEvidence {
                         timestamp: unstamped,
+                        source_timestamp: None,
+                        fresh: None,
+                        boot_id: None,
                         fan,
                         field: FanReadbackField::Enable,
                         value: Some(value),
@@ -833,6 +837,9 @@ fn observe_firmware_auto(
                     observed.push(format!("{fan_name}=invalid"));
                     readbacks.push(FanReadbackEvidence {
                         timestamp: unstamped,
+                        source_timestamp: None,
+                        fresh: None,
+                        boot_id: None,
                         fan,
                         field: FanReadbackField::Enable,
                         value: None,
@@ -846,6 +853,9 @@ fn observe_firmware_auto(
                 observed.push(format!("{fan_name}=unreadable ({error})"));
                 readbacks.push(FanReadbackEvidence {
                     timestamp: unstamped,
+                    source_timestamp: None,
+                    fresh: None,
+                    boot_id: None,
                     fan,
                     field: FanReadbackField::Enable,
                     value: None,
@@ -884,6 +894,7 @@ fn push_fault(
 ) {
     faults.push(FaultEvidence {
         timestamp,
+        boot_id: None,
         code: code.into(),
         detail: detail.into(),
     });

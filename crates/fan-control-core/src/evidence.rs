@@ -46,6 +46,7 @@ pub struct EvidenceRecord {
     pub restoration_attempts: Vec<RestorationAttemptEvidence>,
     pub calibration: Vec<FanCalibrationEvidence>,
     pub thermal_summary: Option<ThermalSummaryEvidence>,
+    pub live_lifecycle_cases: Option<Vec<crate::LiveLifecycleCaseResult>>,
     pub outcome: RunOutcomeEvidence,
 }
 
@@ -76,6 +77,8 @@ struct EvidenceRecordWire {
     calibration: Vec<FanCalibrationEvidence>,
     #[serde(deserialize_with = "deserialize_required_option")]
     thermal_summary: Option<ThermalSummaryEvidence>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    live_lifecycle_cases: Option<Vec<crate::LiveLifecycleCaseResult>>,
     outcome: RunOutcomeEvidence,
 }
 
@@ -102,6 +105,7 @@ impl TryFrom<EvidenceRecordWire> for EvidenceRecord {
             restoration_attempts: wire.restoration_attempts,
             calibration: wire.calibration,
             thermal_summary: wire.thermal_summary,
+            live_lifecycle_cases: wire.live_lifecycle_cases,
             outcome: wire.outcome,
         };
         record.validate()?;
@@ -119,7 +123,8 @@ impl Serialize for EvidenceRecord {
             "EvidenceRecord",
             16 + usize::from(self.starting_conditions_captured_at.is_some())
                 + usize::from(self.workload_started_at.is_some())
-                + usize::from(self.baseline_binding_sha256.is_some()),
+                + usize::from(self.baseline_binding_sha256.is_some())
+                + usize::from(self.live_lifecycle_cases.is_some()),
         )?;
         record.serialize_field("schema_version", &self.schema_version)?;
         record.serialize_field("record_status", &self.record_status)?;
@@ -148,6 +153,9 @@ impl Serialize for EvidenceRecord {
         record.serialize_field("restoration_attempts", &self.restoration_attempts)?;
         record.serialize_field("calibration", &self.calibration)?;
         record.serialize_field("thermal_summary", &self.thermal_summary)?;
+        if let Some(live_lifecycle_cases) = &self.live_lifecycle_cases {
+            record.serialize_field("live_lifecycle_cases", live_lifecycle_cases)?;
+        }
         record.serialize_field("outcome", &self.outcome)?;
         record.end()
     }
@@ -253,6 +261,24 @@ pub struct FanCommandEvidence {
 #[serde(deny_unknown_fields)]
 pub struct FanReadbackEvidence {
     pub timestamp: EvidenceTimestamp,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_timestamp: Option<EvidenceTimestamp>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fresh: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub boot_id: Option<String>,
     pub fan: EvidenceFan,
     pub field: FanReadbackField,
     #[serde(deserialize_with = "deserialize_required_option")]
@@ -311,6 +337,12 @@ pub enum ObservationOutcome {
 #[serde(deny_unknown_fields)]
 pub struct StateTransitionEvidence {
     pub timestamp: EvidenceTimestamp,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub boot_id: Option<String>,
     pub from: String,
     pub to: String,
 }
@@ -319,6 +351,12 @@ pub struct StateTransitionEvidence {
 #[serde(deny_unknown_fields)]
 pub struct FaultEvidence {
     pub timestamp: EvidenceTimestamp,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub boot_id: Option<String>,
     pub code: String,
     pub detail: String,
 }
@@ -549,13 +587,33 @@ impl EvidenceRecord {
                     field: "baseline_binding_sha256",
                 });
             }
+            if self.live_lifecycle_cases.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "live_lifecycle_cases",
+                });
+            }
+            if self.readbacks.iter().any(|readback| {
+                readback.phase.is_some()
+                    || readback.source_timestamp.is_some()
+                    || readback.fresh.is_some()
+                    || readback.boot_id.is_some()
+            }) {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "readbacks.v2_fields",
+                });
+            }
             if self
-                .readbacks
+                .state_transitions
                 .iter()
-                .any(|readback| readback.phase.is_some())
+                .any(|transition| transition.boot_id.is_some())
             {
                 return Err(EvidenceValidationError::IncompatibleSchemaField {
-                    field: "readbacks.phase",
+                    field: "state_transitions.boot_id",
+                });
+            }
+            if self.faults.iter().any(|fault| fault.boot_id.is_some()) {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "faults.boot_id",
                 });
             }
             if self
@@ -586,6 +644,39 @@ impl EvidenceRecord {
                 });
             }
             (_, _, None) => {}
+        }
+        match (self.stage.as_str(), self.live_lifecycle_cases.as_ref()) {
+            ("live-lifecycle", Some(_))
+                if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2
+                    && crate::live_lifecycle::live_lifecycle_cases_are_well_formed(self) => {}
+            ("live-lifecycle", _) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "live_lifecycle_cases",
+                    index: 0,
+                });
+            }
+            (_, Some(_)) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "live_lifecycle_cases",
+                    index: 0,
+                });
+            }
+            (_, None) => {}
+        }
+        if self.stage == "live-lifecycle"
+            && (self.starting_conditions_captured_at.is_some()
+                || self.workload_started_at.is_some()
+                || self.workload.is_some()
+                || !self.samples.is_empty()
+                || !self.commands.is_empty()
+                || !self.restoration_attempts.is_empty()
+                || !self.calibration.is_empty()
+                || self.thermal_summary.is_some())
+        {
+            return Err(EvidenceValidationError::InvalidValue {
+                field: "live_lifecycle_shape",
+                index: 0,
+            });
         }
         if self.started_at.monotonic_millis > self.completed_at.monotonic_millis {
             return Err(EvidenceValidationError::InvalidTimeRange);
@@ -656,7 +747,22 @@ impl EvidenceRecord {
             }
         }
         for (index, readback) in self.readbacks.iter().enumerate() {
-            validate_timestamp(self, readback.timestamp, "readbacks", index)?;
+            validate_scoped_timestamp(
+                self,
+                readback.timestamp,
+                readback.boot_id.as_deref(),
+                "readbacks",
+                index,
+            )?;
+            if let Some(source_timestamp) = readback.source_timestamp {
+                validate_scoped_timestamp(
+                    self,
+                    source_timestamp,
+                    readback.boot_id.as_deref(),
+                    "readbacks.source_timestamp",
+                    index,
+                )?;
+            }
             let outcome_matches_value = match readback.outcome {
                 ObservationOutcome::Confirmed | ObservationOutcome::Unexpected => {
                     readback.value.is_some()
@@ -665,6 +771,22 @@ impl EvidenceRecord {
             };
             if !outcome_matches_value
                 || readback.endpoint_identity.is_empty()
+                || self.stage == "live-lifecycle"
+                    && !crate::live_lifecycle::identity_has_nonblank_character(
+                        &readback.endpoint_identity,
+                    )
+                || readback
+                    .boot_id
+                    .as_deref()
+                    .is_some_and(|boot_id| !is_identifier(boot_id))
+                || self.stage == "live-lifecycle"
+                    && (readback.source_timestamp.is_none()
+                        || readback.fresh.is_none()
+                        || readback.phase.is_some())
+                || self.stage != "live-lifecycle"
+                    && (readback.source_timestamp.is_some()
+                        || readback.fresh.is_some()
+                        || readback.boot_id.is_some())
                 || matches!(readback.field, FanReadbackField::Pwm)
                     && readback.value.is_some_and(|value| value > 255)
                 || matches!(readback.field, FanReadbackField::Enable)
@@ -677,8 +799,21 @@ impl EvidenceRecord {
             }
         }
         for (index, transition) in self.state_transitions.iter().enumerate() {
-            validate_timestamp(self, transition.timestamp, "state_transitions", index)?;
-            if !is_identifier(&transition.from) || !is_identifier(&transition.to) {
+            validate_scoped_timestamp(
+                self,
+                transition.timestamp,
+                transition.boot_id.as_deref(),
+                "state_transitions",
+                index,
+            )?;
+            if !is_identifier(&transition.from)
+                || !is_identifier(&transition.to)
+                || transition
+                    .boot_id
+                    .as_deref()
+                    .is_some_and(|boot_id| !is_identifier(boot_id))
+                || self.stage != "live-lifecycle" && transition.boot_id.is_some()
+            {
                 return Err(EvidenceValidationError::InvalidState {
                     field: "state_transitions",
                     index,
@@ -686,8 +821,21 @@ impl EvidenceRecord {
             }
         }
         for (index, fault) in self.faults.iter().enumerate() {
-            validate_timestamp(self, fault.timestamp, "faults", index)?;
-            if !is_identifier(&fault.code) || fault.detail.is_empty() {
+            validate_scoped_timestamp(
+                self,
+                fault.timestamp,
+                fault.boot_id.as_deref(),
+                "faults",
+                index,
+            )?;
+            if !is_identifier(&fault.code)
+                || fault.detail.is_empty()
+                || fault
+                    .boot_id
+                    .as_deref()
+                    .is_some_and(|boot_id| !is_identifier(boot_id))
+                || self.stage != "live-lifecycle" && fault.boot_id.is_some()
+            {
                 return Err(EvidenceValidationError::InvalidFault {
                     field: "faults",
                     index,
@@ -859,10 +1007,11 @@ impl EvidenceRecord {
             });
         }
         if matches!(self.outcome.status, RunOutcomeStatus::Passed)
-            && (!self
-                .samples
-                .iter()
-                .any(|sample| sample.freshness == SampleFreshness::Fresh)
+            && ((!matches!(self.stage.as_str(), "preflight" | "live-lifecycle")
+                && !self
+                    .samples
+                    .iter()
+                    .any(|sample| sample.freshness == SampleFreshness::Fresh))
                 || self.readbacks.is_empty()
                 || !self.outcome.final_firmware_auto_confirmed)
         {
@@ -886,6 +1035,9 @@ impl EvidenceRecord {
                 "firmware-auto-baseline" => firmware_auto_baseline_is_complete(self),
                 "matched-workload" if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2 => {
                     crate::matched_workload::matched_workload_is_complete(self)
+                }
+                "live-lifecycle" if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2 => {
+                    crate::live_lifecycle::live_lifecycle_is_complete(self)
                 }
                 _ => {
                     self.workload.is_some()
@@ -1504,14 +1656,18 @@ pub(crate) fn validate_workload(
 }
 
 fn final_enable_readback_confirms_auto(record: &EvidenceRecord, fan: EvidenceFan) -> bool {
-    record
+    let mut matching = record
         .readbacks
         .iter()
-        .filter(|readback| readback.fan == fan && readback.field == FanReadbackField::Enable)
-        .max_by_key(|readback| readback.timestamp.monotonic_millis)
-        .is_some_and(|readback| {
-            readback.value == Some(2) && readback.outcome == ObservationOutcome::Confirmed
-        })
+        .filter(|readback| readback.fan == fan && readback.field == FanReadbackField::Enable);
+    let final_readback = if record.stage == "live-lifecycle" {
+        matching.next_back()
+    } else {
+        matching.max_by_key(|readback| readback.timestamp.monotonic_millis)
+    };
+    final_readback.is_some_and(|readback| {
+        readback.value == Some(2) && readback.outcome == ObservationOutcome::Confirmed
+    })
 }
 
 fn final_restoration_confirms_auto(record: &EvidenceRecord, fan: EvidenceFan) -> bool {
@@ -1584,7 +1740,30 @@ fn validate_timestamp(
     }
 }
 
-fn is_identifier(value: &str) -> bool {
+fn validate_scoped_timestamp(
+    record: &EvidenceRecord,
+    timestamp: EvidenceTimestamp,
+    boot_id: Option<&str>,
+    field: &'static str,
+    index: usize,
+) -> Result<(), EvidenceValidationError> {
+    let is_post_reboot = record.stage == "live-lifecycle"
+        && boot_id.is_some()
+        && boot_id == crate::live_lifecycle::post_reboot_boot_id(record);
+    if is_post_reboot {
+        if timestamp.wall_unix_millis < record.started_at.wall_unix_millis
+            || timestamp.wall_unix_millis > record.completed_at.wall_unix_millis
+        {
+            Err(EvidenceValidationError::EventOutsideRun { field, index })
+        } else {
+            Ok(())
+        }
+    } else {
+        validate_timestamp(record, timestamp, field, index)
+    }
+}
+
+pub(crate) fn is_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value

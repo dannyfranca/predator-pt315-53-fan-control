@@ -394,6 +394,7 @@ where
             match result {
                 Ok(()) if faults.is_empty() => state_transitions.push(StateTransitionEvidence {
                     timestamp: completed_at,
+                    boot_id: None,
                     from: "firmware-auto".into(),
                     to: "custom-control".into(),
                 }),
@@ -757,6 +758,9 @@ where
             });
             readbacks.push(FanReadbackEvidence {
                 timestamp,
+                source_timestamp: None,
+                fresh: None,
+                boot_id: None,
                 fan,
                 field: FanReadbackField::Enable,
                 value: restoration.enable_readback,
@@ -789,6 +793,7 @@ where
             };
         state_transitions.push(StateTransitionEvidence {
             timestamp: transition_at,
+            boot_id: None,
             from: "custom-control".into(),
             to: if both_fans_restored {
                 "firmware-auto".into()
@@ -865,6 +870,7 @@ where
             calibration_for_fan(plan.tachometer_calibrations, EvidenceFan::Gpu).clone(),
         ],
         thermal_summary: Some(thermal_summary),
+        live_lifecycle_cases: None,
         outcome: RunOutcomeEvidence {
             status: if accepted {
                 RunOutcomeStatus::Passed
@@ -1966,6 +1972,7 @@ fn push_fault(
 ) {
     faults.push(FaultEvidence {
         timestamp,
+        boot_id: None,
         code: code.to_owned(),
         detail: detail.into(),
     });

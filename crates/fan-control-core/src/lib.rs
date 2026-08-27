@@ -17,6 +17,7 @@ mod diagnostics;
 mod envelope;
 mod evidence;
 mod external_power;
+mod live_lifecycle;
 mod matched_workload;
 mod nvidia_gpu;
 mod output;
@@ -91,6 +92,15 @@ pub use evidence::{
     parse_evidence_v1, parse_evidence_v2, write_evidence_atomically,
 };
 pub use external_power::observe_external_power;
+pub use live_lifecycle::{
+    DangerousLiveFaultInjection, LIVE_RESTART_DELAY_MILLIS, LIVE_START_LIMIT_BURST,
+    LiveLifecycleCase, LiveLifecycleCaseObservation, LiveLifecycleCaseResult,
+    LiveLifecycleEnvironment, LiveLifecycleFanAutoObservation, LiveLifecycleFanAutoPair,
+    LiveLifecyclePlanError, LiveLifecyclePowerObservation, LiveLifecycleProfileObservation,
+    LiveLifecycleRebootArmObservation, LiveLifecycleRebootContinuation, LiveLifecycleReport,
+    LiveLifecycleRequest, LiveLifecycleRequestError, classify_live_lifecycle_request,
+    run_live_lifecycle_qualification,
+};
 pub use matched_workload::{
     AMBIENT_COMPARABILITY_MILLICELSIUS, CapturedMatchedWorkloadStartingConditions,
     MINIMUM_MATCHED_WORKLOAD_SAMPLES, MatchedWorkloadClass, MatchedWorkloadEnvironment,
