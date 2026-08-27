@@ -1,0 +1,38 @@
+# Editable example configuration. This file is not a protected policy,
+# qualification record, promotion claim, or authorization to use Custom mode.
+# The daemon remains disabled until separately qualified authority matches it.
+
+schema_version = 1
+
+[control]
+hysteresis_celsius = 3
+lower_demand_hold_seconds = 10
+max_down_ramp_percent_per_second = 1.0
+
+[fans.cpu]
+minimum_duty_percent = 30
+
+[fans.gpu]
+minimum_duty_percent = 25
+
+[profiles.ac]
+cpu_curve = [
+  { temperature_c = 40, demand_percent = 30 },
+  { temperature_c = 90, demand_percent = 100 },
+]
+gpu_curve = [
+  { temperature_c = 35, demand_percent = 30 },
+  { temperature_c = 82, demand_percent = 100 },
+]
+
+[profiles.battery]
+cpu_curve = [
+  { temperature_c = 40, demand_percent = 30 },
+  { temperature_c = 70, demand_percent = 50 },
+  { temperature_c = 90, demand_percent = 100 },
+]
+gpu_curve = [
+  { temperature_c = 35, demand_percent = 30 },
+  { temperature_c = 65, demand_percent = 50 },
+  { temperature_c = 82, demand_percent = 100 },
+]
