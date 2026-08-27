@@ -9,7 +9,7 @@ fn qualification_reports_that_no_evidence_exists() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout should be UTF-8"),
-        "fan-control-qualify: unqualified/not configured; no qualification evidence exists\n"
+        "fan-control-qualify: unqualified/not configured; run `fan-control-qualify supervised-endurance --help`\n"
     );
     assert!(output.stderr.is_empty());
 }

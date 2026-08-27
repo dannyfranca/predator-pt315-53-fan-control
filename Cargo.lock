@@ -199,6 +199,9 @@ name = "fan-control-qualify"
 version = "0.1.0"
 dependencies = [
  "fan-control-core",
+ "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -8,7 +8,7 @@ support Custom fan control, install a service, or enable one.
 - `fan-control-core`: shared library
 - `fan-control-daemon`: future automatic controller
 - `fan-control-restore`: independent Firmware Auto restoration tool
-- `fan-control-qualify`: future qualification tool
+- `fan-control-qualify`: privileged supervised qualification runner
 
 Build and test every workspace member:
 
@@ -49,7 +49,7 @@ current source role:
 ```console
 cargo run -p fan-control-daemon
 cargo run -p fan-control-restore -- --status
-cargo run -p fan-control-qualify
+cargo run -p fan-control-qualify -- supervised-endurance --help
 ```
 
 `fan-control-restore --restore` is the explicit root service recovery mode. It
