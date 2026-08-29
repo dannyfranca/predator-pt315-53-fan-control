@@ -20,6 +20,8 @@ fn workflow_runs_the_complete_policy_for_every_change() {
     assert!(workflow.contains("cargo deny fetch"));
     assert!(workflow.contains("useradd --create-home builder"));
     assert!(workflow.contains("su builder -c"));
+    assert!(workflow.contains("rustup toolchain install 1.85.0"));
+    assert!(workflow.contains("rustup override set 1.85.0"));
     assert!(workflow.contains("CARGO_NET_OFFLINE=true scripts/check-repository-policy"));
 }
 

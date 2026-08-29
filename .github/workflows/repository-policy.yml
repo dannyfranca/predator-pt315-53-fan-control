@@ -19,9 +19,13 @@ jobs:
       - name: Install policy tooling
         run: |
           pacman -Syu --noconfirm cargo-deny git gnupg kmod libarchive lychee openssl \
-            python rust sbsigntools systemd zstd
+            python rustup sbsigntools systemd zstd
           useradd --create-home builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
+      - name: Select the supported Rust toolchain
+        run: |
+          su builder -c 'rustup toolchain install 1.85.0 --profile minimal --component clippy --component rustfmt'
+          su builder -c 'cd "$GITHUB_WORKSPACE" && rustup override set 1.85.0'
       - name: Prepare locked dependency and advisory inputs
         run: |
           su builder -c 'cd "$GITHUB_WORKSPACE" && cargo fetch --locked'
