@@ -1,7 +1,8 @@
 # Predator PT315-53 fan control
 
-Source status: **unqualified and not configured**. This repository does not yet
-support Custom fan control, install a service, or enable one.
+Source status: **unqualified and not configured**. This repository supports
+only the documented build and disabled package installation; it does not yet
+authorize Custom fan control or service enablement.
 
 ## Workspace
 
@@ -49,13 +50,262 @@ current source role:
 ```console
 cargo run -p fan-control-daemon
 cargo run -p fan-control-restore -- --status
-cargo run -p fan-control-qualify -- supervised-endurance --help
+cargo run -p fan-control-qualify
 ```
 
 `fan-control-restore --restore` is the explicit root service recovery mode. It
 discovers the exact Acer hwmon device, owns the controller lock, requests and
 confirms Firmware Auto for both fans, contains any confirmed-Custom fan at
 maximum if restoration fails, and retries until Auto is confirmed.
+
+## Canonical runbook: status, build, and disabled install
+
+> **QUALIFICATION STATUS: UNQUALIFIED.** Source, a successful build, a package
+> signature, CI, a tag, a release, or a bootable candidate does not authorize
+> Custom control. Keep both fans in Firmware Auto (`2`) unless every later
+> qualification and authority gate has passed for this exact machine.
+
+This is the first operator runbook section. Stop on every failed command. It
+prepares a disabled candidate only; it does not perform qualification,
+enablement, or promotion.
+
+### 1. Confirm scope and the safe starting state
+
+The only supported hardware identity is Acer `Predator PT315-53`, board
+`Civic_TLS`, on the pinned CachyOS package set. The only control backend is the
+standard in-tree `acer_wmi` hwmon ABI. There is **no escape hatch**: no raw EC
+or WMI writes, forced capabilities, replacement module, manual fan mode,
+module unload, or other model/distribution path.
+
+Start from a stock-kernel boot after a full power-off/power-on. No fan
+controller, recovery helper, or Custom-control attempt may have run during the
+boot. The independent `pt31553-fan-restore --restore` Auto-restoration helper
+is permitted and required only after booting the candidate below; it is not
+Custom control. Keep the stock standard kernel
+and the stock `linux-cachyos-lts` recovery kernel installed. Confirm source-only
+status without touching hardware:
+
+```sh
+set -eu
+cargo run -p fan-control-daemon
+cargo run -p fan-control-restore -- --status
+cargo run -p fan-control-qualify
+```
+
+Every command must report an unqualified or recovery-only role. A successful
+result does not authorize Custom control.
+
+### 2. Keep editable inputs separate from safety authority
+
+| Artifact | Role | Boundary |
+| --- | --- | --- |
+| `/etc/pt31553-fan-control/config.toml` | Operator configuration installed from `config/example.toml` | **Editable, never authority.** Validation or a package upgrade cannot authorize it. |
+| `/usr/lib/pt31553-fan-control/compatibility.toml` | Exact-model declaration and supported envelope | Static declaration only; it is not observed qualification. |
+| Operator-selected root-owned protected policy snapshot | Immutable copy of the configuration actually qualified | **Safety authority** only when its hash agrees with the qualification record. |
+| `/var/lib/pt31553-fan-control/qualification.json` | Atomic go/no-go record from supervised endurance | **Safety authority**; missing, stale, incomplete, or no-go means disabled. |
+| `/var/lib/pt31553-fan-control/evidence/supervised-endurance.json` | Raw evidence bound to the qualification record | **Safety authority input; private by default.** It has the same protected-file requirements; do not publish it, use the redaction command. |
+| `package-provenance-v1.json` plus detached signatures | Authenticated kernel/package/module/image identities | **Prerequisite, not authority.** Provenance alone cannot enable control. |
+| `promotion.json` plus sanitized evidence | Exact public artifact identity claim | **Public claim, not runtime authority.** It never authorizes another machine. |
+
+Protected artifacts must be root-owned regular files, have one link, and be
+non-writable by group/other beneath protected root-owned ancestors. Never edit
+an authority artifact in place; produce a new qualification after any invalidating
+change.
+
+### 3. Build and verify from a clean source state
+
+Install the repository's documented toolchain and policy tools first. Use a
+new directory and an explicit reviewed revision; the placeholder check prevents
+an accidental build from an unspecified branch:
+
+```sh
+set -eu
+source_revision='REPLACE_WITH_REVIEWED_40_HEX_COMMIT'
+source_parent=/absolute/path/to/new-empty-source-parent
+case "$source_revision" in REPLACE_*|*[!0-9a-f]*) exit 1 ;; esac
+test "${#source_revision}" -eq 40
+case "$source_parent" in /absolute/path/*|'') exit 1 ;; esac
+test ! -e "$source_parent"
+/usr/bin/install -d -m 0755 "$source_parent"
+git clone --no-checkout \
+  https://github.com/dannyfranca/predator-pt315-53-fan-control.git \
+  "$source_parent/source"
+cd "$source_parent/source"
+git checkout --detach "$source_revision"
+test "$(git rev-parse HEAD)" = "$source_revision"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+cargo fetch --locked
+cargo deny fetch
+CARGO_NET_OFFLINE=true scripts/check-repository-policy
+```
+
+That policy command runs formatting, linting, all simulated unit/integration
+tests, dependency policy, reachable-history secret scanning, and offline local
+link validation. It makes no hardware qualification claim.
+
+Build the signed controller package from its pinned recipe in a separate clean
+directory. The runbook checkout and packaged controller are distinct reviewed
+identities: the recipe pins the controller source archive, while the runbook
+may be newer. Record and explicitly confirm both; never imply that the package
+contains the runbook checkout. The signing key must already be
+operator-controlled and trusted by the local pacman keyring; keep private keys
+outside the source and output trees. Invoke Bash explicitly because `makepkg`
+and `mapfile` are Bash interfaces:
+
+```sh
+/usr/bin/bash -eu <<'RUNBOOK_CONTROLLER'
+controller_source_revision='REPLACE_WITH_REVIEWED_CONTROLLER_SOURCE_COMMIT'
+controller_recipe="$PWD/packaging/controller"
+controller_build=/absolute/path/to/new-controller-build
+controller_signer='REPLACE_WITH_CONTROLLER_SIGNING_KEY_FINGERPRINT'
+case "$controller_source_revision" in REPLACE_*|*[!0-9a-f]*) exit 1 ;; esac
+test "${#controller_source_revision}" -eq 40
+case "$controller_signer" in REPLACE_*|'') exit 1 ;; esac
+case "$controller_build" in /absolute/path/*|'') exit 1 ;; esac
+recipe_revision=$(/usr/bin/sed -n \
+  "s/^_commit='\([0-9a-f]\{40\}\)'$/\1/p" \
+  "$controller_recipe/PKGBUILD")
+test "${#recipe_revision}" -eq 40
+test "$recipe_revision" = "$controller_source_revision"
+test ! -e "$controller_build"
+/usr/bin/install -d -m 0700 "$controller_build"
+/usr/bin/cp -a "$controller_recipe/." "$controller_build/"
+cd "$controller_build"
+mapfile -t controller_packages < <(makepkg --packagelist)
+test "${#controller_packages[@]}" -eq 1
+controller_package=${controller_packages[0]}
+makepkg --cleanbuild --noconfirm --syncdeps --sign --key "$controller_signer"
+test -f "$controller_package"
+test -f "$controller_package.sig"
+/usr/bin/pacman-key --verify "$controller_package.sig" "$controller_package"
+controller_package_sha256=$(/usr/bin/sha256sum "$controller_package" | \
+  /usr/bin/awk '{print $1}')
+controller_package_identity=$(/usr/bin/pacman -Qp "$controller_package")
+/usr/bin/printf 'controller_package=%s\ncontroller_package_sha256=%s\ncontroller_package_identity=%s\n' \
+  "$controller_package" "$controller_package_sha256" "$controller_package_identity"
+RUNBOOK_CONTROLLER
+```
+
+Retain the three printed values together. Use that exact absolute package path,
+SHA-256, and pacman identity in step 4; a valid signature on any other package
+is insufficient.
+
+For the kernel, first use a reviewed, committed signer-enrollment revision in
+which `packaging/kernel/provenance-policy.toml`,
+`schemas/package-provenance-v1.json`, and `compatibility/pt315-53.toml` all
+replace their policy-bound all-zero/all-`f` package, module, image, and signer
+placeholders with the same reviewed public identities supplied below. This is
+one coordinated change; do not edit a checkout in place. Review and commit the
+enrollment, then begin again from its clean revision at step 3. Until that
+prerequisite exists, the provenance verifier is expected to fail and no
+candidate may be installed.
+
+From that clean revision, assemble `/bundle` exactly as specified in
+[`packaging/kernel/README.md`](packaging/kernel/README.md), keep signing inputs
+outside it, and run only the authenticated wrapper into a new empty output:
+
+```sh
+set -eu
+source_root=$PWD
+test -x "$source_root/scripts/verify-source-lock"
+test -x "$source_root/scripts/verify-package-provenance"
+cd "$source_root"
+test -d /bundle
+test ! -e "$PWD/build-output"
+/usr/bin/install -d -m 0700 "$PWD/build-output"
+SOURCE_LOCK_SIGNING_DIR=/secure/signing \
+SOURCE_LOCK_OUTPUT="$PWD/build-output" \
+  scripts/verify-source-lock --inputs /bundle --exec-verified
+
+package_manifest_signature=/secure/public/package-set.p7s
+test ! -e "$package_manifest_signature"
+/usr/bin/openssl cms -sign -binary \
+  -in "$PWD/build-output/SHA256SUMS" \
+  -signer /secure/public/package-signing-certificate.pem \
+  -inkey /secure/private/package-signing-key.pem \
+  -outform DER -out "$package_manifest_signature" \
+  -nocerts -noattr -md sha256
+test -s "$package_manifest_signature"
+
+scripts/verify-package-provenance \
+  --artifacts "$PWD/build-output" \
+  --module-cert /secure/signing/module-signing-certificate.der \
+  --module-cert-sha256 REPLACE_WITH_MODULE_CERT_SHA256 \
+  --package-cert /secure/public/package-signing-certificate.pem \
+  --package-cert-sha256 REPLACE_WITH_PACKAGE_CERT_SHA256 \
+  --kernel-cert /secure/public/enrolled-image-signing-certificate.pem \
+  --kernel-cert-sha256 REPLACE_WITH_IMAGE_CERT_SHA256 \
+  --package-manifest-signature "$package_manifest_signature" \
+  --output "$PWD/package-provenance-v1.json"
+```
+
+The source-lock wrapper builds exactly the uniquely named kernel, headers, and
+NVIDIA-open packages. The provenance verifier must run offline after the
+package-set manifest has been signed as described in the kernel README.
+
+### 4. Install the controller disabled
+
+Do this on the clean stock boot, before installing or booting the candidate
+kernel. Reverify the exact package, require that neither controller unit is
+already enabled or active, then install. Arch package installation does not
+start either unit; the shipped preset also says `disable` for both.
+
+```sh
+set -eu
+controller_package=/absolute/path/to/pt31553-fan-control.pkg.tar.zst
+controller_signature="$controller_package.sig"
+controller_package_sha256='REPLACE_WITH_RECORDED_CONTROLLER_PACKAGE_SHA256'
+controller_package_identity='REPLACE_WITH_RECORDED_PACMAN_PACKAGE_IDENTITY'
+case "$controller_package_sha256" in REPLACE_*|*[!0-9a-f]*) exit 1 ;; esac
+test "${#controller_package_sha256}" -eq 64
+case "$controller_package_identity" in REPLACE_*|'') exit 1 ;; esac
+test "$(/usr/bin/sha256sum "$controller_package" | /usr/bin/awk '{print $1}')" = \
+  "$controller_package_sha256"
+test "$(/usr/bin/pacman -Qp "$controller_package")" = \
+  "$controller_package_identity"
+/usr/bin/pacman-key --verify "$controller_signature" "$controller_package"
+! /usr/bin/pgrep -x pt31553-fand >/dev/null
+for unit in pt31553-fand.service pt31553-fan-sleep-guard.service; do
+  enabled_state=$(/usr/bin/systemctl is-enabled "$unit" 2>/dev/null || true)
+  case "$enabled_state" in
+    not-found) ;;
+    disabled)
+      test "$(/usr/bin/systemctl is-active "$unit" || true)" = inactive
+      ;;
+    *) exit 1 ;;
+  esac
+done
+sudo /usr/bin/pacman -U "$controller_package"
+for unit in pt31553-fand.service pt31553-fan-sleep-guard.service; do
+  /usr/bin/systemctl cat "$unit" >/dev/null
+  test "$(/usr/bin/systemctl is-enabled "$unit")" = disabled
+  test "$(/usr/bin/systemctl is-active "$unit" || true)" = inactive
+done
+! /usr/bin/pgrep -x pt31553-fand >/dev/null
+test -f /etc/pt31553-fan-control/config.toml
+test -f /usr/lib/pt31553-fan-control/compatibility.toml
+test -x /usr/bin/pt31553-fan-restore
+```
+
+Do not enable or start the daemon here. The editable configuration is still
+not authority, and no qualification record exists. Do not run the recovery
+helper on the stock kernel; it is deliberately not recovery-capable.
+
+### 5. Perform the first disabled candidate boot
+
+Continue with the detailed side-by-side procedure below, in this order:
+
+1. **Record the stock recovery entries** and prove both stock images exist.
+2. **Install without changing the default**; reverify the three exact kernel
+   artifacts and retain both stock packages and entries.
+3. **Boot the candidate once** using only the documented one-shot entry. Never
+   make the candidate the default.
+4. On the candidate boot, prove the stock entry remains the default, both
+   controller units remain disabled/inactive, no daemon process or boot journal
+   exists, and independent restoration confirms both fans in Firmware Auto.
+
+Stop there. Only the separate qualification procedure may proceed beyond the
+first disabled candidate boot.
 
 ## Side-by-side candidate install and recovery
 
@@ -68,10 +318,14 @@ custom-control attempt until both fans have confirmed Firmware Auto.
 
 For a first candidate boot, begin from a full power-off/power-on firmware
 initialization into the stock entry—not a warm reboot—and only if no fan
-controller has run during this boot. If either fact is uncertain, first use the
-candidate-side Auto recovery and one-shot stock return below, then restart this
-procedure. Preserve the current boot ID; the candidate reboot gate proves that
-all install checks stayed within this same clean stock boot.
+controller, recovery helper, or Custom-control attempt has run during this
+boot. The independent Auto-restoration helper becomes a permitted exception
+only after booting the candidate; it is required there and does not violate
+that boundary. If either starting fact
+is uncertain, first use the candidate-side Auto recovery and one-shot stock
+return below, then restart this procedure. Preserve the current boot ID; the
+candidate reboot gate proves that all install checks stayed within this same
+clean stock boot.
 
 ### Record the stock recovery entries
 
@@ -169,7 +423,8 @@ sudo /usr/bin/chmod 0400 /run/pt31553-stock-default-entry
 
 The recovery binary and both unit files must already be installed, but the
 units must be disabled and inactive. This guarantees the Auto recovery command
-is available while preventing fan control from starting with the candidate:
+will be available after booting the candidate while preventing fan control
+from starting on this stock boot:
 
 ```sh
 set -eu
@@ -186,7 +441,6 @@ done
 test -z "$(/usr/bin/journalctl -b --no-pager -o cat \
   _EXE=/usr/bin/pt31553-fand)"
 ! /usr/bin/pgrep -x pt31553-fand >/dev/null
-sudo /usr/bin/pt31553-fan-restore --restore
 start_boot_id=$(/usr/bin/cat /proc/sys/kernel/random/boot_id)
 /usr/bin/printf '%s\n' "$start_boot_id" |
   sudo /usr/bin/tee /run/pt31553-clean-stock-boot-id >/dev/null
@@ -841,7 +1095,6 @@ done
 test -z "$(/usr/bin/journalctl -b --no-pager -o cat \
   _EXE=/usr/bin/pt31553-fand)"
 ! /usr/bin/pgrep -x pt31553-fand >/dev/null
-sudo /usr/bin/pt31553-fan-restore --restore
 /usr/bin/python3 -I - "$stock_entry" "$lts_entry" "$candidate_entry" \
   "$expected_default_entry" <<'PY'
 import json

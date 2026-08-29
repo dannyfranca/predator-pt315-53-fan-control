@@ -390,7 +390,7 @@ all-features = true
 ignore = []
 
 [licenses]
-allow = ["Apache-2.0", "MIT", "Unicode-3.0"]
+allow = ["Apache-2.0", "MIT", "MIT-0", "Unicode-3.0"]
 confidence-threshold = 0.8
 
 [licenses.private]
