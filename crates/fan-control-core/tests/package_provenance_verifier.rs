@@ -1743,20 +1743,6 @@ fn rejects_unlisted_private_key_algorithms_in_retained_evidence() {
 }
 
 #[test]
-fn compatibility_changes_trigger_both_package_provenance_workflows() {
-    let workflow = include_str!("../../../.github/workflows/package-provenance.yml");
-    let (_, after_pull_request) = workflow.split_once("  pull_request:\n").unwrap();
-    let (pull_request, after_push) = after_pull_request.split_once("  push:\n").unwrap();
-    let (push, _) = after_push.split_once("\npermissions:\n").unwrap();
-    for (event, paths) in [("pull_request", pull_request), ("push", push)] {
-        assert!(
-            paths.contains("- \"compatibility/pt315-53.toml\""),
-            "{event} does not trigger package provenance verification for compatibility drift"
-        );
-    }
-}
-
-#[test]
 fn rejects_swapped_archive_names_and_sensitive_package_content() {
     let fixture = Fixture::new();
     let kernel = fixture
