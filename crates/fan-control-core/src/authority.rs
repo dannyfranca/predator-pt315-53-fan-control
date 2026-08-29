@@ -240,7 +240,7 @@ fn parse_protected_policy_v2(
     Ok(manifest)
 }
 
-fn parse_qualification_record_v2(
+pub(crate) fn parse_qualification_record_v2(
     source: &str,
 ) -> Result<QualificationRecordV2, PolicyAuthorityError> {
     let record =

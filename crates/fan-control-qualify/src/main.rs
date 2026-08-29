@@ -62,6 +62,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     if command == "validate-records" {
         return validate_records(remaining.into_iter());
     }
+    if command == "redact-evidence" {
+        return redact_evidence(remaining.into_iter());
+    }
+    if command == "check-promotion" {
+        return check_promotion(remaining.into_iter());
+    }
     let command = command
         .into_string()
         .map_err(|_| "qualification command must be UTF-8")?;
@@ -133,6 +139,46 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!(
         "supervised endurance passed; authorization published at {}",
         arguments.qualification_record.display()
+    );
+    Ok(())
+}
+
+fn redact_evidence(values: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> {
+    let values = values.collect::<Vec<_>>();
+    if values.iter().any(|value| value == "--help") {
+        println!(
+            "usage: fan-control-qualify redact-evidence --qualification-record FILE \
+             --evidence FILE --authorized-evidence-path FILE --output FILE"
+        );
+        return Ok(());
+    }
+    let mut io = fan_control_qualify::RootProtectedArtifactIo;
+    let output = fan_control_qualify::redact_evidence_command(values.into_iter(), &mut io)?;
+    println!(
+        "sanitized qualification evidence published at {}",
+        output.display()
+    );
+    Ok(())
+}
+
+fn check_promotion(values: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> {
+    let values = values.collect::<Vec<_>>();
+    if values.iter().any(|value| value == "--help") {
+        println!(
+            "usage: fan-control-qualify check-promotion --manifest FILE \
+             --qualification-record FILE --evidence FILE \
+             --authorized-evidence-path FILE --sanitized-evidence FILE \
+             --protected-policy FILE --package-provenance FILE \
+             --controller-package FILE --controller-signature FILE \
+             --package-manifest-signature FILE --output FILE"
+        );
+        return Ok(());
+    }
+    let mut io = fan_control_qualify::RootProtectedArtifactIo;
+    let output = fan_control_qualify::check_promotion_command(values.into_iter(), &mut io)?;
+    println!(
+        "qualified promotion manifest published at {}",
+        output.display()
     );
     Ok(())
 }

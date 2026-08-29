@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+
+exec /usr/bin/pt31553-fan-qualify redact-evidence "$@"
