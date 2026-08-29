@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dannyfranca/predator-pt315-53-fan-control/schemas/qualification-record.json",
+  "title": "PT315-53 Qualification Record v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "qualification_id",
+    "policy_version",
+    "protected_policy_sha256",
+    "compatibility",
+    "supervised_endurance"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "qualification_id": { "type": "string", "minLength": 1 },
+    "policy_version": { "type": "string", "minLength": 1 },
+    "protected_policy_sha256": { "$ref": "#/$defs/sha256" },
+    "compatibility": { "$ref": "#/$defs/compatibility" },
+    "supervised_endurance": { "$ref": "#/$defs/supervised_endurance" }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "hardware", "kernel", "module", "secure_boot", "fan_control"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "hardware": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dmi_product_name", "dmi_board_name", "bios_version"],
+          "properties": {
+            "dmi_product_name": { "const": "Predator PT315-53" },
+            "dmi_board_name": { "const": "Civic_TLS" },
+            "bios_version": { "type": "string", "minLength": 1 }
+          }
+        },
+        "kernel": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["release", "package", "source_commit", "image_sha256", "image_signer_fingerprint"],
+          "properties": {
+            "release": { "type": "string", "minLength": 1 },
+            "package": { "type": "string", "minLength": 1 },
+            "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "image_sha256": { "$ref": "#/$defs/sha256" },
+            "image_signer_fingerprint": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "module": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "path", "sha256", "signer_fingerprint", "vermagic", "provenance"],
+          "properties": {
+            "name": { "const": "acer_wmi" },
+            "path": { "type": "string", "pattern": "^/usr/lib/modules/" },
+            "sha256": { "$ref": "#/$defs/sha256" },
+            "signer_fingerprint": { "$ref": "#/$defs/sha256" },
+            "vermagic": { "type": "string", "minLength": 1 },
+            "provenance": { "const": "in-tree" }
+          }
+        },
+        "secure_boot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required"],
+          "properties": { "required": { "const": true } }
+        },
+        "fan_control": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["backend", "hwmon_name", "endpoints", "forbidden_capabilities"],
+          "properties": {
+            "backend": { "const": "acer-hwmon" },
+            "hwmon_name": { "const": "acer" },
+            "endpoints": {
+              "const": ["pwm1", "pwm1_enable", "fan1_input", "pwm2", "pwm2_enable", "fan2_input"]
+            },
+            "forbidden_capabilities": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          }
+        }
+      }
+    },
+    "supervised_endurance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "evidence_sha256",
+        "evidence_path",
+        "evidence_schema_version",
+        "stage",
+        "record_status",
+        "outcome",
+        "final_firmware_auto_confirmed",
+        "workload_stopped",
+        "service_stopped",
+        "completed_at"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "evidence_sha256": { "$ref": "#/$defs/sha256" },
+        "evidence_path": { "type": "string", "pattern": "^/" },
+        "evidence_schema_version": { "const": 2 },
+        "stage": { "const": "supervised-endurance" },
+        "record_status": { "const": "complete" },
+        "outcome": { "const": "passed" },
+        "final_firmware_auto_confirmed": { "const": true },
+        "workload_stopped": { "const": true },
+        "service_stopped": { "const": true },
+        "completed_at": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["monotonic_millis", "wall_unix_millis"],
+          "properties": {
+            "monotonic_millis": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "wall_unix_millis": {
+              "type": "integer",
+              "minimum": -9223372036854775808,
+              "maximum": 9223372036854775807
+            }
+          }
+        }
+      }
+    }
+  }
+}

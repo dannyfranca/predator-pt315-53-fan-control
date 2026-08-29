@@ -143,6 +143,20 @@ That policy command runs formatting, linting, all simulated unit/integration
 tests, dependency policy, reachable-history secret scanning, and offline local
 link validation. It makes no hardware qualification claim.
 
+For the final public source handoff, run one command from a completely clean
+checkout:
+
+```sh
+scripts/verify-source-complete-handoff
+```
+
+It rejects shallow history, proves the canonical tracked source manifest
+(`handoff/source-complete-files.txt`) is intact, and performs a clean workspace
+build in a new temporary target directory before running the complete offline
+repository policy above. It checks both the source tree and revision again
+afterward. Success is reported only as **Source-complete handoff**. It is not
+hardware qualification, Custom-control authorization, or artifact promotion.
+
 Build the signed controller package from its pinned recipe in a separate clean
 directory. The runbook checkout and packaged controller are distinct reviewed
 identities: the recipe pins the controller source archive, while the runbook
