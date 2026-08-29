@@ -2026,6 +2026,7 @@ def sensitive(
             or tar_container(content)
         )
         structured_content = b"" if outer_compression or archive_container else content
+        signature_masked_content, _ = mask_valid_signature_payloads(structured_content)
         pem_certificates_allowed = (
             allow_public_certificate
             and allowed_pem_certificates(
@@ -2033,10 +2034,10 @@ def sensitive(
             )
         )
         if (
-            contains_private_jwk(structured_content)
-            or contains_putty_private_key(content)
-            or contains_encrypted_private_key_info(structured_content)
-            or contains_openpgp_secret_key(structured_content)
+            contains_private_jwk(signature_masked_content)
+            or contains_putty_private_key(signature_masked_content)
+            or contains_encrypted_private_key_info(signature_masked_content)
+            or contains_openpgp_secret_key(signature_masked_content)
             or PRIVATE_PEM_HEADER.search(content)
             or PGP_PRIVATE_HEADER.search(content)
             or AGE_SECRET_KEY.search(content)
@@ -2048,15 +2049,15 @@ def sensitive(
             or PRIVATE_PEM.search(content)
             or PGP_PRIVATE.search(content)
             or (CERTIFICATE.search(content) and not pem_certificates_allowed)
-            or b"openssh-key-v1\x00" in content
-            or PBES2_OID in structured_content
+            or b"openssh-key-v1\x00" in signature_masked_content
+            or PBES2_OID in signature_masked_content
             or b"pkcs" + b"11:" in content
             or re.search(
                 rb"(?m)^\[p11-kit-object-v1\]\r?$", content
             )
         ):
             return True
-        normalized_scan_content = mask_mtree_digest_attributes(structured_content)
+        normalized_scan_content = mask_mtree_digest_attributes(signature_masked_content)
         # Exact Zstandard payload bytes are opaque and probabilistically resemble
         # ASN.1/Base64. Their decompressed bytes are inspected recursively below.
         candidates = sensitive_asn1_candidates(normalized_scan_content)

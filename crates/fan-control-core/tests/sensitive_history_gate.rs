@@ -120,6 +120,47 @@ fn accepts_public_openpgp_signature_checksum_in_commit_payloads() {
 }
 
 #[test]
+fn accepts_digest_info_inside_a_valid_ssh_signature() {
+    let digest_info = [
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+        0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    ];
+    let mut sshsig = b"SSHSIG".to_vec();
+    sshsig.extend(1_u32.to_be_bytes());
+    for field in [
+        b"public-key".as_slice(),
+        b"git".as_slice(),
+        b"".as_slice(),
+        b"sha256".as_slice(),
+        digest_info.as_slice(),
+    ] {
+        sshsig.extend(u32::try_from(field.len()).unwrap().to_be_bytes());
+        sshsig.extend(field);
+    }
+    let encoded = base64_bytes(&sshsig);
+    let payload = format!(
+        "gpgsig -----BEGIN SSH SIGNATURE-----\n {}\n -----END SSH SIGNATURE-----\n",
+        String::from_utf8_lossy(&encoded)
+    );
+    let root = repository();
+    fs::write(root.join("public-signature.commit"), payload).unwrap();
+    git(&root, &["add", "public-signature.commit"]);
+    git(
+        &root,
+        &["commit", "-q", "-m", "retain public SSH signature"],
+    );
+    let output = gate_command(&root).output().unwrap();
+    assert!(
+        output.status.success(),
+        "history rejected SSH signature: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn ignores_git_object_ids_only_in_structural_headers() {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
