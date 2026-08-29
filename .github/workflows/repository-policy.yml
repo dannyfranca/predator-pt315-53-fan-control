@@ -25,12 +25,11 @@ jobs:
       - name: Select the supported Rust toolchain
         run: |
           su builder -c 'rustup toolchain install 1.85.0 --profile minimal --component clippy --component rustfmt'
-          su builder -c 'cd "$GITHUB_WORKSPACE" && rustup override set 1.85.0'
+          su builder -c "cd '$GITHUB_WORKSPACE' && rustup override set 1.85.0"
       - name: Prepare locked dependency and advisory inputs
         run: |
-          su builder -c 'cd "$GITHUB_WORKSPACE" && cargo fetch --locked'
-          su builder -c 'cd "$GITHUB_WORKSPACE" && cargo deny fetch'
+          su builder -c "cd '$GITHUB_WORKSPACE' && cargo fetch --locked"
+          su builder -c "cd '$GITHUB_WORKSPACE' && cargo deny fetch"
       - name: Run offline read-only repository policy
-        run: >-
-          su builder -c 'cd "$GITHUB_WORKSPACE" &&
-          CARGO_NET_OFFLINE=true scripts/check-repository-policy'
+        run: |
+          su builder -c "cd '$GITHUB_WORKSPACE' && CARGO_NET_OFFLINE=true scripts/check-repository-policy"
