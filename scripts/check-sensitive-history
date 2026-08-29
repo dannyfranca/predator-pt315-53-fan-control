@@ -80,6 +80,7 @@ UNSAFE_PATH_PARTS = (
     ".p11-kit/",
 )
 PBES2_OID = b"\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x05\x0d"
+MODULE_SIGNATURE_MAGIC = b"~Module signature appended~\n"
 MAX_BLOB = 512 * 1024 * 1024
 MAX_EMBEDDED_WORK = 8 * MAX_BLOB
 MAX_EMBEDDED_CANDIDATES = 4096
@@ -552,6 +553,78 @@ def mask_valid_signature_payloads(content: bytes) -> tuple[bytes, list[bytes]]:
             if masked_content[offset] not in (0x0A, 0x0D):
                 masked_content[offset] = 0x20
     return bytes(masked_content), ssh_tokens
+
+
+def mask_verified_module_signature(
+    content: bytes,
+    allowed_certificates: frozenset[bytes],
+    budget: dict[str, object],
+) -> bytes | None:
+    if (
+        not allowed_certificates
+        or not content.endswith(MODULE_SIGNATURE_MAGIC)
+        or len(content) < len(MODULE_SIGNATURE_MAGIC) + 12
+    ):
+        return content
+    trailer_at = len(content) - len(MODULE_SIGNATURE_MAGIC) - 12
+    trailer = content[trailer_at : trailer_at + 12]
+    algorithm, hash_algorithm, identifier, signer_length, key_id_length = trailer[:5]
+    signature_length = int.from_bytes(trailer[8:12], "big")
+    signed_length = trailer_at - signer_length - key_id_length - signature_length
+    if (
+        identifier != 2
+        or signature_length == 0
+        or algorithm > 10
+        or not 1 <= hash_algorithm <= 6
+        or signed_length <= 0
+    ):
+        return content
+    signature_at = signed_length + signer_length + key_id_length
+    signature = content[signature_at:trailer_at]
+    with (
+        tempfile.NamedTemporaryFile() as signed,
+        tempfile.NamedTemporaryFile() as detached,
+        tempfile.NamedTemporaryFile() as certificate,
+    ):
+        signed.write(content[:signed_length])
+        signed.flush()
+        detached.write(signature)
+        detached.flush()
+        for certificate_der in sorted(allowed_certificates):
+            certificate.seek(0)
+            certificate.truncate()
+            certificate.write(b"-----BEGIN CERTIFICATE-----\n")
+            certificate.write(base64.encodebytes(certificate_der))
+            certificate.write(b"-----END CERTIFICATE-----\n")
+            certificate.flush()
+            verified = probe(
+                [
+                    "openssl",
+                    "cms",
+                    "-verify",
+                    "-binary",
+                    "-inform",
+                    "DER",
+                    "-in",
+                    detached.name,
+                    "-content",
+                    signed.name,
+                    "-nointern",
+                    "-certfile",
+                    certificate.name,
+                    "-noverify",
+                    "-out",
+                    os.devnull,
+                ],
+                budget,
+            )
+            if verified is None:
+                return None
+            if verified.returncode == 0:
+                masked = bytearray(content)
+                masked[signature_at:trailer_at] = b"\0" * signature_length
+                return bytes(masked)
+    return content
 
 
 def zstd_container(content: bytes) -> bool:
@@ -2026,7 +2099,14 @@ def sensitive(
             or tar_container(content)
         )
         structured_content = b"" if outer_compression or archive_container else content
-        signature_masked_content, _ = mask_valid_signature_payloads(structured_content)
+        module_masked_content = mask_verified_module_signature(
+            structured_content,
+            allowed_public_certificates if allow_public_certificate else frozenset(),
+            budget,
+        )
+        if module_masked_content is None:
+            return True
+        signature_masked_content, _ = mask_valid_signature_payloads(module_masked_content)
         pem_certificates_allowed = (
             allow_public_certificate
             and allowed_pem_certificates(

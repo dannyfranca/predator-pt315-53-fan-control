@@ -161,6 +161,63 @@ fn accepts_digest_info_inside_a_valid_ssh_signature() {
 }
 
 #[test]
+fn module_signature_masking_requires_successful_verification() {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .to_path_buf();
+    let source = r#"
+import importlib.machinery
+import importlib.util
+import sys
+loader = importlib.machinery.SourceFileLoader("history_scanner", sys.argv[1])
+spec = importlib.util.spec_from_loader("history_scanner", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+payload = b"module payload"
+signer = b"signer"
+key_id = b"key-id"
+signature = b"\x1f\x8bpublic detached signature"
+trailer = bytes((0, 6, 2, len(signer), len(key_id), 0, 0, 0))
+trailer += len(signature).to_bytes(4, "big")
+content = payload + signer + key_id + signature + trailer + module.MODULE_SIGNATURE_MAGIC
+signature_at = len(payload) + len(signer) + len(key_id)
+
+class Result:
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+module.probe = lambda command, budget: Result(0)
+masked = module.mask_verified_module_signature(
+    content, frozenset((b"certificate",)), module.inspection_budget()
+)
+module.probe = lambda command, budget: Result(1)
+unverified = module.mask_verified_module_signature(
+    content, frozenset((b"certificate",)), module.inspection_budget()
+)
+print(
+    int(masked[signature_at:signature_at + len(signature)] == b"\0" * len(signature)),
+    int(unverified == content),
+)
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "module signature masking harness failed"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "1 1",
+        "only a verified detached module signature may be masked"
+    );
+}
+
+#[test]
 fn ignores_git_object_ids_only_in_structural_headers() {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
