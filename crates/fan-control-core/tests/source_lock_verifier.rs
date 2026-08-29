@@ -1253,6 +1253,7 @@ if [[ "$args" == *" run --rm --pull=never --network=none --read-only "* ]]; then
         SOURCE_LOCK_BUNDLE="$TEST_BUNDLE" \
         SOURCE_LOCK_INSIDE_SIGNING_DIR="$signing_root" \
         SOURCE_LOCK_OUTPUT="$output_root" \
+        TEST_BIN="$TEST_BIN" \
         TEST_BUNDLE="$TEST_BUNDLE" \
         TEST_EFI_STUB="$TEST_EFI_STUB" \
         TEST_KERNEL_ROOT="$TEST_KERNEL_ROOT" \
