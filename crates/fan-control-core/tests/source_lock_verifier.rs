@@ -1775,6 +1775,7 @@ fi
     let rejected = Command::new("/bin/bash")
         .arg(&wrapper)
         .env("PATH", &path)
+        .env("TEST_BIN", &bin)
         .env("SOURCE_LOCK_BUNDLE", &bundle)
         .env("SOURCE_LOCK_OUTPUT", &missing_output)
         .output()
