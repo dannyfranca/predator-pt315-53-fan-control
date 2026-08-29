@@ -16,6 +16,8 @@ recovery_kernel_package = "linux-cachyos-lts"
 recovery_kernel_release = "6.18"
 recovery_pwm_capable = false
 retained_evidence = [
+  "PKGBUILD",
+  "build-attestation.toml",
   "build-environment.toml",
   "build.log",
   "package-set.SRCINFO",
@@ -62,6 +64,7 @@ build_inputs = [
   "packaging-snapshot",
   "pt31553-pwm",
   "pt31553-telemetry",
+  "sensitive-output-scanner",
   "toolchain-blob-00",
   "toolchain-blob-01",
   "toolchain-blob-02",

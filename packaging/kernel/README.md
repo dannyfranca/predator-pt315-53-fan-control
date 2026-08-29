@@ -15,6 +15,7 @@ Copy the tracked metadata and patch inputs into a disposable bundle:
 ```sh
 cp packaging/kernel/build-environment.toml /bundle/
 cp packaging/kernel/build-candidate /bundle/
+cp scripts/check-sensitive-history /bundle/
 cp packaging/kernel/makepkg.conf /bundle/
 cp packaging/kernel/toolchain-image-manifest.json /bundle/
 cp packaging/kernel/cachyos-7.1.8-1.tag /bundle/
@@ -40,12 +41,29 @@ Also fetch the exact CachyOS v4 `bc` package at its locked `origin` into
 `/bundle/build-tools/`. It is extracted without installation and used only to
 generate the kernel time constants required before compiling `acer-wmi.c`.
 
-Then make the staged bundle read-only and verify it offline:
+Prepare a separate, non-symlink signing directory containing exactly the
+operator-controlled signing inputs used during the handoff:
+
+- `module-signing-key.pem`
+- `module-signing-certificate.der`
+- `kernel-signing-key.pem`
+- `kernel-signing-certificate.pem`
+
+The module certificate must be DER; the Secure-Boot certificate must be PEM.
+The directory and all four files must be owned by the invoking user. Set the
+directory to mode `0700`, private keys to `0600` or stricter, and certificates
+to a mode without group/other write permission. The executor snapshots all
+four no-follow-opened inputs into private storage, validates the snapshot, and
+uses only those pinned bytes through build and final signing. Keep the source
+directory outside the bundle, output, and source tree. Then make the staged
+bundle read-only and build/sign it offline:
 
 ```sh
 chmod -R a+rX,a-w /bundle
 mkdir -p "$PWD/build-output"
-SOURCE_LOCK_OUTPUT="$PWD/build-output" scripts/verify-source-lock --inputs /bundle --exec-verified
+SOURCE_LOCK_SIGNING_DIR=/secure/signing \
+SOURCE_LOCK_OUTPUT="$PWD/build-output" \
+  scripts/verify-source-lock --inputs /bundle --exec-verified
 ```
 
 The default verified execution emits exactly three non-stock package names:
@@ -53,9 +71,112 @@ The default verified execution emits exactly three non-stock package names:
 `linux-cachyos-pt31553-nvidia-open`. The output directory must be empty. It
 retains the complete build log, source lock, build environment, generated
 `.SRCINFO`, package checksums, and each package's `.BUILDINFO`, `.MTREE`,
-and `.PKGINFO`.
+and `.PKGINFO`. The verified build injects the external module key only into
+its disposable kernel tree, retains the matching public certificate in the
+headers package, signs the packaged kernel image with the external
+Secure-Boot identity, rebuilds its package metadata, and rewrites
+`SHA256SUMS`. The Secure-Boot key stays on the host, and the completed output
+replaces the empty destination only after every finalization step succeeds.
+No private key enters a package or retained evidence.
 The verifier places the exact parsed source-lock bytes into its private
 snapshot for retention; do not add `source-lock.toml` to the input bundle.
+
+## Offline package provenance verification
+
+Verify the resulting signed package set without network access or live
+trust-store access. Supply three distinct public X.509 certificates:
+the packaging signer, the certificate embedded by the kernel for module trust,
+and the previously confirmed enrolled Secure-Boot image signer. Keep all
+signing material outside the source tree and build-evidence directory.
+
+Compute each expected fingerprint over the certificate's DER encoding:
+
+```sh
+openssl x509 -in package-signing-certificate.pem -outform DER | sha256sum
+openssl x509 -inform DER -in module-signing-certificate.der -outform DER | sha256sum
+openssl x509 -in enrolled-image-signing-certificate.pem -outform DER | sha256sum
+```
+
+From the verified build handoff, sign the retained package manifest with its
+dedicated packaging key. Keep the signature outside the build-evidence
+directory so its exact top-level set remains closed:
+
+```sh
+openssl cms -sign -binary \
+  -in "$PWD/build-output/SHA256SUMS" \
+  -signer /secure/public/package-signing-certificate.pem \
+  -inkey /secure/private/package-signing-key.pem \
+  -outform DER -out /secure/public/package-set.p7s \
+  -nocerts -noattr -md sha256
+```
+
+Then run:
+
+```sh
+scripts/verify-package-provenance \
+  --artifacts "$PWD/build-output" \
+  --module-cert /secure/signing/module-signing-certificate.der \
+  --module-cert-sha256 MODULE_CERTIFICATE_SHA256 \
+  --package-cert /secure/public/package-signing-certificate.pem \
+  --package-cert-sha256 PACKAGE_CERTIFICATE_SHA256 \
+  --kernel-cert /secure/public/enrolled-image-signing-certificate.pem \
+  --kernel-cert-sha256 IMAGE_CERTIFICATE_SHA256 \
+  --package-manifest-signature /secure/public/package-set.p7s \
+  --output "$PWD/package-provenance-v1.json"
+```
+
+The verifier uses only its fixed `/usr/bin` paths for `bsdtar`, compression
+tools, `modinfo`, `openssl`, and `sbverify`; ambient `PATH` entries cannot
+replace a verification tool.
+It reads no network resource, keyring, MOK database, firmware variable, or
+machine certificate store. The expected fingerprints are mandatory so a
+different public certificate cannot be substituted at verification time.
+
+`provenance-policy.toml` pins the package, module, and kernel-image signer
+fingerprints as well as the exact package set, package versions, kernel
+release, kernel and NVIDIA source identities, image path, `acer_wmi` path, and
+complete bundled NVIDIA module path set. The enrolled `CN=Database Key`
+fingerprint applies only to the EFI image; module and package placeholders are
+replaced by distinct qualified identities. CLI values cannot override policy.
+The verifier then:
+
+- rechecks the retained source lock and build environment against this source
+  tree;
+- authenticates the exact retained evidence set, including the effective
+  `PKGBUILD`, build log, source metadata, and all package metadata; the signed
+  `build-attestation.toml` binds the source lock and build environment to the
+  exact recipe and `.SRCINFO`, while every `.BUILDINFO` binds back to that
+  recipe;
+- binds every package archive to its retained `.PKGINFO`, `.BUILDINFO`,
+  `.MTREE`, checksum, package base, version, architecture, and complete shared
+  build provenance, after authenticating `SHA256SUMS` with the expected
+  packaging certificate;
+- cryptographically verifies the detached PKCS#7 signature appended to
+  `acer_wmi` and every bundled NVIDIA module using only the expected module
+  certificate and SHA-512 CMS digests, matching the pinned kernel config;
+- proves the signed kernel image contains the exact module trust certificate,
+  and binds it to the packaged `.config` and `signing_key.x509`;
+- requires the NVIDIA package to depend on the exact custom kernel,
+  `nvidia-utils` release, and `libglvnd`, provide `NVIDIA-MODULE`, and conflict
+  with the corresponding proprietary custom-kernel module package;
+- requires exact module names, package ownership, paths, hashes, source
+  identities, and kernel-bound vermagic;
+- verifies the packaged kernel image signature with `sbverify` and the expected
+  enrolled-signer certificate; and
+- creates a new, read-only JSON record matching
+`schemas/package-provenance-v1.json` and containing only portable identities
+and hashes. Publication is atomic and no-clobber. It never serializes
+certificate bytes, signature bytes, or input paths.
+
+Private-key files, private-key content, and machine trust-store paths are
+rejected in both retained evidence and package contents. Never pass a private
+key, machine trust-store export, or unredacted machine evidence. A
+successful package-provenance record is a qualification prerequisite; it does
+not itself qualify hardware or authorize fan writes.
+
+CI also runs `scripts/check-sensitive-history` against every reachable Git
+blob and historical path. Run it locally before publishing; deleting a secret
+in a later commit does not make the history gate pass.
 
 For the stage-2 review gate, compile the patched translation unit in the same
 verified, offline environment and retain the object plus its SHA-256 evidence:

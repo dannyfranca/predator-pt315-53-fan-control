@@ -87,7 +87,7 @@ dmi_board_name = "Civic_TLS"
 bios_version = "V1.17"
 
 [compatibility.kernel]
-release = "7.1.8-1-cachyos-pt31553"
+release = "7.1.8-cachyos-pt31553"
 package = "linux-cachyos-pt31553"
 source_commit = "0123456789abcdef0123456789abcdef01234567"
 image_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -95,10 +95,10 @@ image_signer_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
 [compatibility.module]
 name = "acer_wmi"
-path = "/usr/lib/modules/7.1.8-1-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst"
+path = "/usr/lib/modules/7.1.8-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst"
 sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 signer_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-vermagic = "7.1.8-1-cachyos-pt31553 SMP preempt mod_unload"
+vermagic = "7.1.8-cachyos-pt31553 SMP preempt mod_unload"
 provenance = "in-tree"
 
 [compatibility.secure_boot]
@@ -182,15 +182,22 @@ pub fn matching_observation_for_policy(policy: &str) -> CompatibilityObservation
 }
 
 pub fn compatibility_declaration(policy: &str) -> CompatibilityDeclarationV1 {
+    fixture_compatibility_declaration(policy).unwrap()
+}
+
+fn fixture_compatibility_declaration(policy: &str) -> Option<CompatibilityDeclarationV1> {
     let source = policy
-        .split_once("[compatibility]\n")
-        .unwrap()
+        .split_once("[compatibility]\n")?
         .1
-        .split_once("\n[calibration.cpu]\n")
-        .unwrap()
+        .split_once("\n[calibration.cpu]\n")?
         .0
         .replace("[compatibility.", "[");
-    parse_compatibility_v1(&source).unwrap()
+    parse_compatibility_v1(&source).ok()
+}
+
+fn compatibility_for_fixture(policy: &str) -> CompatibilityDeclarationV1 {
+    fixture_compatibility_declaration(policy)
+        .unwrap_or_else(|| fixture_compatibility_declaration(PROTECTED_POLICY).unwrap())
 }
 
 pub fn protected_config(policy: &str) -> ValidatedConfig {
@@ -228,7 +235,7 @@ pub fn matching_record(policy: &str) -> String {
         "qualification_id": "pt31553-v1",
         "policy_version": "1.0.0",
         "protected_policy_sha256": sha256(policy),
-        "compatibility": compatibility_declaration(PROTECTED_POLICY),
+        "compatibility": compatibility_for_fixture(policy),
         "supervised_endurance": {
             "schema_version": 1,
             "evidence_sha256": evidence_sha256,
@@ -266,6 +273,8 @@ pub fn matching_endurance_evidence(policy: &str) -> String {
     let mut record: serde_json::Value = serde_json::from_str(&source).unwrap();
     record["qualification_envelope"]["protected_policy_sha256"] =
         protected_policy_sha256.clone().into();
+    record["qualification_envelope"]["compatibility"] =
+        serde_json::to_value(compatibility_for_fixture(policy)).unwrap();
     let source = serde_json::to_string(&record).unwrap();
     cache
         .lock()

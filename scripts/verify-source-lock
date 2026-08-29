@@ -43,6 +43,7 @@ KINDS = SINGLETON_KINDS | {
     "nvidia-patch",
     "nvidia-source",
     "patch",
+    "sensitive-scanner",
     "toolchain-blob",
 }
 TOP_LEVEL = {
@@ -72,7 +73,9 @@ STAGE1_PATCH_SHA256 = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9ca
 STAGE2_PATCH_SHA256 = "67b0d9fcd62451ae717e452d63f6419c02d8f4a34a82a060229cde5b3a96009d"
 STAGE1_BUILD_WRAPPER_SHA256 = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
 STAGE2_BUILD_WRAPPER_SHA256 = "5b47af002478f06de04575ba56e233959d83d855758ce13ad0a0c919675f42f7"
-PACKAGE_BUILD_WRAPPER_SHA256 = "2d64e4cdd2c207c827d15f9914c130d5f88386f2045bad8fcd1d7c57eaeea486"
+PACKAGE_BUILD_WRAPPER_SHA256 = "62b46f42956cf47f6f26b0a90123ef914e6d4903fde050144d8bd9206ef82224"
+PACKAGE_SENSITIVE_SCANNER_SHA256 = "a1bfe5db509efe83fc731b69c4d7566d5e229c5c2b8b626a7d53ffdc70032e79"
+PACKAGE_SENSITIVE_SCANNER_SIZE = 94049
 STAGE1_BC_SHA256 = "b3740d2c34090685b6ffe1b6a6b4631c45edd4801dc7a2bde1049de92165b0d3"
 STAGE1_BC_PATH = "build-tools/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
 STAGE1_BC_REVISION = "1.08.2-1.1"
@@ -357,6 +360,18 @@ def validate_manifest(lock: dict) -> list[dict]:
         ]
         if nvidia_sources != expected_nvidia_sources or nvidia_patches != expected_nvidia_patches:
             fail("source lock NVIDIA inputs: package-set identities are not exact")
+        scanners = [item for item in inputs if item["kind"] == "sensitive-scanner"]
+        expected_scanner = {
+            "name": "sensitive-output-scanner",
+            "kind": "sensitive-scanner",
+            "path": "check-sensitive-history",
+            "origin": "repository:scripts/check-sensitive-history",
+            "revision": PACKAGE_SENSITIVE_SCANNER_SHA256,
+            "sha256": PACKAGE_SENSITIVE_SCANNER_SHA256,
+            "size": PACKAGE_SENSITIVE_SCANNER_SIZE,
+        }
+        if scanners != [expected_scanner]:
+            fail("source lock sensitive scanner: package-set scanner identity is not exact")
     return inputs
 
 
@@ -1049,9 +1064,27 @@ def verify_patch_wrapper(wrapper: str, candidate: str) -> None:
                 {
                     'pkgbase="linux-cachyos-pt31553"': "does not assign the unique package base",
                     '_kernuname="${pkgver}-cachyos-pt31553"': "does not assign the unique kernel release suffix",
+                    "CachyOS/kernel-patches/fcdc4806b62f86b62a61b92c4b7213a1759537e5/": "does not pin NVIDIA patch recipe URLs",
+                    "! grep -Fq 'CachyOS/kernel-patches/master/'": "does not reject floating NVIDIA patch recipe URLs",
                     'ln -s "/bundle/$nvidia_source" "$package_root/source-cache/$nvidia_source"': "does not stage the locked NVIDIA source",
                     'ln -s "/bundle/nvidia/$nvidia_patch_dsc" "$package_root/source-cache/$nvidia_patch_dsc"': "does not stage the locked NVIDIA DSC patch",
                     'ln -s "/bundle/nvidia/$nvidia_patch_vr" "$package_root/source-cache/$nvidia_patch_vr"': "does not stage the locked NVIDIA VR patch",
+                    'install -Dm0400 "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-key.pem" "certs/signing_key.pem"': "does not hand the external module key to the disposable kernel build",
+                    'install -Dm0444 "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der" "certs/signing_key.x509"': "does not hand the external module certificate to the disposable kernel build",
+                    'src=$module_signing,dst=/signing,ro=true': "does not isolate container-visible module signing inputs from the Secure-Boot key",
+                    '/usr/bin/sbsign --key "$signing/kernel-signing-key.pem"': "does not sign the packaged kernel image during finalization",
+                    '/usr/bin/sbverify --cert "$signing/kernel-signing-certificate.pem"': "does not verify the finalized kernel signature",
+                    'signing directory must contain exactly the four documented inputs': "does not reject extra signing-directory entries",
+                    '"/usr/bin/bsdtar" "/usr/bin/openssl" "/usr/bin/python3"': "does not pin host finalization tools",
+                    '"$container_output/packages/linux-cachyos-pt31553/.MTREE"': "does not retain rebuilt signed-kernel package metadata",
+                    '"$container_output/packages/linux-cachyos-pt31553/.PKGINFO"': "does not retain the finalized installed-size metadata",
+                    '/usr/bin/rmdir "$output"': "does not remove the required empty destination before publication",
+                    '/usr/bin/mv -T "$container_output" "$output"': "does not publish the finalized evidence set",
+                    '/usr/bin/mkdir -m "$output_mode" "$output"': "does not restore the destination after a failed publication",
+                    '$((8#$output_mode & 8#022)) == 0': "does not reject group/other-writable output directories",
+                    'chmod 0700 "$container_output"': "does not keep staged evidence private",
+                    '/usr/bin/chmod "$output_mode" "$output"': "does not restore the approved output mode after publication",
+                    '/usr/bin/python3 -I "$bundle/check-sensitive-history" --tree "$container_output"': "does not scan the complete staged output before publication",
                 }
             )
     else:
@@ -1060,7 +1093,12 @@ def verify_patch_wrapper(wrapper: str, candidate: str) -> None:
     if hashlib.sha256(wrapper.encode()).hexdigest() != expected_hash:
         fail(f"build wrapper: bytes do not match the locked {stage} mutation program")
     for fragment, message in patch_fragments.items():
-        if wrapper.count(fragment) != 1:
+        expected_count = (
+            2
+            if fragment == '/usr/bin/python3 -I "$bundle/check-sensitive-history" --tree "$container_output"'
+            else 1
+        )
+        if wrapper.count(fragment) != expected_count:
             fail(f"build wrapper: {message}")
 
     if candidate == PACKAGE_CANDIDATE:
@@ -1282,6 +1320,8 @@ def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> Non
             "recovery_kernel_release": "6.18",
             "recovery_pwm_capable": False,
             "retained_evidence": [
+                "PKGBUILD",
+                "build-attestation.toml",
                 "build-environment.toml",
                 "build.log",
                 "package-set.SRCINFO",
@@ -1390,6 +1430,20 @@ def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> Non
             }
         )
     if lock["candidate"] == PACKAGE_CANDIDATE:
+        scanners = [item for item in inputs if item["kind"] == "sensitive-scanner"]
+        if scanners != [{
+            "name": "sensitive-output-scanner",
+            "kind": "sensitive-scanner",
+            "path": "check-sensitive-history",
+            "origin": "repository:scripts/check-sensitive-history",
+            "revision": PACKAGE_SENSITIVE_SCANNER_SHA256,
+            "sha256": PACKAGE_SENSITIVE_SCANNER_SHA256,
+            "size": PACKAGE_SENSITIVE_SCANNER_SIZE,
+        }]:
+            fail(
+                "source lock sensitive scanner: package candidate requires exactly "
+                "the locked output scanner"
+            )
         required_fragments.update(
             {
                 "expected_packages=(\n        linux-cachyos-pt31553\n        linux-cachyos-pt31553-headers\n        linux-cachyos-pt31553-nvidia-open\n    )": "does not require the exact three-package set",
@@ -1501,7 +1555,11 @@ def build_from_verified_snapshot(
                     size += len(chunk)
             if size != item["size"] or digest.hexdigest() != item["sha256"]:
                 fail(f"verified snapshot input {item['name']}: changed during handoff")
-            target.chmod(0o555 if item["path"] == wrapper else 0o444)
+            target.chmod(
+                0o555
+                if item["path"] == wrapper or item["kind"] == "sensitive-scanner"
+                else 0o444
+            )
         lock_target = snapshot / "source-lock.toml"
         lock_target.write_bytes(lock_bytes)
         lock_target.chmod(0o444)
@@ -1517,7 +1575,13 @@ def build_from_verified_snapshot(
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         }
-        for name in ("LC_ALL", "SOURCE_LOCK_OUTPUT", "TMPDIR", "XDG_RUNTIME_DIR"):
+        for name in (
+            "LC_ALL",
+            "SOURCE_LOCK_OUTPUT",
+            "SOURCE_LOCK_SIGNING_DIR",
+            "TMPDIR",
+            "XDG_RUNTIME_DIR",
+        ):
             if value := os.environ.get(name):
                 environment[name] = value
         config_home = Path(temporary) / "config"

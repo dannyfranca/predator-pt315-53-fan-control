@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PATH=/usr/bin
+export PATH
+trusted_path_mode=$(/usr/bin/stat -c %a /usr/bin)
+[[ $(/usr/bin/stat -c %u /usr/bin) == 0 && \
+    $((8#$trusted_path_mode & 8#022)) == 0 ]] || {
+    echo "unsafe fixed host command path" >&2
+    exit 2
+}
+
 : "${SOURCE_LOCK_BUNDLE:?set SOURCE_LOCK_BUNDLE to the verified bundle directory}"
 if (( $# > 1 )); then
     echo "only the locked build, --compile-pwm, or --verifysource is allowed" >&2
@@ -100,13 +109,29 @@ if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
     [[ "$pkgbase" == linux-cachyos-pt31553 ]]
     [[ "$_kernuname" == 7.1.8-cachyos-pt31553 ]]
     [[ "${pkgname[*]}" == "${expected_packages[*]}" ]]
+    : "${SOURCE_LOCK_INSIDE_SIGNING_DIR:=/signing}"
+    [[ -f "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-key.pem" && ! -L "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-key.pem" ]]
+    [[ -f "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der" && ! -L "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der" ]]
 
     install -m 0444 "$SOURCE_LOCK_BUNDLE/source-lock.toml" \
         "$SOURCE_LOCK_OUTPUT/source-lock.toml"
     install -m 0444 "$SOURCE_LOCK_BUNDLE/build-environment.toml" \
         "$SOURCE_LOCK_OUTPUT/build-environment.toml"
+    install -m 0444 ./PKGBUILD "$SOURCE_LOCK_OUTPUT/PKGBUILD"
     makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --printsrcinfo \
         >"$SOURCE_LOCK_OUTPUT/package-set.SRCINFO"
+    {
+        printf 'format = 1\n'
+        printf 'source_lock_sha256 = "%s"\n' \
+            "$(sha256sum "$SOURCE_LOCK_OUTPUT/source-lock.toml" | cut -d ' ' -f 1)"
+        printf 'build_environment_sha256 = "%s"\n' \
+            "$(sha256sum "$SOURCE_LOCK_OUTPUT/build-environment.toml" | cut -d ' ' -f 1)"
+        printf 'pkgbuild_sha256 = "%s"\n' \
+            "$(sha256sum "$SOURCE_LOCK_OUTPUT/PKGBUILD" | cut -d ' ' -f 1)"
+        printf 'package_set_srcinfo_sha256 = "%s"\n' \
+            "$(sha256sum "$SOURCE_LOCK_OUTPUT/package-set.SRCINFO" | cut -d ' ' -f 1)"
+    } >"$SOURCE_LOCK_OUTPUT/build-attestation.toml"
+    chmod 0444 "$SOURCE_LOCK_OUTPUT/build-attestation.toml"
 
     package_list=$(mktemp "$SOURCE_LOCK_OUTPUT/.packagelist.XXXXXX")
     if ! makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --packagelist \
@@ -144,7 +169,6 @@ if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
     }
     trap cleanup_evidence EXIT
     mkdir "$evidence_root/packages"
-    : >"$evidence_root/SHA256SUMS"
     for index in "${!expected_packages[@]}"; do
         package="${package_paths[$index]}"
         package_name="${expected_packages[$index]}"
@@ -156,19 +180,34 @@ if [[ "${SOURCE_LOCK_INSIDE:-}" == 1 ]]; then
             bsdtar -xOf "$package" "$entry" >"$metadata/$entry"
         done
         grep -Fxq "pkgname = $package_name" "$metadata/.PKGINFO"
-        sha256sum "$package" | sed 's#  .*/#  #' \
-            >>"$evidence_root/SHA256SUMS"
     done
-    chmod 0444 "$evidence_root/SHA256SUMS" \
-        "$evidence_root"/packages/*/.*INFO \
+    chmod 0444 "$evidence_root"/packages/*/.*INFO \
         "$evidence_root"/packages/*/.MTREE
     mv "$evidence_root/packages" "$SOURCE_LOCK_OUTPUT/packages"
-    mv "$evidence_root/SHA256SUMS" "$SOURCE_LOCK_OUTPUT/SHA256SUMS"
     rmdir "$evidence_root"
     evidence_root=
     trap - EXIT
     chmod 0444 "$SOURCE_LOCK_OUTPUT/build.log" \
         "$SOURCE_LOCK_OUTPUT/package-set.SRCINFO"
+    manifest=$(mktemp "$SOURCE_LOCK_OUTPUT/.SHA256SUMS.XXXXXX")
+    (
+        cd "$SOURCE_LOCK_OUTPUT"
+        for retained in \
+            PKGBUILD build-attestation.toml build-environment.toml build.log \
+            package-set.SRCINFO source-lock.toml; do
+            sha256sum -- "$retained"
+        done
+        for package_name in "${expected_packages[@]}"; do
+            for entry in .BUILDINFO .MTREE .PKGINFO; do
+                sha256sum -- "packages/$package_name/$entry"
+            done
+        done
+        for package in "${package_paths[@]}"; do
+            sha256sum "$package" | sed 's#  .*/#  #'
+        done
+    ) | LC_ALL=C sort >"$manifest"
+    chmod 0444 "$manifest"
+    mv "$manifest" "$SOURCE_LOCK_OUTPUT/SHA256SUMS"
     exit 0
 fi
 
@@ -188,10 +227,28 @@ command -v podman >/dev/null || {
 
 bundle=$(realpath "$SOURCE_LOCK_BUNDLE")
 output=$(realpath "$SOURCE_LOCK_OUTPUT")
+output_parent=${output%/*}
+output_mode=$(stat -c %a "$output")
+output_parent_mode=$(stat -c %a "$output_parent")
+[[ $(/usr/bin/stat -c %u "$output") == $EUID && \
+    $(/usr/bin/stat -c %u "$output_parent") == $EUID && \
+    $((8#$output_mode & 8#022)) == 0 && \
+    $((8#$output_parent_mode & 8#022)) == 0 ]] || {
+    echo "output and its parent must be caller-owned and not group/other writable" >&2
+    exit 2
+}
+if find "$output" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    echo "package output directory must be empty before a locked build" >&2
+    exit 2
+fi
 work_root=$(mktemp -d "${TMPDIR:-/tmp}/source-lock-build.XXXXXX")
 package_root="$work_root/package"
 image_layout="$work_root/image"
+container_output=
 cleanup() {
+    if [[ -n "$container_output" && "$container_output" != "$output" ]]; then
+        podman unshare rm -rf -- "$container_output" 2>/dev/null || true
+    fi
     podman unshare chmod -R u+rwX "$work_root" 2>/dev/null || true
     podman unshare rm -rf -- "$work_root"
 }
@@ -227,7 +284,170 @@ sed -i 's/^pkgbase="linux-$_pkgsuffix"$/pkgbase="linux-cachyos-pt31553"/' \
 [[ "$(grep -Fxc '_kernuname="${pkgver}-${_pkgsuffix}"' "$package_root/PKGBUILD")" == 1 ]]
 sed -i 's/^_kernuname="${pkgver}-${_pkgsuffix}"$/_kernuname="${pkgver}-cachyos-pt31553"/' \
     "$package_root/PKGBUILD"
+[[ "$(grep -Fc 'CachyOS/kernel-patches/master/' "$package_root/PKGBUILD")" -ge 1 ]]
+sed -i 's#CachyOS/kernel-patches/master/#CachyOS/kernel-patches/fcdc4806b62f86b62a61b92c4b7213a1759537e5/#g' \
+    "$package_root/PKGBUILD"
+! grep -Fq 'CachyOS/kernel-patches/master/' "$package_root/PKGBUILD"
 printf 'b2sums+=("SKIP" "SKIP")\n' >>"$package_root/PKGBUILD"
+signing_recipe=(
+    'eval "$(declare -f prepare | sed "1s/^prepare /_source_lock_prepare /")"'
+    'prepare() {'
+    '    _source_lock_prepare'
+    '    install -Dm0400 "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-key.pem" "certs/signing_key.pem"'
+    '    install -Dm0444 "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der" "certs/signing_key.x509"'
+    '}'
+    'eval "$(declare -f "package_$pkgbase-headers" | sed "1s/^package_${pkgbase}-headers /_source_lock_package_headers /")"'
+    'eval "package_$pkgbase-headers() { _source_lock_package_headers; install -Dm0444 \"\$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der\" \"\$pkgdir/usr/lib/modules/\$(<version)/build/certs/signing_key.x509\"; }"'
+)
+printf '%s\n' "${signing_recipe[@]}" >>"$package_root/PKGBUILD"
+
+if (( $# == 0 )); then
+    : "${SOURCE_LOCK_SIGNING_DIR:?set SOURCE_LOCK_SIGNING_DIR to the external signing directory}"
+    trusted_tools=(
+        "/usr/bin/bsdtar" "/usr/bin/openssl" "/usr/bin/python3"
+        "/usr/bin/sbsign" "/usr/bin/sbverify" "/usr/bin/zstd"
+    )
+    for trusted_tool in "${trusted_tools[@]}"; do
+        trusted_resolved=$(/usr/bin/realpath --canonicalize-existing "$trusted_tool")
+        [[ "$trusted_resolved" == /usr/bin/* && -f "$trusted_resolved" && \
+            -x "$trusted_resolved" && $(/usr/bin/stat -c %u "$trusted_resolved") == 0 ]]
+        trusted_mode=$(/usr/bin/stat -c %a "$trusted_resolved")
+        (( (8#$trusted_mode & 8#022) == 0 )) || {
+            echo "unsafe host tool: $trusted_tool" >&2
+            exit 2
+        }
+    done
+    signing_lexical=$(/usr/bin/realpath --canonicalize-existing --no-symlinks \
+        "$SOURCE_LOCK_SIGNING_DIR")
+    signing_source=$(/usr/bin/realpath --canonicalize-existing "$SOURCE_LOCK_SIGNING_DIR")
+    [[ -d "$signing_source" && "$signing_source" == "$signing_lexical" ]] || {
+        echo "SOURCE_LOCK_SIGNING_DIR must be a non-symlink directory" >&2
+        exit 2
+    }
+    signing="$work_root/signing-snapshot"
+    mkdir -m 0700 "$signing"
+    /usr/bin/python3 -I - "$signing_source" "$signing" <<'PY'
+import os
+import pathlib
+import stat
+import sys
+
+source = pathlib.Path(sys.argv[1])
+destination = pathlib.Path(sys.argv[2])
+expected = {
+    "kernel-signing-certificate.pem": (0o444, False),
+    "kernel-signing-key.pem": (0o400, True),
+    "module-signing-certificate.der": (0o444, False),
+    "module-signing-key.pem": (0o400, True),
+}
+source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    directory = os.fstat(source_fd)
+    if directory.st_uid != os.geteuid() or directory.st_mode & 0o077:
+        raise SystemExit("signing directory must be owned by the caller and mode 0700")
+    if set(os.listdir(source_fd)) != set(expected):
+        raise SystemExit("signing directory must contain exactly the four documented inputs")
+    for name, (destination_mode, private) in expected.items():
+        source_file = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_fd)
+        try:
+            before = os.fstat(source_file)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_uid != os.geteuid()
+                or not before.st_mode & 0o400
+                or (before.st_mode & (0o077 if private else 0o022))
+                or before.st_size > 1024 * 1024
+            ):
+                raise SystemExit(f"unsafe signing input: {name}")
+            chunks = []
+            remaining = 1024 * 1024 + 1
+            while remaining:
+                chunk = os.read(source_file, min(65536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            after = os.fstat(source_file)
+            stable = (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            ) == (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            content = b"".join(chunks)
+            if not stable or len(content) != before.st_size or not content:
+                raise SystemExit(f"signing input changed while snapshotting: {name}")
+        finally:
+            os.close(source_file)
+        output = os.open(
+            destination / name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            destination_mode,
+        )
+        try:
+            os.fchmod(output, destination_mode)
+            view = memoryview(content)
+            while view:
+                written = os.write(output, view)
+                view = view[written:]
+            os.fsync(output)
+        finally:
+            os.close(output)
+    destination_fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(destination_fd)
+    finally:
+        os.close(destination_fd)
+finally:
+    os.close(source_fd)
+PY
+    /usr/bin/openssl x509 -inform DER -in "$signing/module-signing-certificate.der" \
+        -noout >/dev/null
+    /usr/bin/openssl x509 -in "$signing/kernel-signing-certificate.pem" -noout >/dev/null
+    module_key_public=$(/usr/bin/openssl pkey -in "$signing/module-signing-key.pem" \
+        -pubout -outform DER | /usr/bin/sha256sum | /usr/bin/cut -d ' ' -f 1)
+    module_cert_public=$(/usr/bin/openssl x509 -inform DER \
+        -in "$signing/module-signing-certificate.der" -pubkey -noout | \
+        /usr/bin/openssl pkey -pubin -outform DER | /usr/bin/sha256sum | \
+        /usr/bin/cut -d ' ' -f 1)
+    [[ "$module_key_public" == "$module_cert_public" ]] || {
+        echo "module signing key does not match its certificate" >&2
+        exit 2
+    }
+    kernel_key_public=$(/usr/bin/openssl pkey -in "$signing/kernel-signing-key.pem" \
+        -pubout -outform DER | /usr/bin/sha256sum | /usr/bin/cut -d ' ' -f 1)
+    kernel_cert_public=$(/usr/bin/openssl x509 \
+        -in "$signing/kernel-signing-certificate.pem" -pubkey -noout | \
+        /usr/bin/openssl pkey -pubin -outform DER | /usr/bin/sha256sum | \
+        /usr/bin/cut -d ' ' -f 1)
+    [[ "$kernel_key_public" == "$kernel_cert_public" ]] || {
+        echo "kernel signing key does not match its certificate" >&2
+        exit 2
+    }
+    module_signing="$work_root/module-signing"
+    mkdir -m 0700 "$module_signing"
+    install -m 0400 "$signing/module-signing-key.pem" \
+        "$module_signing/module-signing-key.pem"
+    install -m 0444 "$signing/module-signing-certificate.der" \
+        "$module_signing/module-signing-certificate.der"
+    signing_mount=(--mount "type=bind,src=$module_signing,dst=/signing,ro=true")
+else
+    signing_mount=()
+fi
+
+container_output="$output"
+if (( $# == 0 )); then
+    container_output=$(mktemp -d "$output_parent/.source-lock-output.XXXXXX")
+    chmod 0700 "$container_output"
+fi
 
 printf '{"imageLayoutVersion":"1.0.0"}\n' >"$image_layout/oci-layout"
 printf '{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","digest":"sha256:1c9d839ed8baec04826f0a16435d27de470eaa50bc3068f0ef0f4d44508706c6","size":3656,"annotations":{"org.opencontainers.image.ref.name":"source-lock"}}]}\n' >"$image_layout/index.json"
@@ -243,10 +463,109 @@ podman "${podman_storage[@]}" run --rm --pull=never --network=none --read-only \
     --tmpfs /tmp:rw,nodev,nosuid \
     --mount "type=bind,src=$bundle,dst=/bundle,ro=true" \
     --mount "type=bind,src=$package_root,dst=/work,rw=true" \
-    --mount "type=bind,src=$output,dst=/output,rw=true" \
+    --mount "type=bind,src=$container_output,dst=/output,rw=true" \
+    "${signing_mount[@]}" \
     --workdir /work \
     --env SOURCE_LOCK_INSIDE=1 \
+    --env SOURCE_LOCK_INSIDE_SIGNING_DIR=/signing \
     --env SOURCE_LOCK_BUNDLE=/bundle \
     --env SOURCE_LOCK_OUTPUT=/output \
     --entrypoint /bundle/build-candidate \
     "$toolchain" "$@"
+
+if (( $# == 0 )); then
+    kernel_archive="$container_output/linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst"
+    [[ -f "$kernel_archive" && ! -L "$kernel_archive" ]]
+    /usr/bin/python3 -I "$bundle/check-sensitive-history" --tree "$container_output" \
+        --allow-public-certificate "$signing/module-signing-certificate.der" \
+        --allow-public-certificate "$signing/kernel-signing-certificate.pem"
+    final_root="$work_root/kernel-finalize"
+    mkdir "$final_root"
+    /usr/bin/bsdtar --no-same-owner --no-same-permissions --no-xattrs --no-fflags \
+        -xf "$kernel_archive" -C "$final_root"
+    kernel_image="$final_root/usr/lib/modules/7.1.8-cachyos-pt31553/vmlinuz"
+    [[ -f "$kernel_image" && ! -L "$kernel_image" ]]
+    [[ "$(realpath --canonicalize-existing "$kernel_image")" == "$kernel_image" ]]
+    for metadata in .BUILDINFO .MTREE .PKGINFO; do
+        [[ -f "$final_root/$metadata" && ! -L "$final_root/$metadata" ]]
+        [[ "$(realpath --canonicalize-existing "$final_root/$metadata")" == \
+            "$final_root/$metadata" ]]
+    done
+    unsigned_image_size=$(stat -c %s "$kernel_image")
+    signed_image="$work_root/signed-vmlinuz"
+    /usr/bin/sbsign --key "$signing/kernel-signing-key.pem" \
+        --cert "$signing/kernel-signing-certificate.pem" \
+        --output "$signed_image" "$kernel_image"
+    /usr/bin/sbverify --cert "$signing/kernel-signing-certificate.pem" \
+        "$signed_image" >/dev/null
+    install -m 0644 "$signed_image" "$kernel_image"
+    touch -d @1786378335 "$kernel_image"
+    signed_image_size=$(stat -c %s "$kernel_image")
+    mapfile -t installed_size_fields < <(grep -E '^size = [0-9]+$' "$final_root/.PKGINFO")
+    [[ "${#installed_size_fields[@]}" -eq 1 ]]
+    installed_size=${installed_size_fields[0]#size = }
+    finalized_installed_size=$((installed_size + signed_image_size - unsigned_image_size))
+    [[ "$finalized_installed_size" -ge 0 ]]
+    sed -i "s/^size = $installed_size$/size = $finalized_installed_size/" \
+        "$final_root/.PKGINFO"
+    rm "$final_root/.MTREE"
+    "/usr/bin/find" "$final_root" -mindepth 1 \
+        -exec /usr/bin/touch -h -d @1786378335 -- {} +
+    (
+        cd "$final_root"
+        /usr/bin/bsdtar -czf .MTREE --format=mtree \
+            --uid 0 --gid 0 \
+            --options '!all,use-set,type,uid,gid,mode,time,size,md5,sha256,link' \
+            --exclude .MTREE .
+    )
+    touch -d @1786378335 "$final_root/.MTREE"
+    finalized_archive=$(mktemp "$container_output/.kernel-package.XXXXXX")
+    (
+        cd "$final_root"
+        mapfile -d '' -t finalized_members < <(
+            /usr/bin/find . -mindepth 1 -maxdepth 1 -printf '%P\0' | \
+                LC_ALL=C /usr/bin/sort -z
+        )
+        [[ "${#finalized_members[@]}" -gt 0 ]]
+        /usr/bin/bsdtar --no-fflags --uid 0 --gid 0 --uname root --gname root \
+            --mtime @1786378335 -cf - "${finalized_members[@]}" | \
+            /usr/bin/zstd -q -c -T0 -19
+    ) >"$finalized_archive"
+    chmod 0644 "$finalized_archive"
+    mv "$finalized_archive" "$kernel_archive"
+    install -m 0444 "$final_root/.MTREE" \
+        "$container_output/packages/linux-cachyos-pt31553/.MTREE"
+    install -m 0444 "$final_root/.PKGINFO" \
+        "$container_output/packages/linux-cachyos-pt31553/.PKGINFO"
+    manifest=$(mktemp "$container_output/.SHA256SUMS.XXXXXX")
+    (
+        cd "$container_output"
+        for retained in \
+            PKGBUILD build-attestation.toml build-environment.toml build.log \
+            package-set.SRCINFO source-lock.toml; do
+            sha256sum -- "$retained"
+        done
+        for package_name in \
+            linux-cachyos-pt31553 linux-cachyos-pt31553-headers \
+            linux-cachyos-pt31553-nvidia-open; do
+            for entry in .BUILDINFO .MTREE .PKGINFO; do
+                sha256sum -- "packages/$package_name/$entry"
+            done
+        done
+        for package in ./*.pkg.tar.zst; do
+            sha256sum -- "${package#./}"
+        done
+    ) | LC_ALL=C sort >"$manifest"
+    chmod 0444 "$manifest"
+    mv "$manifest" "$container_output/SHA256SUMS"
+    /usr/bin/python3 -I "$bundle/check-sensitive-history" --tree "$container_output" \
+        --allow-public-certificate "$signing/module-signing-certificate.der" \
+        --allow-public-certificate "$signing/kernel-signing-certificate.pem"
+    /usr/bin/rmdir "$output"
+    if ! /usr/bin/mv -T "$container_output" "$output"; then
+        /usr/bin/mkdir -m "$output_mode" "$output"
+        exit 1
+    fi
+    container_output=
+    /usr/bin/chmod "$output_mode" "$output"
+fi

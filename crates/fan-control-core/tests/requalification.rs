@@ -65,7 +65,7 @@ fn protected_configuration() -> String {
 
 fn same_code_rebuild() -> String {
     PROTECTED_POLICY
-        .replace("7.1.8-1-cachyos-pt31553", "7.1.8-2-cachyos-pt31553")
+        .replace("7.1.8-cachyos-pt31553", "7.1.8-2-cachyos-pt31553")
         .replacen(
             "image_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
             "image_sha256 = \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"",

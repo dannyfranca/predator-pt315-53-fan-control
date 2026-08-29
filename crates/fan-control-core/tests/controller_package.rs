@@ -176,14 +176,14 @@ fn compatibility_declaration_is_exact_model_but_cannot_claim_qualified_artifacts
         declaration.kernel.source_commit,
         "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
     );
-    for identity in [
-        declaration.kernel.image_sha256,
-        declaration.kernel.image_signer_fingerprint,
-        declaration.module.sha256,
-        declaration.module.signer_fingerprint,
-    ] {
+    for identity in [declaration.kernel.image_sha256, declaration.module.sha256] {
         assert_eq!(identity, "0".repeat(64));
     }
+    assert_eq!(
+        declaration.kernel.image_signer_fingerprint,
+        "1c549f6b61cc97b1673e9a73b974b63160bea16357be93a533d93382086f17bc"
+    );
+    assert_eq!(declaration.module.signer_fingerprint, "0".repeat(64));
     for warning in ["unqualified", "zero", "cannot authorize Custom mode"] {
         assert!(source.contains(warning), "missing warning: {warning}");
     }

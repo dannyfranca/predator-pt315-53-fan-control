@@ -14,7 +14,7 @@
         "bios_version": "V1.17"
       },
       "kernel": {
-        "release": "7.1.8-1-cachyos-pt31553",
+        "release": "7.1.8-cachyos-pt31553",
         "package": "linux-cachyos-pt31553",
         "source_commit": "0123456789abcdef0123456789abcdef01234567",
         "image_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -22,10 +22,10 @@
       },
       "module": {
         "name": "acer_wmi",
-        "path": "/usr/lib/modules/7.1.8-1-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst",
+        "path": "/usr/lib/modules/7.1.8-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst",
         "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "signer_fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-        "vermagic": "7.1.8-1-cachyos-pt31553 SMP preempt mod_unload",
+        "vermagic": "7.1.8-cachyos-pt31553 SMP preempt mod_unload",
         "provenance": "in-tree"
       },
       "secure_boot": {

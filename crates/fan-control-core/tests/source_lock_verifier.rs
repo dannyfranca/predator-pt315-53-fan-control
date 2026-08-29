@@ -905,9 +905,11 @@ fn run_verified_build_tool_snapshot_fixture(mutation: &str) -> (Output, bool) {
     let tool = tool_dir.join("bc.pkg.tar.zst");
     let wrapper = bundle.join("build-candidate");
     let output_dir = root.join("output");
+    let signing_dir = root.join("signing");
     let marker = output_dir.join("snapshot-used");
     fs::create_dir_all(&tool_dir).expect("create snapshot fixture bundle");
     fs::create_dir(&output_dir).expect("create snapshot fixture output");
+    fs::create_dir(&signing_dir).expect("create snapshot fixture signing directory");
     let tool_bytes = b"pinned bc fixture\n";
     fs::write(&tool, tool_bytes).expect("write snapshot build tool");
     let wrapper_bytes = format!(
@@ -915,10 +917,12 @@ fn run_verified_build_tool_snapshot_fixture(mutation: &str) -> (Output, bool) {
 set -euo pipefail
 [[ "${{1:-}}" == --compile-pwm ]]
 [[ "$SOURCE_LOCK_BUNDLE" != "{}" ]]
+[[ "$SOURCE_LOCK_SIGNING_DIR" == "{}" ]]
 grep -qx 'pinned bc fixture' "$SOURCE_LOCK_BUNDLE/build-tools/bc.pkg.tar.zst"
 printf 'yes\n' >"$SOURCE_LOCK_OUTPUT/snapshot-used"
 "#,
-        bundle.display()
+        bundle.display(),
+        signing_dir.display()
     )
     .into_bytes();
     fs::write(&wrapper, &wrapper_bytes).expect("write snapshot wrapper");
@@ -990,6 +994,7 @@ finally:
         .arg(sha(tool_bytes))
         .arg(tool_bytes.len().to_string())
         .env("SOURCE_LOCK_OUTPUT", &output_dir)
+        .env("SOURCE_LOCK_SIGNING_DIR", &signing_dir)
         .output()
         .expect("run verified build-tool snapshot fixture");
     let used_snapshot = marker.exists();
@@ -1015,6 +1020,12 @@ fn accepts_a_complete_read_only_bundle_without_modifying_it() {
 #[cfg(unix)]
 #[test]
 fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
+    let sbsign = Path::new("/usr/bin/sbsign");
+    let sbverify = Path::new("/usr/bin/sbverify");
+    let efi_stub = Path::new("/usr/lib/systemd/boot/efi/linuxx64.efi.stub");
+    if !sbsign.is_file() || !sbverify.is_file() || !efi_stub.is_file() {
+        return;
+    }
     let root = std::env::temp_dir().join(format!(
         "fan-control-checked-in-executor-{}-{}",
         std::process::id(),
@@ -1023,6 +1034,7 @@ fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
     let bundle = root.join("bundle");
     let output = root.join("output");
     let bin = root.join("bin");
+    let signing = root.join("signing");
     let kernel_root = root.join("kernel");
     let archive_root = root
         .join("archive")
@@ -1033,6 +1045,58 @@ fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
     fs::create_dir_all(bundle.join("nvidia")).expect("create NVIDIA patch directory");
     fs::create_dir_all(&output).expect("create output directory");
     fs::create_dir_all(&bin).expect("create fake command directory");
+    fs::create_dir_all(&signing).expect("create signing directory");
+    fs::set_permissions(&signing, fs::Permissions::from_mode(0o700))
+        .expect("restrict signing directory");
+    for (key, certificate, subject) in [
+        (
+            "module-signing-key.pem",
+            "module-signing-certificate.pem",
+            "/CN=module-signing-test",
+        ),
+        (
+            "kernel-signing-key.pem",
+            "kernel-signing-certificate.pem",
+            "/CN=kernel-signing-test",
+        ),
+    ] {
+        assert!(
+            Command::new("/usr/bin/openssl")
+                .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes"])
+                .args(["-subj", subject, "-days", "1", "-keyout"])
+                .arg(signing.join(key))
+                .arg("-out")
+                .arg(signing.join(certificate))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("generate signing pair")
+                .success()
+        );
+    }
+    assert!(
+        Command::new("/usr/bin/openssl")
+            .args(["x509", "-in"])
+            .arg(signing.join("module-signing-certificate.pem"))
+            .args(["-outform", "DER", "-out"])
+            .arg(signing.join("module-signing-certificate.der"))
+            .status()
+            .expect("convert module certificate")
+            .success()
+    );
+    let mismatched_module_certificate = root.join("mismatched-module-certificate.der");
+    assert!(
+        Command::new("/usr/bin/openssl")
+            .args(["x509", "-in"])
+            .arg(signing.join("kernel-signing-certificate.pem"))
+            .args(["-outform", "DER", "-out"])
+            .arg(&mismatched_module_certificate)
+            .status()
+            .expect("convert mismatched certificate")
+            .success()
+    );
+    fs::remove_file(signing.join("module-signing-certificate.pem"))
+        .expect("remove intermediate module PEM certificate");
     fs::create_dir_all(&archive_root).expect("create packaging tree");
     fs::create_dir_all(kernel_root.join("drivers/platform/x86"))
         .expect("create kernel source tree");
@@ -1046,15 +1110,18 @@ fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
         r#"_pkgsuffix=cachyos-gcc
 pkgbase="linux-$_pkgsuffix"
 pkgver=7.1.8
+pkgrel=1
+_srcname="$TEST_KERNEL_ROOT"
 _kernuname="${pkgver}-${_pkgsuffix}"
 _nv_ver=610.57.04
 _nv_open_pkg="NVIDIA-kernel-module-source-${_nv_ver}"
+_nvpatchurl="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/7.1/misc/nvidia"
 source=("cachyos-7.1.8-1.tar.gz" "cachyos-7.1.8-1.tar.gz.asc" "config")
 b2sums=("SKIP" "SKIP" "SKIP")
 if [[ "${_build_nvidia_open:-no}" == yes ]]; then
     source+=("${_nv_open_pkg}.tar.xz"
-        "0002-fix-dsc-correct-RC-parameter-tables-to-match-VESA-DS.patch"
-        "0004-fix-dp-add-Bigscreen-Beyond-VR-headset-to-WAR-databa.patch")
+        "${_nvpatchurl}/0002-fix-dsc-correct-RC-parameter-tables-to-match-VESA-DS.patch"
+        "${_nvpatchurl}/0004-fix-dp-add-Bigscreen-Beyond-VR-headset-to-WAR-databa.patch")
     b2sums+=("SKIP")
 fi
 pkgname=("$pkgbase" "$pkgbase-headers")
@@ -1116,6 +1183,16 @@ prepare() {
     )
     .expect("stage build environment");
     fs::copy(
+        checked_in_kernel.join("../../scripts/check-sensitive-history"),
+        bundle.join("check-sensitive-history"),
+    )
+    .expect("stage sensitive output scanner");
+    fs::set_permissions(
+        bundle.join("check-sensitive-history"),
+        fs::Permissions::from_mode(0o555),
+    )
+    .expect("make sensitive output scanner executable");
+    fs::copy(
         checked_in_kernel.join("patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
         bundle.join("patches/0001-acer-wmi-add-pt31553-telemetry.patch"),
     )
@@ -1128,8 +1205,15 @@ prepare() {
 
     let podman_log = root.join("podman.log");
     let makepkg_log = root.join("makepkg.log");
-    let wrapper =
+    let checked_in_wrapper =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/build-candidate");
+    let wrapper = root.join("build-candidate");
+    let wrapper_content = fs::read_to_string(&checked_in_wrapper)
+        .expect("read checked-in executor")
+        .replacen("PATH=/usr/bin\n", "PATH=\"$TEST_BIN:/usr/bin\"\n", 1);
+    fs::write(&wrapper, wrapper_content).expect("write test executor copy");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))
+        .expect("make test executor copy executable");
     let fake_podman = bin.join("podman");
     fs::write(
         &fake_podman,
@@ -1149,23 +1233,34 @@ if [[ "$args" == *" pull --quiet oci:"* ]]; then
 fi
 if [[ "$args" == *" run --rm --pull=never --network=none --read-only "* ]]; then
     package_root=""
+    output_root=""
+    signing_root=""
     for arg in "$@"; do
         if [[ "$arg" == type=bind,src=*,dst=/work,rw=true ]]; then
             package_root="${arg#type=bind,src=}"
             package_root="${package_root%,dst=/work,rw=true}"
+        elif [[ "$arg" == type=bind,src=*,dst=/output,rw=true ]]; then
+            output_root="${arg#type=bind,src=}"
+            output_root="${output_root%,dst=/output,rw=true}"
+        elif [[ "$arg" == type=bind,src=*,dst=/signing,ro=true ]]; then
+            signing_root="${arg#type=bind,src=}"
+            signing_root="${signing_root%,dst=/signing,ro=true}"
         fi
     done
-    [[ -n "$package_root" ]]
+    [[ -n "$package_root" && -n "$output_root" && -n "$signing_root" ]]
     env -i PATH="$TEST_BIN:/usr/bin:/bin" \
         SOURCE_LOCK_INSIDE=1 \
         SOURCE_LOCK_BUNDLE="$TEST_BUNDLE" \
-        SOURCE_LOCK_OUTPUT="$TEST_OUTPUT" \
+        SOURCE_LOCK_INSIDE_SIGNING_DIR="$signing_root" \
+        SOURCE_LOCK_OUTPUT="$output_root" \
         TEST_BUNDLE="$TEST_BUNDLE" \
+        TEST_EFI_STUB="$TEST_EFI_STUB" \
         TEST_KERNEL_ROOT="$TEST_KERNEL_ROOT" \
         TEST_MAKEPKG_LOG="$TEST_MAKEPKG_LOG" \
-        TEST_OUTPUT="$TEST_OUTPUT" \
+        TEST_OUTPUT="$output_root" \
         TEST_PACKAGE_MUTATION="${TEST_PACKAGE_MUTATION:-}" \
         TEST_PACKAGE_ROOT="$package_root" \
+        TEST_SIGNING="$TEST_SIGNING" \
         TEST_WRAPPER="$TEST_WRAPPER" \
         /bin/bash -c 'cd "$TEST_PACKAGE_ROOT"; exec /bin/bash "$TEST_WRAPPER"'
     exit $?
@@ -1179,8 +1274,26 @@ exit 97
         &fake_makepkg,
         r#"#!/usr/bin/env bash
 set -euo pipefail
+if [[ "${TEST_PACKAGE_MUTATION:-}" == swap-signing-inputs ]]; then
+    for input in \
+        module-signing-key.pem module-signing-certificate.der \
+        kernel-signing-key.pem kernel-signing-certificate.pem; do
+        printf 'replaced after snapshot\n' >"$TEST_SIGNING/$input"
+    done
+fi
 if [[ " $* " == *" --printsrcinfo "* ]]; then
-    printf 'pkgbase = linux-cachyos-pt31553\n'
+    # shellcheck disable=SC1091 -- exercise the rewritten authenticated recipe.
+    source "$TEST_PACKAGE_ROOT/PKGBUILD"
+    printf 'pkgbase = %s\n' "$pkgbase"
+    printf '\tpkgver = %s\n' "$pkgver"
+    printf '\tpkgrel = %s\n' "$pkgrel"
+    printf '\tarch = x86_64\n'
+    for item in "${source[@]}"; do
+        printf '\tsource = %s\n' "$item"
+    done
+    for item in "${pkgname[@]}"; do
+        printf 'pkgname = %s\n' "$item"
+    done
     exit 0
 fi
 if [[ " $* " == *" --packagelist "* ]]; then
@@ -1189,35 +1302,35 @@ if [[ " $* " == *" --packagelist "* ]]; then
             printf '%s\n' \
                 "$TEST_OUTPUT/linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst" \
                 "$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst" \
-                "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-610.57.04-1-x86_64.pkg.tar.zst"
+                "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-7.1.8-1-x86_64.pkg.tar.zst"
             exit 42
             ;;
         reordered-plan)
             printf '%s\n' \
                 "$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst" \
                 "$TEST_OUTPUT/linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst" \
-                "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-610.57.04-1-x86_64.pkg.tar.zst"
+                "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-7.1.8-1-x86_64.pkg.tar.zst"
             exit 0
             ;;
         outside-plan)
             printf '%s\n' \
                 "/tmp/outside-linux-cachyos-pt31553.pkg.tar.zst" \
                 "$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst" \
-                "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-610.57.04-1-x86_64.pkg.tar.zst"
+                "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-7.1.8-1-x86_64.pkg.tar.zst"
             exit 0
             ;;
         mismatched-plan)
             printf '%s\n' \
                 "$TEST_OUTPUT/linux-cachyos-pt31553-wrong-7.1.8-1-x86_64.pkg.tar.zst" \
                 "$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst" \
-                "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-610.57.04-1-x86_64.pkg.tar.zst"
+                "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-7.1.8-1-x86_64.pkg.tar.zst"
             exit 0
             ;;
     esac
     printf '%s\n' \
         "$TEST_OUTPUT/linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst" \
         "$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst" \
-        "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-610.57.04-1-x86_64.pkg.tar.zst"
+        "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-7.1.8-1-x86_64.pkg.tar.zst"
     exit 0
 fi
 printf 'args=%s\n' "$*" >"$TEST_MAKEPKG_LOG"
@@ -1243,42 +1356,63 @@ declare -p pkgname | grep -Fq 'linux-cachyos-pt31553-nvidia-open'
 declare -p source | grep -Fq 'NVIDIA-kernel-module-source-610.57.04.tar.xz'
 declare -p source | grep -Fq '0001-acer-wmi-add-pt31553-telemetry.patch'
 declare -p source | grep -Fq '0002-acer-wmi-enable-pt31553-pwm.patch'
+if [[ "${TEST_PACKAGE_MUTATION:-}" == probe-kernel-key ]]; then
+    [[ ! -e "$SOURCE_LOCK_INSIDE_SIGNING_DIR/kernel-signing-key.pem" ]]
+fi
 [[ -n "${TEST_PACKAGE_MUTATION:-}" ]] || prepare
-printf 'pkgname = linux-cachyos-pt31553\n' \
-    >"$TEST_OUTPUT/linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst"
-printf 'pkgname = linux-cachyos-pt31553-headers\n' \
-    >"$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst"
+create_package() {
+    local package_name=$1 archive=$2 include_kernel=${3:-no}
+    local stage
+    stage=$(mktemp -d "$TEST_OUTPUT/.package-stage.XXXXXX")
+    printf 'pkgname = %s\nsize = 13\n' "$package_name" >"$stage/.PKGINFO"
+    printf 'buildinfo for %s\n' "$package_name" >"$stage/.BUILDINFO"
+    printf 'mtree for %s\n' "$package_name" >"$stage/.MTREE"
+    if [[ "$include_kernel" == yes ]]; then
+        mkdir -p "$stage/usr/lib/modules/7.1.8-cachyos-pt31553"
+        if [[ "${TEST_PACKAGE_MUTATION:-}" == unsafe-kernel-archive ]]; then
+            ln -s /tmp/outside-vmlinuz \
+                "$stage/usr/lib/modules/7.1.8-cachyos-pt31553/vmlinuz"
+        else
+            if [[ "${TEST_PACKAGE_MUTATION:-}" == signing-fails ]]; then
+                printf 'not a PE image\n' \
+                    >"$stage/usr/lib/modules/7.1.8-cachyos-pt31553/vmlinuz"
+            else
+                /usr/bin/cp "$TEST_EFI_STUB" \
+                    "$stage/usr/lib/modules/7.1.8-cachyos-pt31553/vmlinuz"
+            fi
+        fi
+    fi
+    (
+        cd "$stage"
+        members=(.BUILDINFO .MTREE .PKGINFO)
+        [[ "$include_kernel" != yes ]] || members+=(usr)
+        /usr/bin/bsdtar -cf - "${members[@]}" | /usr/bin/zstd -q -c \
+            >"$archive"
+    )
+    /usr/bin/rm -r -- "$stage"
+}
+create_package linux-cachyos-pt31553 \
+    "$TEST_OUTPUT/linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst" yes
+create_package linux-cachyos-pt31553-headers \
+    "$TEST_OUTPUT/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst"
 package_name=linux-cachyos-pt31553-nvidia-open
 [[ "${TEST_PACKAGE_MUTATION:-}" != wrong-metadata ]] || package_name=linux-cachyos
-printf 'pkgname = %s\n' "$package_name" \
-    >"$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-610.57.04-1-x86_64.pkg.tar.zst"
+create_package "$package_name" \
+    "$TEST_OUTPUT/linux-cachyos-pt31553-nvidia-open-7.1.8-1-x86_64.pkg.tar.zst"
 if [[ "${TEST_PACKAGE_MUTATION:-}" == extra-package ]]; then
-    printf 'pkgname = unexpected\n' \
-        >"$TEST_OUTPUT/unexpected-1-1-x86_64.pkg.tar.zst"
+    create_package unexpected "$TEST_OUTPUT/unexpected-1-1-x86_64.pkg.tar.zst"
+fi
+if [[ "${TEST_PACKAGE_MUTATION:-}" == leak-private-key ]]; then
+    printf '%s\n' '-----BEGIN PRIVATE KEY-----' 'c2VjcmV0' \
+        '-----END PRIVATE KEY-----' >"$TEST_OUTPUT/leaked-build-record.txt"
 fi
 "#,
     )
     .expect("write fake makepkg");
-    let fake_bsdtar = bin.join("bsdtar");
-    fs::write(
-        &fake_bsdtar,
-        r#"#!/usr/bin/env bash
-set -euo pipefail
-entry="$3"
-if [[ "$entry" == .PKGINFO ]]; then
-    /usr/bin/cat "$2"
-else
-    printf '%s evidence from %s\n' "$entry" "$(/usr/bin/cat "$2")"
-fi
-"#,
-    )
-    .expect("write fake bsdtar");
     fs::set_permissions(&fake_podman, fs::Permissions::from_mode(0o755))
         .expect("make fake podman executable");
     fs::set_permissions(&fake_makepkg, fs::Permissions::from_mode(0o755))
         .expect("make fake makepkg executable");
-    fs::set_permissions(&fake_bsdtar, fs::Permissions::from_mode(0o755))
-        .expect("make fake bsdtar executable");
 
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let run_executor = |run_output: &Path, mutation: &str| {
@@ -1287,14 +1421,17 @@ fi
             .env("PATH", &path)
             .env("SOURCE_LOCK_BUNDLE", &bundle)
             .env("SOURCE_LOCK_OUTPUT", run_output)
+            .env("SOURCE_LOCK_SIGNING_DIR", &signing)
             .env("TEST_BIN", &bin)
             .env("TEST_BUNDLE", &bundle)
+            .env("TEST_EFI_STUB", efi_stub)
             .env("TEST_OUTPUT", run_output)
             .env("TEST_KERNEL_ROOT", &kernel_root)
             .env("TEST_WRAPPER", &wrapper)
             .env("TEST_PODMAN_LOG", &podman_log)
             .env("TEST_MAKEPKG_LOG", &makepkg_log)
             .env("TEST_PACKAGE_MUTATION", mutation)
+            .env("TEST_SIGNING", &signing)
             .output()
             .expect("run checked-in executor")
     };
@@ -1312,6 +1449,7 @@ fi
     assert!(podman.contains("--mount type=bind"));
     assert!(podman.contains("dst=/bundle,ro=true"));
     assert!(podman.contains("--entrypoint /bundle/build-candidate"));
+    assert!(!podman.contains("kernel-signing-key.pem"));
     let makepkg = fs::read_to_string(&makepkg_log).expect("read fake makepkg log");
     assert!(makepkg.contains("--skippgpcheck --skipchecksums --noconfirm --cleanbuild"));
     assert!(!makepkg.contains("--verifysource"));
@@ -1319,6 +1457,10 @@ fi
     assert!(makepkg.contains("_processor_opt=generic_v4"));
     assert!(makepkg.contains("_cpusched=cachyos"));
     assert!(makepkg.contains("_build_nvidia_open=yes"));
+    let srcinfo = fs::read_to_string(output.join("package-set.SRCINFO"))
+        .expect("read generated package SRCINFO");
+    assert!(srcinfo.contains("CachyOS/kernel-patches/fcdc4806b62f86b62a61b92c4b7213a1759537e5/"));
+    assert!(!srcinfo.contains("CachyOS/kernel-patches/master/"));
     for package_name in [
         "linux-cachyos-pt31553",
         "linux-cachyos-pt31553-headers",
@@ -1332,14 +1474,119 @@ fi
             );
         }
     }
-    assert_eq!(
-        fs::read_to_string(output.join("SHA256SUMS"))
-            .expect("read package checksums")
-            .lines()
-            .count(),
-        3
+    let checksum_manifest =
+        fs::read_to_string(output.join("SHA256SUMS")).expect("read package checksums");
+    let finalized_pkginfo =
+        fs::read_to_string(output.join("packages/linux-cachyos-pt31553/.PKGINFO")).unwrap();
+    let finalized_size = finalized_pkginfo
+        .lines()
+        .find_map(|line| line.strip_prefix("size = "))
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!(finalized_size > 13);
+    let finalized_kernel = output.join("linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst");
+    let archive_listing = Command::new("bsdtar")
+        .args(["-tf"])
+        .arg(&finalized_kernel)
+        .output()
+        .expect("list finalized kernel archive");
+    assert!(archive_listing.status.success());
+    let archive_listing = String::from_utf8(archive_listing.stdout).unwrap();
+    assert!(!archive_listing.lines().any(|entry| entry.starts_with("./")));
+    assert!(archive_listing.lines().any(|entry| entry == ".PKGINFO"));
+    let signed_kernel = root.join("finalized-vmlinuz");
+    assert!(
+        Command::new("bsdtar")
+            .arg("-xOf")
+            .arg(&finalized_kernel)
+            .arg("usr/lib/modules/7.1.8-cachyos-pt31553/vmlinuz")
+            .stdout(fs::File::create(&signed_kernel).unwrap())
+            .status()
+            .expect("extract finalized signed kernel")
+            .success()
     );
+    assert!(
+        Command::new(sbverify)
+            .arg("--cert")
+            .arg(signing.join("kernel-signing-certificate.pem"))
+            .arg(&signed_kernel)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("verify finalized signed kernel")
+            .success()
+    );
+    for metadata in [".PKGINFO", ".MTREE"] {
+        let archived = Command::new("bsdtar")
+            .arg("-xOf")
+            .arg(&finalized_kernel)
+            .arg(metadata)
+            .output()
+            .expect("extract finalized package metadata");
+        assert!(archived.status.success());
+        assert_eq!(
+            archived.stdout,
+            fs::read(output.join("packages/linux-cachyos-pt31553").join(metadata)).unwrap()
+        );
+    }
+    let checksums = checksum_manifest
+        .lines()
+        .map(|line| {
+            let (digest, path) = line.split_once("  ").expect("valid checksum line");
+            (path.to_owned(), digest.to_owned())
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let expected_paths = [
+        "PKGBUILD",
+        "build-attestation.toml",
+        "build-environment.toml",
+        "build.log",
+        "linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst",
+        "linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst",
+        "linux-cachyos-pt31553-nvidia-open-7.1.8-1-x86_64.pkg.tar.zst",
+        "package-set.SRCINFO",
+        "packages/linux-cachyos-pt31553-headers/.BUILDINFO",
+        "packages/linux-cachyos-pt31553-headers/.MTREE",
+        "packages/linux-cachyos-pt31553-headers/.PKGINFO",
+        "packages/linux-cachyos-pt31553-nvidia-open/.BUILDINFO",
+        "packages/linux-cachyos-pt31553-nvidia-open/.MTREE",
+        "packages/linux-cachyos-pt31553-nvidia-open/.PKGINFO",
+        "packages/linux-cachyos-pt31553/.BUILDINFO",
+        "packages/linux-cachyos-pt31553/.MTREE",
+        "packages/linux-cachyos-pt31553/.PKGINFO",
+        "source-lock.toml",
+    ];
+    assert_eq!(
+        checksums.keys().map(String::as_str).collect::<Vec<_>>(),
+        expected_paths
+    );
+    for (path, digest) in checksums {
+        assert_eq!(
+            digest,
+            format!("{:x}", Sha256::digest(fs::read(output.join(path)).unwrap()))
+        );
+    }
+    let attestation: toml::Value = toml::from_str(
+        &fs::read_to_string(output.join("build-attestation.toml")).expect("read build attestation"),
+    )
+    .expect("parse build attestation");
+    assert_eq!(attestation["format"].as_integer(), Some(1));
+    for (field, path) in [
+        ("source_lock_sha256", "source-lock.toml"),
+        ("build_environment_sha256", "build-environment.toml"),
+        ("pkgbuild_sha256", "PKGBUILD"),
+        ("package_set_srcinfo_sha256", "package-set.SRCINFO"),
+    ] {
+        let expected = sha(&fs::read(output.join(path)).unwrap());
+        assert_eq!(
+            attestation[field].as_str(),
+            Some(expected.as_str()),
+            "wrong {field} binding"
+        );
+    }
     for evidence in [
+        "PKGBUILD",
         "build-environment.toml",
         "build.log",
         "package-set.SRCINFO",
@@ -1353,6 +1600,14 @@ fi
     assert!(patched_source.contains("Predator PT315-53"));
     assert!(patched_source.contains("DMI_EXACT_MATCH(DMI_BOARD_NAME, \"Civic_TLS\")"));
     assert!(patched_source.contains("\t.pwm = 1,"));
+    assert_eq!(
+        fs::read(kernel_root.join("certs/signing_key.pem")).unwrap(),
+        fs::read(signing.join("module-signing-key.pem")).unwrap()
+    );
+    assert_eq!(
+        fs::read(kernel_root.join("certs/signing_key.x509")).unwrap(),
+        fs::read(signing.join("module-signing-certificate.der")).unwrap()
+    );
 
     for (case, mutation, expected_failure) in [
         (
@@ -1366,6 +1621,17 @@ fi
         ("reordered-plan", "reordered-plan", ""),
         ("outside-plan", "outside-plan", ""),
         ("mismatched-plan", "mismatched-plan", ""),
+        ("signing-failure", "signing-fails", ""),
+        (
+            "unsafe-kernel-archive",
+            "unsafe-kernel-archive",
+            "sensitive tree file",
+        ),
+        (
+            "private-key-leak",
+            "leak-private-key",
+            "sensitive tree file",
+        ),
     ] {
         let rejected_output = root.join(case);
         fs::create_dir(&rejected_output).expect("create rejected output directory");
@@ -1387,7 +1653,114 @@ fi
             !rejected_output.join("packages").exists(),
             "{case} retained completed package metadata"
         );
+        assert_eq!(
+            fs::read_dir(&rejected_output).unwrap().count(),
+            0,
+            "{case} retained partial output"
+        );
     }
+
+    let malformed_output = root.join("malformed-signing-output");
+    fs::create_dir(&malformed_output).expect("create malformed signing output");
+    let module_certificate = fs::read(signing.join("module-signing-certificate.der")).unwrap();
+    fs::write(signing.join("module-signing-certificate.der"), "malformed")
+        .expect("corrupt module signing certificate");
+    let malformed = run_executor(&malformed_output, "");
+    assert!(!malformed.status.success());
+    assert_eq!(fs::read_dir(&malformed_output).unwrap().count(), 0);
+    fs::write(
+        signing.join("module-signing-certificate.der"),
+        &module_certificate,
+    )
+    .expect("restore module signing certificate");
+
+    let mismatched_output = root.join("mismatched-signing-pair-output");
+    fs::create_dir(&mismatched_output).expect("create mismatched signing output");
+    fs::copy(
+        &mismatched_module_certificate,
+        signing.join("module-signing-certificate.der"),
+    )
+    .expect("mismatch module certificate");
+    let mismatched = run_executor(&mismatched_output, "");
+    assert!(!mismatched.status.success());
+    assert!(failure_text(&mismatched).contains("does not match its certificate"));
+    assert_eq!(fs::read_dir(&mismatched_output).unwrap().count(), 0);
+    fs::write(
+        signing.join("module-signing-certificate.der"),
+        &module_certificate,
+    )
+    .expect("restore matched module certificate");
+
+    let extra_output = root.join("extra-signing-input-output");
+    fs::create_dir(&extra_output).expect("create extra-signing-input output");
+    fs::write(signing.join("unexpected.pem"), "unexpected").unwrap();
+    let extra = run_executor(&extra_output, "");
+    assert!(!extra.status.success());
+    assert!(failure_text(&extra).contains("exactly the four documented inputs"));
+    assert_eq!(fs::read_dir(&extra_output).unwrap().count(), 0);
+    fs::remove_file(signing.join("unexpected.pem")).unwrap();
+
+    let missing_output = root.join("missing-signing-output");
+    fs::create_dir(&missing_output).expect("create missing signing output");
+    fs::rename(
+        signing.join("module-signing-key.pem"),
+        signing.join("module-signing-key.pem.saved"),
+    )
+    .expect("hide module signing key");
+    let missing = run_executor(&missing_output, "");
+    assert!(!missing.status.success());
+    assert_eq!(fs::read_dir(&missing_output).unwrap().count(), 0);
+    fs::rename(
+        signing.join("module-signing-key.pem.saved"),
+        signing.join("module-signing-key.pem"),
+    )
+    .expect("restore module signing key");
+
+    let isolated_output = root.join("isolated-signing-output");
+    fs::create_dir(&isolated_output).expect("create isolated signing output");
+    let isolated = run_executor(&isolated_output, "probe-kernel-key");
+    assert!(isolated.status.success(), "{}", failure_text(&isolated));
+    assert!(!isolated_output.join("kernel-signing-key.pem").exists());
+
+    let original_signing_inputs = [
+        "module-signing-key.pem",
+        "module-signing-certificate.der",
+        "kernel-signing-key.pem",
+        "kernel-signing-certificate.pem",
+    ]
+    .map(|name| (name, fs::read(signing.join(name)).unwrap()));
+    let swapped_output = root.join("swapped-signing-input-output");
+    fs::create_dir(&swapped_output).expect("create swapped signing output");
+    let swapped = run_executor(&swapped_output, "swap-signing-inputs");
+    for (name, content) in original_signing_inputs {
+        fs::write(signing.join(name), content).unwrap();
+    }
+    assert!(
+        swapped.status.success(),
+        "signing path replacement crossed the snapshot boundary: {}",
+        failure_text(&swapped)
+    );
+    assert!(swapped_output.join("SHA256SUMS").is_file());
+
+    let signing_link = root.join("signing-link");
+    std::os::unix::fs::symlink(&signing, &signing_link).expect("create signing symlink");
+    let symlink_output = root.join("symlink-signing-output");
+    fs::create_dir(&symlink_output).expect("create symlink signing output");
+    let symlinked = Command::new("/bin/bash")
+        .arg(&wrapper)
+        .env("PATH", &path)
+        .env("TEST_BIN", &bin)
+        .env("SOURCE_LOCK_BUNDLE", &bundle)
+        .env("SOURCE_LOCK_OUTPUT", &symlink_output)
+        .env(
+            "SOURCE_LOCK_SIGNING_DIR",
+            format!("{}/", signing_link.display()),
+        )
+        .output()
+        .expect("run executor with symlinked signing directory");
+    assert!(!symlinked.status.success());
+    assert!(failure_text(&symlinked).contains("non-symlink directory"));
+    assert_eq!(fs::read_dir(&symlink_output).unwrap().count(), 0);
 
     let stale_output = root.join("stale-output");
     fs::create_dir(&stale_output).expect("create stale output directory");
@@ -1397,7 +1770,7 @@ fi
     assert!(failure_text(&stale).contains("output directory must be empty"));
     assert!(!stale_output.join("SHA256SUMS").exists());
 
-    let missing_output = root.join("missing-output");
+    let missing_output = root.join("missing-output-directory");
     let rejected = Command::new("/bin/bash")
         .arg(&wrapper)
         .env("PATH", &path)
@@ -1497,13 +1870,22 @@ fi
     fs::set_permissions(&fake_make, fs::Permissions::from_mode(0o755))
         .expect("make fake make executable");
 
-    let wrapper =
+    let checked_in_wrapper =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/build-candidate");
+    let wrapper = root.join("build-candidate");
+    fs::write(
+        &wrapper,
+        fs::read_to_string(&checked_in_wrapper)
+            .expect("read checked-in executor")
+            .replacen("PATH=/usr/bin\n", "PATH=\"$TEST_BIN:/usr/bin\"\n", 1),
+    )
+    .expect("write compile test executor copy");
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let run = Command::new("/bin/bash")
         .arg(&wrapper)
         .arg("--compile-pwm")
         .env("PATH", path)
+        .env("TEST_BIN", &bin)
         .env("SOURCE_LOCK_INSIDE", "1")
         .env("SOURCE_LOCK_BUNDLE", &bundle)
         .env("SOURCE_LOCK_OUTPUT", &output)
@@ -1567,6 +1949,7 @@ fi
         .arg(&wrapper)
         .arg("--compile-pwm")
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("TEST_BIN", &bin)
         .env("SOURCE_LOCK_INSIDE", "1")
         .env("SOURCE_LOCK_BUNDLE", &bundle)
         .env("SOURCE_LOCK_OUTPUT", &output)

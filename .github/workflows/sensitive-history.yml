@@ -1,0 +1,21 @@
+name: Sensitive history
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject keys, certificates, and trust stores in history
+        run: scripts/check-sensitive-history
+      - name: Exercise adversarial sensitive-history fixtures
+        run: cargo test -p fan-control-core --test sensitive_history_gate

@@ -7,7 +7,7 @@ use fan_control_core::{
 const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
-const RELEASE: &str = "7.1.8-1-cachyos-pt31553";
+const RELEASE: &str = "7.1.8-cachyos-pt31553";
 
 const DECLARATION: &str = r#"
 schema_version = 1
@@ -18,7 +18,7 @@ dmi_board_name = "Civic_TLS"
 bios_version = "V1.17"
 
 [kernel]
-release = "7.1.8-1-cachyos-pt31553"
+release = "7.1.8-cachyos-pt31553"
 package = "linux-cachyos-pt31553"
 source_commit = "0123456789abcdef0123456789abcdef01234567"
 image_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -26,10 +26,10 @@ image_signer_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
 [module]
 name = "acer_wmi"
-path = "/usr/lib/modules/7.1.8-1-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst"
+path = "/usr/lib/modules/7.1.8-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst"
 sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 signer_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-vermagic = "7.1.8-1-cachyos-pt31553 SMP preempt mod_unload"
+vermagic = "7.1.8-cachyos-pt31553 SMP preempt mod_unload"
 provenance = "in-tree"
 
 [secure_boot]
@@ -116,8 +116,8 @@ fn malformed_provenance_boundaries_are_rejected() {
     }
 
     let prefix_collision = DECLARATION.replacen(
-        "vermagic = \"7.1.8-1-cachyos-pt31553 ",
-        "vermagic = \"7.1.8-1-cachyos-pt315530 ",
+        "vermagic = \"7.1.8-cachyos-pt31553 ",
+        "vermagic = \"7.1.8-cachyos-pt315530 ",
         1,
     );
     assert!(parse_compatibility_v1(&prefix_collision).is_err());
