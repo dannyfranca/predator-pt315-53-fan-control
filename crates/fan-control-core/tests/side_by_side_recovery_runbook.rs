@@ -137,7 +137,6 @@ fn candidate_install_keeps_both_stock_entries_and_the_controller_disabled() {
             "--property=InactiveEnterTimestampMonotonic --value",
             "_EXE=/usr/bin/pt31553-fand",
             "pgrep -x pt31553-fand",
-            "pt31553-fan-restore --restore",
             "tee /run/pt31553-clean-stock-boot-id",
         ],
     );
@@ -288,7 +287,6 @@ fn candidate_install_keeps_both_stock_entries_and_the_controller_disabled() {
             "--property=InactiveEnterTimestampMonotonic --value",
             "_EXE=/usr/bin/pt31553-fand",
             "pgrep -x pt31553-fand",
-            "pt31553-fan-restore --restore",
             "assert all(sum(entry.get(\"id\") == entry_id for entry in entries) == 1",
             "assert defaults == [expected_default_id]",
             "assert candidate_id != expected_default_id",
@@ -303,6 +301,11 @@ fn candidate_install_keeps_both_stock_entries_and_the_controller_disabled() {
         one_shot,
         "test \"$(/usr/bin/systemctl is-active \"$unit\" || true)\" = inactive"
     ));
+    let before_candidate_reboot = runbook
+        .split_once("systemctl reboot --boot-loader-entry=\"$candidate_entry\"")
+        .expect("runbook must contain the candidate one-shot reboot")
+        .0;
+    assert!(!before_candidate_reboot.contains("pt31553-fan-restore --restore"));
     assert_in_order(
         candidate_boot,
         &[
