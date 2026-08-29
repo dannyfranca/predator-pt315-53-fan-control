@@ -3012,9 +3012,9 @@ fn rejects_oversized_elf_section_names() {
 fn exact_kernel_decompression_respects_the_shared_residency_budget() {
     let root = temporary_fixture("kernel-residency-budget");
     let payload = root.join("payload.gz");
-    let mut streams = gzip_bytes(&vec![0_u8; 150]);
+    let mut streams = gzip_bytes(&[0_u8; 150]);
     streams.extend_from_slice(b"ordinary-separator");
-    streams.extend(gzip_bytes(&vec![0_u8; 150]));
+    streams.extend(gzip_bytes(&[0_u8; 150]));
     fs::write(&payload, streams).unwrap();
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -4148,6 +4148,7 @@ fn rejects_module_certificate_in_signed_pe_overlay() {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_package(
     root: &Path,
     artifacts: &Path,
@@ -5950,7 +5951,7 @@ fn arbitrary_short_path_base64(content: &[u8]) -> Vec<u8> {
 fn ordered_multifield_base64(content: &[u8]) -> Vec<u8> {
     let mut padded = content.to_vec();
     padded.resize(content.len().next_multiple_of(12), 0);
-    if !padded.len().div_ceil(12).is_multiple_of(2) {
+    if padded.len().div_ceil(12) % 2 != 0 {
         padded.resize(padded.len() + 12, 0);
     }
     padded
@@ -6003,7 +6004,7 @@ fn variable_field_count_base64(content: &[u8]) -> Vec<u8> {
         .chunks(32)
         .enumerate()
         .map(|(index, chunk)| {
-            let labels = if index.is_multiple_of(2) {
+            let labels = if index % 2 == 0 {
                 "HarmlessLabelA"
             } else {
                 "HarmlessLabelA HarmlessLabelB"
