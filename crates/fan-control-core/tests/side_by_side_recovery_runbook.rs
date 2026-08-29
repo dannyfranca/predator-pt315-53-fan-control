@@ -658,7 +658,7 @@ fn last_qualified_candidate_is_retained_until_its_successor_passes() {
         retention
             .matches("pt31553-fan-qualify\" validate-records")
             .count(),
-        3
+        4
     );
     assert!(retention.contains("/usr/bin/pt31553-fan-qualify"));
     assert!(retention.contains("$archive_target/pt31553-fan-qualify"));
