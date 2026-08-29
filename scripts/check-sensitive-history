@@ -1982,6 +1982,34 @@ def mask_mtree_digest_attributes(content: bytes) -> bytes:
     return b"".join(masked)
 
 
+def mask_verified_sha256sum_digests(
+    content: bytes, tree_digests: dict[bytes, bytes]
+) -> bytes:
+    if not content or not content.endswith(b"\n"):
+        return content
+    line_pattern = re.compile(rb"([0-9a-f]{64})  ([^\x00\r\n]+)\n")
+    cursor = 0
+    seen = set()
+    matches = []
+    for match in line_pattern.finditer(content):
+        path = match.group(2)
+        if (
+            match.start() != cursor
+            or path in seen
+            or tree_digests.get(path) != match.group(1)
+        ):
+            return content
+        seen.add(path)
+        matches.append(match)
+        cursor = match.end()
+    if not matches or cursor != len(content):
+        return content
+    masked = bytearray(content)
+    for match in matches:
+        masked[match.start(1) : match.end(1)] = b"0" * 64
+    return bytes(masked)
+
+
 def mask_git_object_identifier_headers(content: bytes, kind: str) -> bytes:
     allowed_headers = {
         "commit": frozenset((b"tree", b"parent")),
@@ -2347,6 +2375,8 @@ def scan_tree(root_argument: str, allowed_certificates: frozenset[bytes]) -> int
     budget = inspection_budget()
     files = 0
     total_size = 0
+    tree_digests: dict[bytes, bytes] = {}
+    deferred_sha256sums: tuple[str, bytes] | None = None
 
     def reject_walk_error(error: OSError) -> None:
         raise SystemExit(
@@ -2441,6 +2471,12 @@ def scan_tree(root_argument: str, allowed_certificates: frozenset[bytes]) -> int
                 )
             ):
                 raise SystemExit("check-sensitive-history: tree file changed during inspection")
+            tree_digests[os.fsencode(relative)] = hashlib.sha256(content).hexdigest().encode(
+                "ascii"
+            )
+            if relative == "SHA256SUMS":
+                deferred_sha256sums = (relative, bytes(content))
+                continue
             if sensitive(
                 content,
                 relative,
@@ -2454,6 +2490,22 @@ def scan_tree(root_argument: str, allowed_certificates: frozenset[bytes]) -> int
                     file=sys.stderr,
                 )
                 return 1
+    if deferred_sha256sums is not None:
+        relative, content = deferred_sha256sums
+        masked_content = mask_verified_sha256sum_digests(content, tree_digests)
+        if sensitive(
+            masked_content,
+            relative,
+            budget=budget,
+            allowed_public_certificates=allowed_certificates,
+        ):
+            nested = budget.get("sensitive_path")
+            suffix = f" (inside {nested})" if isinstance(nested, str) else ""
+            print(
+                f"check-sensitive-history: sensitive tree file: {relative}{suffix}",
+                file=sys.stderr,
+            )
+            return 1
     print(f"sensitive tree gate passed: {files} files")
     return 0
 

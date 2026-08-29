@@ -1,3 +1,4 @@
+use sha2::Digest;
 use std::fs;
 use std::io::Write;
 use std::mem::size_of;
@@ -465,6 +466,62 @@ fn output_tree_normalizes_mtree_digests_without_skipping_encoded_secrets() {
     assert!(
         !tree_gate(&root, &[]).status.success(),
         "masked a digest-like private-key marker outside an MTREE attribute"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn output_tree_masks_only_sha256_digests_verified_against_tree_files() {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .to_path_buf();
+    let source = r#"
+import importlib.machinery
+import importlib.util
+import sys
+loader = importlib.machinery.SourceFileLoader("history_scanner", sys.argv[1])
+spec = importlib.util.spec_from_loader("history_scanner", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+secret = b"-----BEGIN PRIVATE KEY-----\nc2VjcmV0\n-----END PRIVATE KEY-----\n"
+secret += b"\n" * (-len(secret) % 32)
+chunks = [secret[index:index + 32].hex().encode() for index in range(0, len(secret), 32)]
+content = b"".join(
+    digest + b"  file-" + str(index).encode() + b"\n"
+    for index, digest in enumerate(chunks)
+)
+verified = {b"file-" + str(index).encode(): digest for index, digest in enumerate(chunks)}
+mismatched = dict(verified)
+mismatched[b"file-0"] = b"0" * 64
+print(
+    int(module.sensitive(content)),
+    int(module.sensitive(module.mask_verified_sha256sum_digests(content, verified))),
+    int(module.sensitive(module.mask_verified_sha256sum_digests(content, mismatched))),
+)
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "SHA256SUMS masking harness failed");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "1 0 1",
+        "only digests matching stable tree files may be masked"
+    );
+
+    let root = temporary_fixture("sha256sum-sensitive-scanning");
+    fs::write(root.join("payload"), b"safe payload\n").unwrap();
+    let digest = sha2::Sha256::digest(b"safe payload\n");
+    fs::write(root.join("SHA256SUMS"), format!("{digest:x}  payload\n")).unwrap();
+    let accepted = tree_gate(&root, &[]);
+    assert!(
+        accepted.status.success(),
+        "rejected a verified checksum manifest: {}",
+        String::from_utf8_lossy(&accepted.stderr)
     );
     fs::remove_dir_all(root).unwrap();
 }
