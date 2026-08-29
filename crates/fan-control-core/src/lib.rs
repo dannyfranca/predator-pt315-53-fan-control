@@ -26,6 +26,7 @@ mod ownership;
 mod platform;
 mod policy;
 mod preflight;
+mod promotion;
 mod qualification;
 mod requalification;
 mod restoration;
@@ -103,7 +104,8 @@ pub use evidence::{
     RpmAnchorEvidence, RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness,
     StateTransitionEvidence, StoppedProcess, TelemetrySampleEvidence, ThermalSummaryEvidence,
     WorkloadEvidence, parse_evidence_v1, parse_evidence_v2, validate_root_owned_output_destination,
-    write_evidence_atomically, write_root_owned_evidence_atomically,
+    write_evidence_atomically, write_root_owned_bytes_atomically,
+    write_root_owned_evidence_atomically,
 };
 pub use external_power::observe_external_power;
 pub use live_lifecycle::{
@@ -149,6 +151,10 @@ pub use policy::{
 pub use preflight::{
     PreflightArtifact, PreflightCheck, PreflightCheckResult, PreflightEnvironment, PreflightInputs,
     PreflightReport, PreflightRequirements, run_read_only_preflight,
+};
+pub use promotion::{
+    PromotionInputs, PromotionValidationError, sanitize_qualification_evidence_v1,
+    validate_promotion_manifest_v1,
 };
 pub use qualification::{
     QualificationAuthorizationError, QualificationRecordV2, SupervisedEnduranceAuthorizationV1,

@@ -1568,11 +1568,43 @@ pub(crate) fn write_root_owned_json_atomically<T: Serialize>(
     write_owned_json_atomically(destination, value, 0, unsafe { libc::geteuid() })
 }
 
+/// Publishes caller-provided bytes through a protected root-owned directory without clobbering.
+pub fn write_root_owned_bytes_atomically(
+    destination: &Path,
+    payload: &[u8],
+) -> Result<(), EvidenceWriteError> {
+    // SAFETY: geteuid has no preconditions and does not mutate process state.
+    write_owned_bytes_atomically(destination, payload, 0, unsafe { libc::geteuid() })
+}
+
 fn write_owned_json_atomically<T: Serialize>(
     destination: &Path,
     value: &T,
     required_owner: u32,
     effective_user: u32,
+) -> Result<(), EvidenceWriteError> {
+    let mut payload = serde_json::to_vec_pretty(value).map_err(EvidenceWriteError::Serialize)?;
+    payload.push(b'\n');
+    write_owned_bytes_atomically(destination, &payload, required_owner, effective_user)
+}
+
+fn write_owned_bytes_atomically(
+    destination: &Path,
+    payload: &[u8],
+    required_owner: u32,
+    effective_user: u32,
+) -> Result<(), EvidenceWriteError> {
+    write_owned_bytes_with_observer(destination, payload, required_owner, effective_user, |_| {
+        Ok(())
+    })
+}
+
+fn write_owned_bytes_with_observer(
+    destination: &Path,
+    payload: &[u8],
+    required_owner: u32,
+    effective_user: u32,
+    observer: impl FnMut(PublicationStage) -> io::Result<()>,
 ) -> Result<(), EvidenceWriteError> {
     validate_owned_destination(destination, required_owner, effective_user)?;
     let parent = destination
@@ -1583,10 +1615,33 @@ fn write_owned_json_atomically<T: Serialize>(
         .file_name()
         .expect("validated destination has a file name");
     let directory = open_directory(parent)?;
-    let mut payload = serde_json::to_vec_pretty(value).map_err(EvidenceWriteError::Serialize)?;
-    payload.push(b'\n');
     let file = create_unnamed_file(&directory)?;
-    publish_file(&directory, file_name, &payload, file, |_| Ok(()))
+    publish_file_recovering(&directory, file_name, payload, file, observer)
+}
+
+fn publish_file_recovering(
+    directory: &File,
+    destination_name: &OsStr,
+    payload: &[u8],
+    file: File,
+    observer: impl FnMut(PublicationStage) -> io::Result<()>,
+) -> Result<(), EvidenceWriteError> {
+    match publish_file(directory, destination_name, payload, file, observer) {
+        Err(error) if error.destination_was_published() => {
+            let original = error.to_string();
+            if unlink_file(directory, destination_name).is_err() {
+                return Err(error);
+            }
+            if directory.sync_all().is_err() {
+                return Err(error);
+            }
+            Err(io_error(
+                "complete durable artifact publication",
+                io::Error::other(original),
+            ))
+        }
+        result => result,
+    }
 }
 
 fn validate_owned_destination(
@@ -1756,6 +1811,17 @@ fn link_open_file(directory: &File, file: &File, destination_name: &OsStr) -> io
             libc::AT_SYMLINK_FOLLOW,
         )
     };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn unlink_file(directory: &File, destination_name: &OsStr) -> io::Result<()> {
+    let destination_name = c_string(destination_name)?;
+    // SAFETY: the destination name is NUL-terminated and directory remains open for the call.
+    let result = unsafe { libc::unlinkat(directory.as_raw_fd(), destination_name.as_ptr(), 0) };
     if result == -1 {
         Err(io::Error::last_os_error())
     } else {
@@ -2169,6 +2235,54 @@ mod tests {
 
         fs::remove_dir_all(directory).unwrap();
         fs::remove_dir_all(unsafe_ancestor).unwrap();
+    }
+
+    #[test]
+    fn owned_byte_publication_is_exact_private_and_no_clobber() {
+        // SAFETY: geteuid has no preconditions and does not mutate process state.
+        let owner = unsafe { libc::geteuid() };
+        let directory = trusted_temporary_directory("owned-bytes");
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let destination = directory.join("promotion.json");
+        let payload = b"{\"schema_version\":1}\n";
+
+        write_owned_bytes_atomically(&destination, payload, owner, owner).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), payload);
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(write_owned_bytes_atomically(&destination, b"replacement", owner, owner).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), payload);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn owned_byte_publication_removes_output_after_post_link_failure() {
+        // SAFETY: geteuid has no preconditions and does not mutate process state.
+        let owner = unsafe { libc::geteuid() };
+        let directory = trusted_temporary_directory("owned-bytes-visible");
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let destination = directory.join("promotion.json");
+        let payload = b"published\n";
+
+        let result =
+            write_owned_bytes_with_observer(&destination, payload, owner, owner, |stage| {
+                if stage == PublicationStage::DestinationPublished {
+                    Err(io::Error::other("simulated post-publication failure"))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert!(!result.destination_was_published());
+        assert!(!destination.exists());
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     fn temporary_directory(label: &str) -> std::path::PathBuf {

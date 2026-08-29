@@ -88,6 +88,14 @@ pub fn validate_root_owned_protected_file(
     path: &Path,
     requirement: ProtectedFileRequirement,
 ) -> Result<(), PlatformError> {
+    validate_owned_protected_file(path, requirement, 0)
+}
+
+fn validate_owned_protected_file(
+    path: &Path,
+    requirement: ProtectedFileRequirement,
+    required_owner: u32,
+) -> Result<(), PlatformError> {
     if !path.is_absolute() {
         return Err(PlatformError::new(
             PlatformErrorKind::PermissionDenied,
@@ -101,7 +109,7 @@ pub fn validate_root_owned_protected_file(
             io_platform_error(&format!("cannot inspect {}", current.display()), error)
         })?;
         if metadata.file_type().is_symlink()
-            || metadata.uid() != 0
+            || (metadata.uid() != 0 && metadata.uid() != required_owner)
             || metadata.permissions().mode() & 0o022 != 0
         {
             return Err(PlatformError::new(
@@ -116,6 +124,8 @@ pub fn validate_root_owned_protected_file(
     let metadata = fs::metadata(path)
         .map_err(|error| io_platform_error(&format!("cannot inspect {}", path.display()), error))?;
     if !metadata.is_file()
+        || metadata.uid() != required_owner
+        || metadata.nlink() != 1
         || (requirement == ProtectedFileRequirement::Executable
             && metadata.permissions().mode() & 0o111 == 0)
     {
@@ -606,7 +616,10 @@ impl RootOwnedQualificationRecordAccess for SystemOwnershipPlatform {
                 error,
             )
         })?;
-        if !metadata.is_file() || metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.uid() != 0
+            || metadata.permissions().mode() & 0o022 != 0
         {
             return Err(PlatformError::new(
                 PlatformErrorKind::PermissionDenied,
@@ -1864,6 +1877,50 @@ mod tests {
 
     const CHILD_LOCK_PATH: &str = "FAN_CONTROL_TEST_LOCK_PATH";
     const CHILD_EXPECTATION: &str = "FAN_CONTROL_TEST_LOCK_EXPECTATION";
+
+    #[test]
+    fn protected_file_validation_rejects_symlinks_hardlinks_and_special_files() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+        // SAFETY: geteuid has no preconditions and does not mutate process state.
+        let owner = unsafe { libc::geteuid() };
+        let directory = env::current_dir().unwrap().join("target").join(format!(
+            "fan-control-protected-input-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let regular = directory.join("regular");
+        fs::write(&regular, "evidence").unwrap();
+        fs::set_permissions(&regular, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            validate_owned_protected_file(&regular, ProtectedFileRequirement::Regular, owner)
+                .is_ok()
+        );
+
+        let symlink = directory.join("symlink");
+        std::os::unix::fs::symlink(&regular, &symlink).unwrap();
+        assert!(
+            validate_owned_protected_file(&symlink, ProtectedFileRequirement::Regular, owner)
+                .is_err()
+        );
+        let hardlink = directory.join("hardlink");
+        fs::hard_link(&regular, &hardlink).unwrap();
+        assert!(
+            validate_owned_protected_file(&regular, ProtectedFileRequirement::Regular, owner)
+                .is_err()
+        );
+
+        let fifo = directory.join("fifo");
+        let fifo_name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo_name is a valid NUL-terminated path and mode has no invalid bits.
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+        assert!(
+            validate_owned_protected_file(&fifo, ProtectedFileRequirement::Regular, owner).is_err()
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn system_recovery_completion_restores_both_fans() {

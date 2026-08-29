@@ -921,6 +921,54 @@ sudo /usr/bin/pt31553-fan-restore --restore
 The candidate entry must show `selected`; a stock entry must still show
 `default`. Only the separate qualification procedure may proceed from here.
 
+### Sanitize qualification evidence and check promotion
+
+Promotion is a manual, local operation after supervised endurance succeeds. Complete the
+package-set verification and controller `pacman-key --verify` steps above first. Promotion binds
+the hashes and signer identities of those already authenticated artifacts; it does not replace
+their cryptographic verification.
+
+Every input must be one root-owned, non-group/world-writable regular file with no hard links.
+Every output parent and ancestor must likewise be protected and root-owned. First create a
+whitelisted summary. It retains only the exact public hardware, kernel, module, policy, and
+qualification identities plus the final outcome; raw samples, commands, readbacks, timestamps,
+faults, workload details, paths, and process identities are never copied:
+
+```sh
+sudo /usr/bin/pt31553-fan-qualify redact-evidence \
+  --qualification-record /var/lib/pt31553-fan-control/qualification.json \
+  --evidence /var/lib/pt31553-fan-control/evidence/supervised-endurance.json \
+  --authorized-evidence-path \
+    /var/lib/pt31553-fan-control/evidence/supervised-endurance.json \
+  --output /absolute/new/path/sanitized-qualification-evidence.json
+```
+
+Create a candidate manifest matching
+[`schemas/promotion-manifest.json`](schemas/promotion-manifest.json), then check every bound
+artifact and publish the immutable claim to a new path:
+
+```sh
+sudo /usr/bin/pt31553-fan-qualify check-promotion \
+  --manifest /absolute/path/to/candidate-promotion.json \
+  --qualification-record /var/lib/pt31553-fan-control/qualification.json \
+  --evidence /var/lib/pt31553-fan-control/evidence/supervised-endurance.json \
+  --authorized-evidence-path \
+    /var/lib/pt31553-fan-control/evidence/supervised-endurance.json \
+  --sanitized-evidence /absolute/path/to/sanitized-qualification-evidence.json \
+  --protected-policy /absolute/path/to/qualified-root-owned-protected-policy.toml \
+  --package-provenance /absolute/path/to/package-provenance-v1.json \
+  --controller-package /absolute/path/to/pt31553-fan-control.pkg.tar.zst \
+  --controller-signature /absolute/path/to/pt31553-fan-control.pkg.tar.zst.sig \
+  --package-manifest-signature /absolute/path/to/package-set-manifest.p7s \
+  --output /absolute/new/path/to/promotion.json
+```
+
+The check reruns strict qualification/evidence validation and requires exact controller,
+policy, kernel image/module, package-set, signature-hash, signer, and sanitized-evidence
+identities. It rejects symlinks, hard links, special files, mismatches, incomplete/no-go evidence,
+unknown manifest claims, and existing output paths. CI success, a tag, a release, or public source
+never substitutes for these files. On rejection it creates no promotion output.
+
 ### Retain the last qualified candidate
 
 Complete this archive immediately after qualification and before entering the
