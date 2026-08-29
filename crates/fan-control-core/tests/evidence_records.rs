@@ -216,7 +216,7 @@ fn published_json_schema_rejects_nested_incomplete_or_unsafe_records() {
 
     let mut empty_vermagic = fixture.clone();
     empty_vermagic["qualification_envelope"]["compatibility"]["module"]["vermagic"] =
-        "7.1.8-1-cachyos-pt31553 ".into();
+        "7.1.8-cachyos-pt31553 ".into();
     candidates.push(empty_vermagic);
 
     let mut unsupported_kernel = fixture.clone();
@@ -262,7 +262,7 @@ fn endpoint_order_is_not_part_of_the_qualification_identity() {
 #[test]
 fn schema_contract_requires_semantic_release_binding_validation() {
     let mismatch = FIXTURE.replacen(
-        "\"release\": \"7.1.8-1-cachyos-pt31553\"",
+        "\"release\": \"7.1.8-cachyos-pt31553\"",
         "\"release\": \"7.2.0-cachyos-pt31553\"",
         1,
     );
@@ -285,10 +285,7 @@ fn schema_contract_requires_semantic_release_binding_validation() {
 
 #[test]
 fn schema_and_parser_accept_the_same_supported_release_syntax() {
-    let candidate = FIXTURE.replace(
-        "7.1.8-1-cachyos-pt31553",
-        "7.1+qualification-cachyos-pt31553",
-    );
+    let candidate = FIXTURE.replace("7.1.8-cachyos-pt31553", "7.1+qualification-cachyos-pt31553");
     let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA).unwrap();
     let candidate_json: serde_json::Value = serde_json::from_str(&candidate).unwrap();
 
@@ -299,7 +296,7 @@ fn schema_and_parser_accept_the_same_supported_release_syntax() {
     );
     assert!(parse_evidence_v1(&candidate).is_ok());
 
-    let overflow = FIXTURE.replace("7.1.8-1-cachyos-pt31553", "4294967296.1-cachyos-pt31553");
+    let overflow = FIXTURE.replace("7.1.8-cachyos-pt31553", "4294967296.1-cachyos-pt31553");
     let overflow_json: serde_json::Value = serde_json::from_str(&overflow).unwrap();
     assert!(
         jsonschema::validator_for(&schema)
@@ -308,7 +305,7 @@ fn schema_and_parser_accept_the_same_supported_release_syntax() {
     );
     assert!(parse_evidence_v1(&overflow).is_ok());
 
-    let nonnumeric_major = FIXTURE.replace("7.1.8-1-cachyos-pt31553", "7a.1-cachyos-pt31553");
+    let nonnumeric_major = FIXTURE.replace("7.1.8-cachyos-pt31553", "7a.1-cachyos-pt31553");
     let nonnumeric_major_json: serde_json::Value = serde_json::from_str(&nonnumeric_major).unwrap();
     assert!(
         !jsonschema::validator_for(&schema)
@@ -317,10 +314,7 @@ fn schema_and_parser_accept_the_same_supported_release_syntax() {
     );
     assert!(parse_evidence_v1(&nonnumeric_major).is_err());
 
-    let invalid = FIXTURE.replace(
-        "7.1.8-1-cachyos-pt31553",
-        "6.19qualification-cachyos-pt31553",
-    );
+    let invalid = FIXTURE.replace("7.1.8-cachyos-pt31553", "6.19qualification-cachyos-pt31553");
     let invalid_json: serde_json::Value = serde_json::from_str(&invalid).unwrap();
     assert!(
         !jsonschema::validator_for(&schema)
@@ -329,7 +323,7 @@ fn schema_and_parser_accept_the_same_supported_release_syntax() {
     );
     assert!(parse_evidence_v1(&invalid).is_err());
 
-    let leading_zero = FIXTURE.replace("7.1.8-1-cachyos-pt31553", "6.019-cachyos-pt31553");
+    let leading_zero = FIXTURE.replace("7.1.8-cachyos-pt31553", "6.019-cachyos-pt31553");
     let leading_zero_json: serde_json::Value = serde_json::from_str(&leading_zero).unwrap();
     assert!(
         !jsonschema::validator_for(&schema)
@@ -338,7 +332,7 @@ fn schema_and_parser_accept_the_same_supported_release_syntax() {
     );
     assert!(parse_evidence_v1(&leading_zero).is_err());
 
-    let leading_zero = FIXTURE.replace("7.1.8-1-cachyos-pt31553", "7.01-cachyos-pt31553");
+    let leading_zero = FIXTURE.replace("7.1.8-cachyos-pt31553", "7.01-cachyos-pt31553");
     let leading_zero_json: serde_json::Value = serde_json::from_str(&leading_zero).unwrap();
     assert!(
         !jsonschema::validator_for(&schema)
@@ -515,8 +509,8 @@ fn passing_records_require_observations_and_confirmed_safe_restoration() {
     );
 
     let trailing_space_vermagic = FIXTURE.replacen(
-        "7.1.8-1-cachyos-pt31553 SMP preempt mod_unload",
-        "7.1.8-1-cachyos-pt31553 ",
+        "7.1.8-cachyos-pt31553 SMP preempt mod_unload",
+        "7.1.8-cachyos-pt31553 ",
         1,
     );
     assert!(parse_evidence_v1(&trailing_space_vermagic).is_err());

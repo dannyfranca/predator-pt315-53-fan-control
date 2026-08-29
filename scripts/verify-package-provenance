@@ -1,0 +1,2984 @@
+#!/usr/bin/python3 -I
+"""Fail-closed, offline verification of the PT315-53 package set."""
+
+from __future__ import annotations
+
+import argparse
+import bz2
+import base64
+import binascii
+import collections
+import hashlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+import lzma
+import mmap
+import os
+import pathlib
+import re
+import secrets
+import selectors
+import shutil
+import stat
+import struct
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import tomllib
+import urllib.parse
+import zipfile
+import zlib
+
+MODULE_SIGNATURE_MAGIC = b"~Module signature appended~\n"
+HEX_64 = re.compile(r"[0-9a-f]{64}")
+HEX_40 = re.compile(r"[0-9a-f]{40}")
+HEX_32 = re.compile(r"[0-9a-f]{32}")
+MTREE_TIME = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
+SAFE_MEMBER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+/-]*")
+MODULE_SUFFIXES = (".ko", ".ko.gz", ".ko.xz", ".ko.zst")
+MAX_ARCHIVE_MEMBERS = 65_536
+MAX_ARCHIVE_LISTING_BYTES = 16 * 1024 * 1024
+MAX_MTREE_RECORD_OVERHEAD = 512
+MAX_MTREE_EXPANDED_BYTES = (
+    MAX_ARCHIVE_LISTING_BYTES + MAX_ARCHIVE_MEMBERS * MAX_MTREE_RECORD_OVERHEAD
+)
+MAX_SENSITIVE_BLOB = 512 * 1024 * 1024
+MAX_EMBEDDED_CANDIDATES = 4096
+MAX_BASE64_CANDIDATES = 16_384
+MAX_OPENSSL_PROBES = 256
+MAX_EMBEDDED_ZSTD_PROCESSES = 64
+MAX_TOP_LEVEL_COMPRESSIONS = 128
+MAX_TOTAL_PATH_BASE64_CANDIDATE_BYTES = 64 * 1024 * 1024
+MAX_PATH_BASE64_TOKEN_CACHE_BYTES = 8 * 1024 * 1024
+MAX_ELF_PROGRAM_HEADERS = 128
+MAX_ELF_SECTION_HEADERS = 8192
+MAX_ELF_SECTION_NAME = 255
+MAX_ELF_SYMBOLS = 262_144
+MAX_BTF_TYPES = 1_048_576
+MAX_KERNEL_PAYLOAD_RESIDENCY = 768 * 1024 * 1024
+PRIVATE_MARKERS = (
+    b"BEGIN PRIVATE KEY",
+    b"BEGIN ENCRYPTED PRIVATE KEY",
+    b"BEGIN RSA PRIVATE KEY",
+    b"BEGIN EC PRIVATE KEY",
+    b"BEGIN DSA PRIVATE KEY",
+    b"BEGIN OPENSSH PRIVATE KEY",
+    b"BEGIN PGP PRIVATE KEY BLOCK",
+)
+UNSAFE_PACKAGE_PATH_PARTS = (
+    "etc/ssl/certs/",
+    "etc/pki/",
+    "etc/ca-certificates/",
+    "usr/local/share/ca-certificates/",
+    "usr/share/ca-certificates/",
+    "usr/share/pki/",
+    "usr/lib/ssl/certs/",
+    ".p11-kit/",
+)
+UNSAFE_PRIVATE_SUFFIXES = (".key", ".p12", ".pfx", ".pkcs12", ".ppk")
+RETAINED_TOP_LEVEL = {
+    "SHA256SUMS",
+    "PKGBUILD",
+    "build-attestation.toml",
+    "build-environment.toml",
+    "build.log",
+    "package-set.SRCINFO",
+    "packages",
+    "source-lock.toml",
+}
+TOOLS = {
+    name: pathlib.Path("/usr/bin") / name
+    for name in (
+        "bsdtar",
+        "gzip",
+        "modinfo",
+        "openssl",
+        "python3",
+        "sbverify",
+        "xz",
+        "zstd",
+    )
+}
+REQUIRE_ROOT_OWNED_TOOLS = True
+SUBPROCESS_ENV = {
+    "LANG": "C",
+    "LC_ALL": "C",
+    "OPENSSL_CONF": "/dev/null",
+    "PATH": "/usr/bin",
+}
+
+
+class VerificationError(Exception):
+    pass
+
+
+def fail(message: str) -> None:
+    raise VerificationError(message)
+
+
+_SENSITIVE_SCANNER = None
+
+
+def sensitive_scanner():
+    global _SENSITIVE_SCANNER
+    if _SENSITIVE_SCANNER is not None:
+        return _SENSITIVE_SCANNER
+    path = pathlib.Path(__file__).parent / "check-sensitive-history"
+    try:
+        metadata = path.lstat()
+    except OSError:
+        fail("canonical sensitive-content scanner is unavailable")
+    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        fail("canonical sensitive-content scanner is unsafe")
+    loader = importlib.machinery.SourceFileLoader(
+        "fan_control_sensitive_content_scanner", str(path)
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        fail("canonical sensitive-content scanner cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        loader.exec_module(module)
+    except (ImportError, OSError, SyntaxError):
+        fail("canonical sensitive-content scanner cannot be loaded")
+    _SENSITIVE_SCANNER = module
+    return module
+
+
+def regular_file(path: pathlib.Path, label: str) -> pathlib.Path:
+    try:
+        stat = path.lstat()
+    except FileNotFoundError:
+        fail(f"missing {label}")
+    if path.is_symlink() or not path.is_file() or stat.st_nlink != 1:
+        fail(f"{label} must be one non-symlink regular file")
+    return path
+
+
+def read_limited(path: pathlib.Path, label: str, limit: int = 4 * 1024 * 1024) -> bytes:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        fail(f"missing or unsafe {label}")
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_size > limit
+        ):
+            fail(f"{label} must be one bounded regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            content = source.read(limit + 1)
+        if len(content) > limit:
+            fail(f"{label} is too large")
+        return content
+    finally:
+        os.close(descriptor)
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def snapshot_file(
+    path: pathlib.Path,
+    destination: pathlib.Path,
+    label: str,
+    limit: int = 4 * 1024 * 1024 * 1024,
+) -> pathlib.Path:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        fail(f"missing or unsafe {label}")
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_size > limit
+        ):
+            fail(f"{label} must be one bounded regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as source, destination.open("xb") as output:
+            copied = 0
+            while chunk := source.read(1024 * 1024):
+                copied += len(chunk)
+                if copied > limit:
+                    fail(f"{label} is too large")
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+    finally:
+        os.close(descriptor)
+    return destination
+
+
+def run(command: list[str], label: str) -> subprocess.CompletedProcess[bytes]:
+    command = resolved_command(command)
+    try:
+        return subprocess.run(
+            command,
+            env=SUBPROCESS_ENV,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            timeout=120,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        fail(f"{label} failed")
+
+
+def stream_limited(
+    command: list[str],
+    label: str,
+    limit: int,
+    destination=None,
+    forbidden_markers: tuple[bytes, ...] = (),
+) -> bytes:
+    command = resolved_command(command)
+    try:
+        process = subprocess.Popen(
+            command,
+            env=SUBPROCESS_ENV,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        fail(f"{label} failed")
+    assert process.stdout is not None
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + 120
+    captured = bytearray()
+    total = 0
+    marker_tail = b""
+    marker_overlap = max((len(marker) for marker in forbidden_markers), default=1) - 1
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                fail(f"{label} failed")
+            chunk = os.read(process.stdout.fileno(), 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                fail(f"{label} is too large")
+            marker_window = marker_tail + chunk
+            if any(marker in marker_window for marker in forbidden_markers):
+                fail(f"{label} contains private-key material")
+            marker_tail = marker_window[-marker_overlap:] if marker_overlap else b""
+            if destination is None:
+                captured.extend(chunk)
+            else:
+                destination.write(chunk)
+        if process.wait(timeout=max(0.001, deadline - time.monotonic())) != 0:
+            fail(f"{label} failed")
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+    return bytes(captured)
+
+
+def parse_toml(path: pathlib.Path, label: str) -> dict:
+    return parse_toml_bytes(read_limited(path, label), label)
+
+
+def parse_toml_bytes(content: bytes, label: str) -> dict:
+    try:
+        value = tomllib.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        fail(f"invalid {label}")
+    if not isinstance(value, dict):
+        fail(f"invalid {label}")
+    return value
+
+
+def exact_keys(value: dict, expected: set[str], label: str) -> None:
+    if set(value) != expected:
+        fail(f"{label} fields do not match the policy schema")
+
+
+def parse_policy(path: pathlib.Path) -> dict:
+    policy = parse_toml(path, "provenance policy")
+    exact_keys(
+        policy,
+        {
+            "format",
+            "candidate",
+            "architecture",
+            "kernel_release",
+            "module_vermagic",
+            "kernel_source_commit",
+            "nvidia_source_version",
+            "package_signer_sha256",
+            "module_signer_sha256",
+            "kernel_image_signer_sha256",
+            "kernel_image_path",
+            "kernel_config_path",
+            "module_trust_certificate_path",
+            "acer_module_path",
+            "nvidia_module_paths",
+            "packages",
+        },
+        "provenance policy",
+    )
+    if policy["format"] != 1:
+        fail("unsupported provenance policy format")
+    for field in (
+        "candidate",
+        "architecture",
+        "kernel_release",
+        "module_vermagic",
+        "nvidia_source_version",
+    ):
+        if not isinstance(policy[field], str) or not policy[field]:
+            fail(f"invalid policy {field}")
+    if not isinstance(policy["kernel_source_commit"], str) or not HEX_40.fullmatch(policy["kernel_source_commit"]):
+        fail("invalid policy kernel_source_commit")
+    for field in (
+        "package_signer_sha256",
+        "module_signer_sha256",
+        "kernel_image_signer_sha256",
+    ):
+        if not isinstance(policy[field], str) or not HEX_64.fullmatch(policy[field]):
+            fail(f"invalid policy {field}")
+    paths = [
+        policy["kernel_image_path"],
+        policy["kernel_config_path"],
+        policy["module_trust_certificate_path"],
+        policy["acer_module_path"],
+    ]
+    nvidia_paths = policy["nvidia_module_paths"]
+    if not isinstance(nvidia_paths, list) or not nvidia_paths:
+        fail("policy must list NVIDIA modules")
+    paths.extend(nvidia_paths)
+    if len(paths) != len(set(paths)) or any(not safe_member(item) for item in paths):
+        fail("invalid or duplicate policy artifact path")
+    packages = policy["packages"]
+    if not isinstance(packages, list) or len(packages) != 3:
+        fail("policy must define exactly three packages")
+    roles = {}
+    names = set()
+    for package in packages:
+        if not isinstance(package, dict):
+            fail("invalid package policy")
+        exact_keys(package, {"name", "version", "role"}, "package policy")
+        if any(not isinstance(package[key], str) or not package[key] for key in package):
+            fail("invalid package policy value")
+        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", package[key]) for key in package):
+            fail("unsafe package policy value")
+        if package["name"] in names or package["role"] in roles:
+            fail("duplicate package policy identity")
+        names.add(package["name"])
+        roles[package["role"]] = package
+    if set(roles) != {"kernel", "headers", "nvidia-open"}:
+        fail("package roles must be kernel, headers, and nvidia-open")
+    policy["packages_by_role"] = roles
+    return policy
+
+
+def validate_schema_policy(path: pathlib.Path, policy: dict) -> None:
+    try:
+        schema = json.loads(read_limited(path, "package provenance schema"))
+        definitions = schema["$defs"]
+        properties = schema["properties"]
+        package_definitions = [
+            definitions["kernel_package"],
+            definitions["headers_package"],
+            definitions["nvidia_package"],
+        ]
+        schema_packages = [
+            (
+                item["allOf"][1]["properties"]["name"]["const"],
+                definitions["package"]["properties"]["version"]["const"],
+            )
+            for item in package_definitions
+        ]
+        nvidia_definitions = [
+            definitions["nvidia_module"],
+            definitions["nvidia_drm_module"],
+            definitions["nvidia_modeset_module"],
+            definitions["nvidia_peermem_module"],
+            definitions["nvidia_uvm_module"],
+        ]
+        actual = {
+            "format": properties["schema_version"]["const"],
+            "candidate": properties["candidate"]["const"],
+            "architecture": definitions["package"]["properties"]["architecture"]["const"],
+            "kernel_release": properties["kernel"]["properties"]["release"]["const"],
+            "module_vermagic": definitions["module"]["properties"]["vermagic"]["const"],
+            "kernel_source_commit": properties["build"]["properties"]["source_commit"]["const"],
+            "nvidia_source_version": definitions["nvidia_module_template"]["allOf"][1]["properties"]["source"]["const"]["revision"],
+            "package_signer_sha256": properties["build"]["properties"]["package_manifest_signer_fingerprint"]["const"],
+            "module_signer_sha256": definitions["module"]["properties"]["signer_fingerprint"]["const"],
+            "module_trust_signer_sha256": properties["kernel"]["properties"]["module_trust_certificate_fingerprint"]["const"],
+            "kernel_image_signer_sha256": properties["kernel"]["properties"]["image_signer_fingerprint"]["const"],
+            "kernel_image_path": properties["kernel"]["properties"]["image_path"]["const"].removeprefix("/"),
+            "kernel_config_path": properties["kernel"]["properties"]["config_path"]["const"].removeprefix("/"),
+            "module_trust_certificate_path": properties["kernel"]["properties"]["module_trust_certificate_path"]["const"].removeprefix("/"),
+            "acer_module_path": definitions["acer_module"]["allOf"][1]["properties"]["path"]["const"].removeprefix("/"),
+            "nvidia_module_paths": [
+                item["properties"]["path"]["const"].removeprefix("/")
+                for item in nvidia_definitions
+            ],
+            "packages": schema_packages,
+        }
+    except (KeyError, TypeError, json.JSONDecodeError):
+        fail("package provenance schema cannot be bound to policy")
+    expected = {
+        "format": policy["format"],
+        "candidate": policy["candidate"],
+        "architecture": policy["architecture"],
+        "kernel_release": policy["kernel_release"],
+        "module_vermagic": policy["module_vermagic"],
+        "kernel_source_commit": policy["kernel_source_commit"],
+        "nvidia_source_version": policy["nvidia_source_version"],
+        "package_signer_sha256": policy["package_signer_sha256"],
+        "module_signer_sha256": policy["module_signer_sha256"],
+        "module_trust_signer_sha256": policy["module_signer_sha256"],
+        "kernel_image_signer_sha256": policy["kernel_image_signer_sha256"],
+        "kernel_image_path": policy["kernel_image_path"],
+        "kernel_config_path": policy["kernel_config_path"],
+        "module_trust_certificate_path": policy["module_trust_certificate_path"],
+        "acer_module_path": policy["acer_module_path"],
+        "nvidia_module_paths": policy["nvidia_module_paths"],
+        "packages": [(item["name"], item["version"]) for item in policy["packages"]],
+    }
+    if actual != expected:
+        fail("package provenance schema identity does not match policy")
+
+
+def validate_compatibility_policy(compatibility: dict, policy: dict) -> None:
+    try:
+        kernel = compatibility["kernel"]
+        module = compatibility["module"]
+        actual = {
+            "kernel_release": kernel["release"],
+            "kernel_package": kernel["package"],
+            "kernel_source_commit": kernel["source_commit"],
+            "kernel_image_signer_sha256": kernel["image_signer_fingerprint"],
+            "module_name": module["name"],
+            "module_path": module["path"].removeprefix("/"),
+            "module_signer_sha256": module["signer_fingerprint"],
+            "module_vermagic": module["vermagic"],
+        }
+    except (KeyError, TypeError, AttributeError):
+        fail("compatibility declaration cannot be bound to provenance policy")
+    expected = {
+        "kernel_release": policy["kernel_release"],
+        "kernel_package": policy["packages_by_role"]["kernel"]["name"],
+        "kernel_source_commit": policy["kernel_source_commit"],
+        "kernel_image_signer_sha256": policy["kernel_image_signer_sha256"],
+        "module_name": "acer_wmi",
+        "module_path": policy["acer_module_path"],
+        "module_signer_sha256": policy["module_signer_sha256"],
+        "module_vermagic": policy["module_vermagic"],
+    }
+    if actual != expected:
+        fail("compatibility declaration identity does not match provenance policy")
+
+
+def safe_member(member: object) -> bool:
+    if not isinstance(member, str):
+        return False
+    normalized = member[:-1] if member.endswith("/") else member
+    if (
+        normalized not in {".BUILDINFO", ".MTREE", ".PKGINFO"}
+        and not SAFE_MEMBER.fullmatch(normalized)
+    ):
+        return False
+    path = pathlib.PurePosixPath(normalized)
+    parts = normalized.split("/")
+    return not path.is_absolute() and all(part not in {"", ".", ".."} for part in parts)
+
+
+def require_tools() -> None:
+    for tool, path in TOOLS.items():
+        try:
+            metadata = path.stat()
+        except OSError:
+            fail(f"required offline tool is unavailable: {tool}")
+        if (
+            not path.is_absolute()
+            or not stat.S_ISREG(metadata.st_mode)
+            or not os.access(path, os.X_OK)
+            or (
+                REQUIRE_ROOT_OWNED_TOOLS
+                and (metadata.st_uid != 0 or metadata.st_mode & 0o022)
+            )
+        ):
+            fail(f"required offline tool is unavailable: {tool}")
+
+
+def resolved_command(command: list[str]) -> list[str]:
+    if not command or command[0] not in TOOLS:
+        fail("attempted to execute an unpinned verification tool")
+    return [str(TOOLS[command[0]]), *command[1:]]
+
+
+def validate_artifact_tree(root: pathlib.Path) -> None:
+    if root.is_symlink() or not root.is_dir():
+        fail("artifacts must be a non-symlink directory")
+    entries = {entry.name for entry in root.iterdir()}
+    packages = {name for name in entries if name.endswith(".pkg.tar.zst")}
+    if len(packages) != 3 or entries - packages != RETAINED_TOP_LEVEL:
+        fail("artifact directory is not the exact retained package-set output")
+    for entry in root.iterdir():
+        if entry.name == "packages":
+            if entry.is_symlink() or not entry.is_dir():
+                fail("retained package metadata must be a directory")
+        else:
+            regular_file(entry, f"artifact {entry.name}")
+
+
+def metadata_values(content: bytes, label: str) -> dict[str, list[str]]:
+    try:
+        lines = content.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        fail(f"invalid {label}")
+    values: dict[str, list[str]] = collections.defaultdict(list)
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        if " = " not in line:
+            fail(f"invalid {label}")
+        key, value = line.split(" = ", 1)
+        if not key or not value:
+            fail(f"invalid {label}")
+        values[key].append(value)
+    return dict(values)
+
+
+def require_single_metadata_value(
+    values: dict[str, list[str]], key: str, label: str
+) -> str:
+    found = values.get(key, [])
+    if len(found) != 1:
+        fail(f"{label} must contain one {key}")
+    return found[0]
+
+
+def mtree_path(value: str) -> str:
+    if value == ".":
+        return ""
+    decoded = bytearray()
+    offset = 0
+    while offset < len(value):
+        character = value[offset]
+        if character == "\\":
+            escape = value[offset + 1 : offset + 4]
+            if len(escape) != 3 or any(digit not in "01234567" for digit in escape):
+                fail(".MTREE contains an invalid path escape")
+            decoded.append(int(escape, 8))
+            offset += 4
+            continue
+        codepoint = ord(character)
+        if codepoint < 0x21 or codepoint > 0x7E:
+            fail(".MTREE contains an invalid path")
+        decoded.append(codepoint)
+        offset += 1
+    try:
+        path = decoded.decode("utf-8")
+    except UnicodeDecodeError:
+        fail(".MTREE contains an invalid UTF-8 path")
+    if not path.startswith("./") or not safe_member(path[2:]):
+        fail(".MTREE contains a non-canonical package path")
+    return path[2:]
+
+
+def mtree_attributes(words: list[str], label: str) -> dict[str, str]:
+    attributes = {}
+    for word in words:
+        if "=" not in word:
+            fail(f"{label} contains an invalid attribute")
+        key, value = word.split("=", 1)
+        if not key or not value or key in attributes:
+            fail(f"{label} contains an invalid or duplicate attribute")
+        attributes[key] = value
+    return attributes
+
+
+def mtree_integer(value: str, label: str, base: int = 10) -> int:
+    digits = "01234567" if base == 8 else "0123456789"
+    if (
+        not value
+        or len(value) > 20
+        or any(character not in digits for character in value)
+    ):
+        fail(f".MTREE contains an invalid {label}")
+    return int(value, base)
+
+
+def mtree_time(value: str, label: str) -> tuple[int, str]:
+    if not MTREE_TIME.fullmatch(value):
+        fail(f".MTREE contains an invalid time for {label}")
+    parts = value.split(".", 1)
+    fraction = parts[1] if len(parts) == 2 else ""
+    if len(parts[0]) > 20 or len(fraction) > 9:
+        fail(f".MTREE contains an invalid time for {label}")
+    return int(parts[0]), fraction
+
+
+def validate_mtree(content: bytes, archive_facts: dict[str, dict[str, object]]) -> None:
+    expanded = decompress_first_stream(content, "gzip", MAX_MTREE_EXPANDED_BYTES)
+    if expanded is None or expanded[1] != len(content):
+        fail(".MTREE must be one exact bounded gzip stream")
+    try:
+        lines = expanded[0].decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        fail(".MTREE is not UTF-8")
+    if not lines or lines[0] != "#mtree" or len(lines) > MAX_ARCHIVE_MEMBERS + 128:
+        fail(".MTREE does not use the supported ALPM format")
+    defaults: dict[str, str] = {}
+    records: dict[str, dict[str, str]] = {}
+    supported = {
+        "type",
+        "uid",
+        "gid",
+        "mode",
+        "time",
+        "size",
+        "md5digest",
+        "md5",
+        "sha256digest",
+        "sha256",
+    }
+    root_attributes = None
+    for line in lines[1:]:
+        if not line or line.startswith("#"):
+            continue
+        words = line.split()
+        if not words:
+            continue
+        if words[0] == "/set":
+            changed = mtree_attributes(words[1:], ".MTREE /set")
+            if not changed or not set(changed).issubset(supported):
+                fail(".MTREE /set contains unsupported attributes")
+            defaults.update(changed)
+            continue
+        if words[0] == "/unset":
+            if len(words) < 2 or any("=" in key for key in words[1:]):
+                fail(".MTREE /unset is invalid")
+            if words[1:] == ["all"]:
+                defaults.clear()
+            else:
+                if any(key not in supported for key in words[1:]):
+                    fail(".MTREE /unset contains unsupported attributes")
+                for key in words[1:]:
+                    defaults.pop(key, None)
+            continue
+        if words[0].startswith("/"):
+            fail(".MTREE contains an unsupported command")
+        path = mtree_path(words[0])
+        if path in records:
+            fail(".MTREE contains duplicate package paths")
+        attributes = defaults | mtree_attributes(words[1:], f".MTREE entry {path}")
+        if not set(attributes).issubset(supported):
+            fail(f".MTREE entry {path} contains unsupported attributes")
+        if "sha256" in attributes:
+            if "sha256digest" in attributes:
+                fail(f".MTREE entry {path} contains duplicate SHA-256 attributes")
+            attributes["sha256digest"] = attributes.pop("sha256")
+        if "md5" in attributes:
+            if "md5digest" in attributes:
+                fail(f".MTREE entry {path} contains duplicate MD5 attributes")
+            attributes["md5digest"] = attributes.pop("md5")
+        if not path:
+            if root_attributes is not None:
+                fail(".MTREE contains duplicate package-root records")
+            root_attributes = attributes
+            continue
+        records[path] = attributes
+    if root_attributes is not None:
+        if set(root_attributes) != {"type", "uid", "gid", "mode", "time"}:
+            fail(".MTREE package-root record is invalid")
+        if root_attributes["type"] != "dir":
+            fail(".MTREE package-root record is not a directory")
+        mtree_integer(root_attributes["uid"], "root uid")
+        mtree_integer(root_attributes["gid"], "root gid")
+        mtree_integer(root_attributes["mode"], "root mode", 8)
+        mtree_time(root_attributes["time"], "the package root")
+    expected_paths = set(archive_facts) - {".MTREE"}
+    if set(records) != expected_paths:
+        fail(".MTREE inventory does not exactly match package members")
+    for path, attributes in records.items():
+        fact = archive_facts[path]
+        required = {"type", "uid", "gid", "mode", "time"}
+        if fact["type"] == "file":
+            required |= {"size", "sha256digest"}
+        allowed_attribute_sets = {frozenset(required)}
+        if fact["type"] == "file":
+            allowed_attribute_sets.add(frozenset(required | {"md5digest"}))
+        if frozenset(attributes) not in allowed_attribute_sets:
+            fail(f".MTREE entry {path} does not contain the exact required metadata")
+        if attributes["type"] != fact["type"]:
+            fail(f".MTREE type does not match package member {path}")
+        if mtree_integer(attributes["uid"], "uid") != fact["uid"]:
+            fail(f".MTREE uid does not match package member {path}")
+        if mtree_integer(attributes["gid"], "gid") != fact["gid"]:
+            fail(f".MTREE gid does not match package member {path}")
+        if mtree_integer(attributes["mode"], "mode", 8) != fact["mode"]:
+            fail(f".MTREE mode does not match package member {path}")
+        seconds, fraction = mtree_time(attributes["time"], f"package member {path}")
+        if any(digit != "0" for digit in fraction) or seconds != fact["mtime"]:
+            fail(f".MTREE time does not match package member {path}")
+        if fact["type"] == "file":
+            if mtree_integer(attributes["size"], "size") != fact["size"]:
+                fail(f".MTREE size does not match package member {path}")
+            if not HEX_64.fullmatch(attributes["sha256digest"]):
+                fail(f".MTREE contains an invalid SHA-256 for package member {path}")
+            if attributes["sha256digest"] != fact["sha256digest"]:
+                fail(f".MTREE SHA-256 does not match package member {path}")
+            if "md5digest" in attributes:
+                if not HEX_32.fullmatch(attributes["md5digest"]):
+                    fail(f".MTREE contains an invalid MD5 for package member {path}")
+                if attributes["md5digest"] != fact["md5digest"]:
+                    fail(f".MTREE MD5 does not match package member {path}")
+
+
+def list_archive(package: pathlib.Path) -> list[str]:
+    output = stream_limited(
+        ["bsdtar", "-tf", str(package)], "package member listing", MAX_ARCHIVE_LISTING_BYTES
+    )
+    try:
+        members = output.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        fail("package member listing is not UTF-8")
+    if len(members) > MAX_ARCHIVE_MEMBERS:
+        fail("package contains too many members")
+    canonical_members = [member.removesuffix("/") for member in members]
+    if (
+        not members
+        or len(canonical_members) != len(set(canonical_members))
+        or any(not safe_member(x) for x in members)
+    ):
+        fail("package contains invalid or duplicate member paths")
+    for member in members:
+        lowered = member.lower()
+        if lowered.endswith(UNSAFE_PRIVATE_SUFFIXES) or any(
+            part in lowered for part in UNSAFE_PACKAGE_PATH_PARTS
+        ):
+            fail("package contains private-key or machine-trust-store material")
+    return members
+
+
+def zstd_container(content: bytes) -> bool:
+    return sensitive_scanner().zstd_container(content)
+
+
+def zstd_frame_end(content: bytes, offset: int, block_budget: list[int]) -> int | None:
+    return sensitive_scanner().zstd_frame_end(content, offset, block_budget)
+
+
+def complete_zstd_envelope(content: bytes) -> bool:
+    return sensitive_scanner().complete_zstd_envelope(content)
+
+
+def require_complete_zstd_file(path: pathlib.Path, label: str) -> None:
+    try:
+        with path.open("rb") as source, mmap.mmap(
+            source.fileno(), 0, access=mmap.ACCESS_READ
+        ) as content:
+            if not complete_zstd_envelope(content):
+                fail(f"{label} contains an unsupported Zstandard envelope")
+    except (OSError, ValueError):
+        fail(f"{label} Zstandard envelope cannot be inspected")
+
+
+def tar_container(content: bytes) -> bool:
+    if len(content) < 512:
+        return False
+    header = content[:512]
+    if not any(header):
+        return len(content) >= 1024 and not any(content[512:1024])
+    encoded = header[148:156].strip(b" \x00")
+    if not encoded or any(byte not in b"01234567" for byte in encoded):
+        return False
+    expected = int(encoded, 8)
+    unsigned = sum(header[:148]) + 8 * 32 + sum(header[156:])
+    signed = (
+        sum(byte if byte < 128 else byte - 256 for byte in header[:148])
+        + 8 * 32
+        + sum(byte if byte < 128 else byte - 256 for byte in header[156:])
+    )
+    return expected in (unsigned, signed)
+
+
+def decompress_first_stream(
+    content: bytes | memoryview,
+    kind: str,
+    max_output_size: int = MAX_SENSITIVE_BLOB,
+) -> tuple[bytes, int] | None:
+    if kind == "gzip":
+        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    elif kind == "xz":
+        decoder = lzma.LZMADecompressor()
+    else:
+        decoder = bz2.BZ2Decompressor()
+    expanded = bytearray()
+    chunk = content
+    try:
+        while True:
+            allowance = max_output_size + 1 - len(expanded)
+            if allowance <= 0:
+                raise OverflowError
+            expanded.extend(decoder.decompress(chunk, allowance))
+            if len(expanded) > max_output_size:
+                raise OverflowError
+            if decoder.eof:
+                consumed = len(content) - len(decoder.unused_data)
+                return bytes(expanded), consumed
+            tail = getattr(decoder, "unconsumed_tail", b"")
+            if tail:
+                chunk = tail
+            elif getattr(decoder, "needs_input", True):
+                return None
+            else:
+                chunk = b""
+    except (EOFError, OSError, ValueError, lzma.LZMAError, zlib.error):
+        return None
+
+
+def inspection_budget(blob_limit: int = MAX_SENSITIVE_BLOB) -> dict[str, object]:
+    return {
+        "work": 8 * blob_limit,
+        "candidates": MAX_EMBEDDED_CANDIDATES,
+        "base64_candidates": MAX_BASE64_CANDIDATES,
+        "openssl_probes": MAX_OPENSSL_PROBES,
+        "expanded": blob_limit,
+        "zstd_blocks": [0],
+        "zstd_processes": MAX_EMBEDDED_ZSTD_PROCESSES,
+        "path_candidate_bytes": MAX_TOTAL_PATH_BASE64_CANDIDATE_BYTES,
+        "path_token_cache_bytes": MAX_PATH_BASE64_TOKEN_CACHE_BYTES,
+        "path_tokens": set(),
+        "top_level_compressions": MAX_TOP_LEVEL_COMPRESSIONS,
+    }
+
+
+def spend_budget(
+    budget: dict[str, object], field: str, amount: int, label: str
+) -> None:
+    remaining = budget[field]
+    assert isinstance(remaining, int)
+    remaining -= amount
+    budget[field] = remaining
+    if remaining < 0:
+        fail(f"{label} exceeds the bounded {field} inspection budget")
+
+
+def embedded_compressed_children(
+    content: bytes,
+    label: str,
+    work: pathlib.Path,
+    budget: dict[str, object],
+    skip_outer_compression: bool = False,
+    max_expanded_size: int = MAX_SENSITIVE_BLOB,
+    residency_budget: list[int] | None = None,
+    ignored_ranges: tuple[tuple[int, int], ...] = (),
+) -> list[tuple[str, bytes]]:
+    magics = (
+        ("gzip", b"\x1f\x8b"),
+        ("xz", b"\xfd7zXZ\x00"),
+        ("bzip2", b"BZh"),
+        ("zstd", b"\x28\xb5\x2f\xfd"),
+    )
+    children = []
+    spend_budget(budget, "work", len(content) * len(magics), label)
+    for kind, magic in magics:
+        offset = content.find(magic, 1 if skip_outer_compression else 0)
+        while offset >= 0:
+            if any(
+                start <= offset and offset + len(magic) <= end
+                for start, end in ignored_ranges
+            ):
+                offset = content.find(magic, offset + 1)
+                continue
+            spend_budget(budget, "candidates", 1, label)
+            stream_limit = max_expanded_size
+            if residency_budget is not None:
+                stream_limit = min(stream_limit, residency_budget[0] // 2)
+            if kind == "zstd":
+                block_budget = budget["zstd_blocks"]
+                assert isinstance(block_budget, list)
+                try:
+                    end = zstd_frame_end(content, offset, block_budget)
+                except OverflowError:
+                    fail(f"{label} contains too many embedded Zstandard blocks")
+                if end is None:
+                    fail(f"{label} contains an invalid embedded Zstandard stream")
+                else:
+                    spend_budget(budget, "work", end - offset, label)
+                    spend_budget(budget, "zstd_processes", 1, label)
+                    token = secrets.token_hex(12)
+                    compressed = work / f"embedded-{token}.zst"
+                    destination = work / f"embedded-{token}.expanded"
+                    compressed.write_bytes(content[offset:end])
+                    try:
+                        with destination.open("xb") as output:
+                            stream_limited(
+                                ["zstd", "-q", "-d", "-c", str(compressed)],
+                                f"decompressing embedded Zstandard stream in {label}",
+                                stream_limit,
+                                output,
+                            )
+                        expanded = read_limited(
+                            destination,
+                            f"embedded Zstandard stream in {label}",
+                            stream_limit,
+                        )
+                    finally:
+                        compressed.unlink(missing_ok=True)
+                        destination.unlink(missing_ok=True)
+            else:
+                suffix_size = len(content) - offset
+                spend_budget(budget, "work", suffix_size, label)
+                try:
+                    result = decompress_first_stream(
+                        memoryview(content)[offset:], kind,
+                        max_output_size=stream_limit,
+                    )
+                except OverflowError:
+                    fail(f"{label} contains an oversized embedded compression stream")
+                if result is None:
+                    fail(f"{label} contains an invalid embedded {kind} stream")
+                expanded = result[0]
+            if residency_budget is not None:
+                required_residency = 2 * len(expanded)
+                if required_residency > residency_budget[0]:
+                    fail(f"{label} exceeds the nested payload memory budget")
+                residency_budget[0] -= required_residency
+            spend_budget(budget, "expanded", len(expanded), label)
+            children.append((f"{label} embedded {kind} stream at {offset}", expanded))
+            offset = content.find(magic, offset + 1)
+    return children
+
+
+def reject_sensitive_blob(
+    content: bytes,
+    label: str,
+    work: pathlib.Path,
+    allowed_public_certificates: frozenset[bytes] = frozenset(),
+    depth: int = 0,
+    budget: dict[str, object] | None = None,
+    skip_outer_compression: bool = False,
+    validated_tar_header: bool = False,
+) -> None:
+    del work
+    scanner = sensitive_scanner()
+    scanner_budget = scanner.inspection_budget() if budget is None else budget
+    try:
+        rejected = scanner.sensitive(
+            content,
+            label,
+            depth,
+            scanner_budget,
+            allowed_public_certificates,
+            certificate_location_eligible=True,
+            direct_package_archive=bool(allowed_public_certificates),
+            validated_tar_header=validated_tar_header,
+            skip_outer_compression=skip_outer_compression,
+        )
+    except (OSError, SystemExit, ValueError):
+        fail(f"{label} could not be inspected by the canonical sensitive-content scanner")
+    if rejected:
+        fail(f"{label} contains forbidden sensitive material")
+
+
+def scan_archive_members(
+    unpacked_archive: pathlib.Path,
+    members: list[str],
+    work: pathlib.Path,
+    package_index: int,
+    allowed_certificates_by_member: dict[str, frozenset[bytes]],
+    retained_members: set[str],
+    budget: dict[str, object],
+) -> tuple[dict[str, pathlib.Path], dict[str, dict[str, object]]]:
+    retained = {}
+    archive_facts = {}
+    expected_names = [member.removesuffix("/") for member in members]
+    raw_entry_count = validate_tar_envelope(unpacked_archive, work, budget)
+    try:
+        archive = tarfile.open(unpacked_archive, mode="r:")
+    except (OSError, tarfile.TarError):
+        fail("package archive cannot be parsed after decompression")
+    with archive:
+        entries = archive.getmembers()
+        if len(entries) != raw_entry_count:
+            fail("package archive contains hidden TAR records")
+        if archive.pax_headers:
+            fail("package archive contains unsupported global PAX metadata")
+        actual_names = [entry.name.removesuffix("/") for entry in entries]
+        if len(actual_names) != len(set(actual_names)):
+            fail("package archive contains duplicate member paths")
+        if actual_names != expected_names:
+            fail("package member listing changed during one-pass inspection")
+        wanted_members = retained_members.intersection(actual_names) | {
+            name for name in actual_names if name.endswith(MODULE_SUFFIXES)
+        }
+        for member_index, entry in enumerate(entries):
+            member = entry.name.removesuffix("/")
+            if entry.pax_headers:
+                fail(f"package member {member} contains unsupported PAX metadata")
+            if entry.isdir():
+                archive_facts[member] = {
+                    "type": "dir",
+                    "uid": entry.uid,
+                    "gid": entry.gid,
+                    "mode": entry.mode,
+                    "mtime": int(entry.mtime),
+                }
+                continue
+            if entry.issym() or entry.islnk():
+                fail(f"package member {member} must not be a link")
+            if not entry.isfile() or entry.size > 512 * 1024 * 1024:
+                fail(f"package member {member} is not a bounded regular file")
+            source = archive.extractfile(entry)
+            if source is None:
+                fail(f"package member {member} cannot be read")
+            content = source.read(512 * 1024 * 1024 + 1)
+            if len(content) > 512 * 1024 * 1024:
+                fail(f"package member {member} is too large")
+            archive_facts[member] = {
+                "type": "file",
+                "uid": entry.uid,
+                "gid": entry.gid,
+                "mode": entry.mode,
+                "mtime": int(entry.mtime),
+                "size": len(content),
+                "md5digest": hashlib.md5(content, usedforsecurity=False).hexdigest(),
+                "sha256digest": hashlib.sha256(content).hexdigest(),
+            }
+            if member in wanted_members:
+                retained_path = work / f"retained-{package_index}-{member_index}"
+                retained_path.write_bytes(content)
+                retained[member] = retained_path
+            allowed_certificates = allowed_certificates_by_member.get(
+                member, frozenset()
+            )
+            compressed_mtree = member == ".MTREE" and content.startswith(b"\x1f\x8b")
+            compressed_member = (
+                member.endswith((".zst", ".xz", ".gz", ".bz2"))
+                or content.startswith(b"BZh")
+                or zstd_container(content)
+                or compressed_mtree
+            )
+            if not compressed_member:
+                reject_nested_archive(content, member)
+            reject_sensitive_blob(
+                content,
+                f"package member {member}",
+                work,
+                allowed_certificates,
+                budget=budget,
+                skip_outer_compression=compressed_member,
+            )
+            if compressed_member:
+                spend_budget(
+                    budget, "top_level_compressions", 1, f"package member {member}"
+                )
+                extracted = work / f"scan-{package_index}-{member_index}.compressed"
+                extracted.write_bytes(content)
+                decompressed = work / f"scan-{package_index}-{member_index}.decompressed"
+                decompress_member(extracted, member, decompressed, budget)
+                try:
+                    decompressed_content = read_limited(
+                        decompressed,
+                        f"decompressed package member {member}",
+                        512 * 1024 * 1024,
+                    )
+                    reject_nested_archive(decompressed_content, member)
+                    decompressed_member = member
+                    for suffix in (".zst", ".xz", ".gz", ".bz2"):
+                        if decompressed_member.endswith(suffix):
+                            decompressed_member = decompressed_member[: -len(suffix)]
+                            break
+                    reject_sensitive_blob(
+                        decompressed_content,
+                        f"decompressed package member {decompressed_member}",
+                        work,
+                        allowed_certificates,
+                        budget=budget,
+                    )
+                finally:
+                    decompressed.unlink(missing_ok=True)
+                    extracted.unlink(missing_ok=True)
+    if set(retained) != wanted_members:
+        fail("package is missing a retained provenance member")
+    return retained, archive_facts
+
+
+def validate_tar_envelope(
+    archive: pathlib.Path, work: pathlib.Path, budget: dict[str, object]
+) -> int:
+    entry_count = 0
+    try:
+        with archive.open("rb") as source:
+            while True:
+                header = source.read(512)
+                if len(header) != 512:
+                    fail("package archive has a truncated TAR header")
+                if not any(header):
+                    terminator = source.read(512)
+                    if len(terminator) != 512 or any(terminator):
+                        fail("package archive has an invalid TAR terminator")
+                    trailing_size = 1024
+                    while chunk := source.read(1024 * 1024):
+                        trailing_size += len(chunk)
+                        if any(chunk):
+                            fail("package archive contains nonzero data after its final member")
+                    if trailing_size % 512:
+                        fail("package archive has an invalid TAR terminator")
+                    return entry_count
+                try:
+                    entry = tarfile.TarInfo.frombuf(header, "utf-8", "surrogateescape")
+                except (tarfile.TarError, UnicodeError, ValueError):
+                    fail("package archive contains an invalid raw TAR header")
+                if entry.type not in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE):
+                    fail("package archive contains an unsupported TAR extension record")
+                if entry.size > 512 * 1024 * 1024 or (entry.isdir() and entry.size != 0):
+                    fail("package archive contains an invalid raw TAR member")
+                reject_sensitive_blob(
+                    header,
+                    "package TAR header",
+                    work,
+                    budget=budget,
+                    validated_tar_header=True,
+                )
+                source.seek(entry.size, os.SEEK_CUR)
+                padding_size = (-entry.size) % 512
+                padding = source.read(padding_size)
+                if len(padding) != padding_size or any(padding):
+                    fail("package archive contains nonzero TAR member padding")
+                entry_count += 1
+                if entry_count > MAX_ARCHIVE_MEMBERS:
+                    fail("package contains too many raw TAR members")
+    except OSError:
+        fail("package archive envelope cannot be inspected")
+
+
+def reject_nested_archive(content: bytes, member: str) -> None:
+    lower = member.lower()
+    archive_suffixes = (
+        ".zip", ".tar", ".tgz", ".txz", ".tbz2", ".tzst", ".tar.gz", ".tar.xz",
+        ".tar.bz2", ".tar.zst"
+    )
+    compressed_magic = (
+        content.startswith(b"\x1f\x8b"),
+        content.startswith(b"\xfd7zXZ\x00"),
+        content.startswith(b"BZh"),
+        zstd_container(content),
+    )
+    is_zip = zipfile.is_zipfile(io.BytesIO(content))
+    is_tar = tar_container(content)
+    if lower.endswith(archive_suffixes) or is_zip or is_tar or any(compressed_magic):
+        fail(f"package member {member} contains an unsupported nested archive")
+
+
+def reject_retained_evidence(
+    content: bytes, relative: str, work: pathlib.Path
+) -> None:
+    label = f"retained evidence {relative}"
+    reject_sensitive_blob(content, label, work)
+    if relative.endswith("/.MTREE") and content.startswith(b"\x1f\x8b"):
+        token = secrets.token_hex(12)
+        compressed = work / f"retained-mtree-{token}.gz"
+        expanded = work / f"retained-mtree-{token}.expanded"
+        compressed.write_bytes(content)
+        with expanded.open("xb") as destination:
+            stream_limited(
+                ["gzip", "-d", "-c", str(compressed)],
+                f"decompressing {relative}",
+                512 * 1024 * 1024,
+                destination,
+            )
+        expanded_content = read_limited(expanded, f"decompressed {label}", 512 * 1024 * 1024)
+        reject_sensitive_blob(expanded_content, f"decompressed {label}", work)
+        reject_nested_archive(expanded_content, f"decompressed {relative}")
+        compressed.unlink()
+        expanded.unlink()
+        return
+    reject_nested_archive(content, relative)
+
+
+def parse_sums(path: pathlib.Path) -> dict[str, str]:
+    try:
+        lines = read_limited(path, "SHA256SUMS").decode("ascii").splitlines()
+    except UnicodeDecodeError:
+        fail("invalid SHA256SUMS")
+    result = {}
+    for line in lines:
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        if not match or not safe_member(match.group(2)) or match.group(2) in result:
+            fail("invalid or duplicate SHA256SUMS entry")
+        result[match.group(2)] = match.group(1)
+    if not result:
+        fail("SHA256SUMS is empty")
+    return result
+
+
+def expected_manifest_paths(policy: dict) -> set[str]:
+    paths = {
+        "PKGBUILD",
+        "build-attestation.toml",
+        "build-environment.toml",
+        "build.log",
+        "package-set.SRCINFO",
+        "source-lock.toml",
+    }
+    for package in policy["packages"]:
+        name = package["name"]
+        paths.add(f"{name}-{package['version']}-{policy['architecture']}.pkg.tar.zst")
+        for metadata in (".BUILDINFO", ".MTREE", ".PKGINFO"):
+            paths.add(f"packages/{name}/{metadata}")
+    return paths
+
+
+def verify_retained_evidence(
+    root: pathlib.Path, policy: dict, sums: dict[str, str], work: pathlib.Path
+) -> dict[str, bytes]:
+    expected = expected_manifest_paths(policy)
+    if set(sums) != expected:
+        fail("signed manifest is not the exact retained evidence set")
+    retained: dict[str, bytes] = {}
+    for relative in sorted(expected):
+        if relative.endswith(".pkg.tar.zst"):
+            continue
+        limit = 64 * 1024 * 1024 if relative == "build.log" else 4 * 1024 * 1024
+        content = read_limited(root / relative, f"retained evidence {relative}", limit)
+        if hashlib.sha256(content).hexdigest() != sums[relative]:
+            fail(f"signed retained evidence hash mismatch for {relative}")
+        reject_retained_evidence(content, relative, work)
+        retained[relative] = content
+    return retained
+
+
+def package_records(
+    root: pathlib.Path,
+    policy: dict,
+    work: pathlib.Path,
+    sums: dict[str, str],
+    retained_evidence: dict[str, bytes],
+    module_certificate_der: bytes,
+    kernel_certificate_der: bytes,
+) -> tuple[dict, list[dict]]:
+    expected = {item["name"]: item for item in policy["packages"]}
+    retained_root = root / "packages"
+    if {entry.name for entry in retained_root.iterdir()} != set(expected):
+        fail("retained package metadata set does not match policy")
+    by_role = {}
+    records = []
+    common_build = None
+    archives = sorted(root.glob("*.pkg.tar.zst"))
+    retained_members = {
+        ".BUILDINFO",
+        ".MTREE",
+        ".PKGINFO",
+        policy["kernel_image_path"],
+        policy["kernel_config_path"],
+        policy["module_trust_certificate_path"],
+        policy["acer_module_path"],
+        *policy["nvidia_module_paths"],
+    }
+    retained_members.add(
+        str(pathlib.PurePosixPath(policy["kernel_config_path"]).with_name("System.map"))
+    )
+    for index, artifact_archive in enumerate(archives):
+        archive = snapshot_file(
+            artifact_archive,
+            work / f"package-{index}.pkg.tar.zst",
+            "package archive",
+        )
+        archive_hash = sha256_file(archive)
+        if sums.get(artifact_archive.name) != archive_hash:
+            fail("package checksum mismatch before archive inspection")
+        require_complete_zstd_file(archive, "package archive")
+        members = list_archive(archive)
+        unpacked_archive = work / f"package-{index}.tar"
+        with unpacked_archive.open("xb") as destination:
+            stream_limited(
+                ["zstd", "-q", "-d", "-c", str(archive)],
+                "decompressing package archive",
+                2 * 1024 * 1024 * 1024,
+                destination,
+            )
+        package_budget = inspection_budget(2 * 1024 * 1024 * 1024)
+        module_certificates = frozenset({module_certificate_der})
+        allowed_certificates_by_member = {
+            member: module_certificates
+            for member in members
+            if member.endswith(MODULE_SUFFIXES)
+        }
+        allowed_certificates_by_member[policy["module_trust_certificate_path"]] = (
+            module_certificates
+        )
+        allowed_certificates_by_member[policy["kernel_image_path"]] = frozenset(
+            {module_certificate_der, kernel_certificate_der}
+        )
+        member_files, archive_facts = scan_archive_members(
+            unpacked_archive,
+            members,
+            work,
+            index,
+            allowed_certificates_by_member,
+            retained_members,
+            package_budget,
+        )
+        unpacked_archive.unlink()
+        for required in (".BUILDINFO", ".MTREE", ".PKGINFO"):
+            if required not in members:
+                fail(f"package is missing {required}")
+        extracted = {
+            metadata_name: read_limited(
+                member_files[metadata_name], metadata_name, 4 * 1024 * 1024
+            )
+            for metadata_name in (".BUILDINFO", ".MTREE", ".PKGINFO")
+        }
+        validate_mtree(extracted[".MTREE"], archive_facts)
+        pkginfo = metadata_values(extracted[".PKGINFO"], ".PKGINFO")
+        buildinfo = metadata_values(extracted[".BUILDINFO"], ".BUILDINFO")
+        buildinfo_fields = {
+            "format",
+            "pkgname",
+            "pkgbase",
+            "pkgver",
+            "pkgarch",
+            "pkgbuild_sha256sum",
+            "builddate",
+            "builddir",
+            "packager",
+            "buildenv",
+            "options",
+            "installed",
+        }
+        if set(buildinfo) != buildinfo_fields:
+            fail(".BUILDINFO field set does not match the supported provenance contract")
+        name = require_single_metadata_value(pkginfo, "pkgname", ".PKGINFO")
+        if name not in expected:
+            fail("package name is outside policy")
+        spec = expected[name]
+        expected_archive_name = (
+            f"{name}-{spec['version']}-{policy['architecture']}.pkg.tar.zst"
+        )
+        if artifact_archive.name != expected_archive_name:
+            fail(f"package archive filename mismatch for {name}")
+        if require_single_metadata_value(pkginfo, "pkgver", ".PKGINFO") != spec["version"]:
+            fail(f"package version mismatch for {name}")
+        if require_single_metadata_value(pkginfo, "arch", ".PKGINFO") != policy["architecture"]:
+            fail(f"package architecture mismatch for {name}")
+        expected_pkgbase = policy["packages_by_role"]["kernel"]["name"]
+        if require_single_metadata_value(pkginfo, "pkgbase", ".PKGINFO") != expected_pkgbase:
+            fail(f"package base mismatch for {name}")
+        if spec["role"] == "nvidia-open":
+            expected_relationships = {
+                "depend": [
+                    f"{expected_pkgbase}={policy['packages_by_role']['kernel']['version']}",
+                    f"nvidia-utils={policy['nvidia_source_version']}",
+                    "libglvnd",
+                ],
+                "provides": ["NVIDIA-MODULE"],
+                "conflict": [f"{expected_pkgbase}-nvidia"],
+                "optdepend": [],
+                "makedepend": [],
+                "checkdepend": [],
+                "replaces": [],
+            }
+            if any(
+                pkginfo.get(field, []) != values
+                for field, values in expected_relationships.items()
+            ):
+                fail("NVIDIA package relationships do not exactly match policy")
+        if require_single_metadata_value(buildinfo, "pkgname", ".BUILDINFO") != name:
+            fail(f".BUILDINFO package identity mismatch for {name}")
+        if require_single_metadata_value(buildinfo, "pkgver", ".BUILDINFO") != spec["version"]:
+            fail(f".BUILDINFO package version mismatch for {name}")
+        if require_single_metadata_value(buildinfo, "pkgarch", ".BUILDINFO") != policy["architecture"]:
+            fail(f".BUILDINFO package architecture mismatch for {name}")
+        if require_single_metadata_value(buildinfo, "pkgbase", ".BUILDINFO") != expected_pkgbase:
+            fail(f".BUILDINFO package base mismatch for {name}")
+        retained = retained_root / name
+        if retained.is_symlink() or not retained.is_dir():
+            fail(f"invalid retained metadata directory for {name}")
+        if {entry.name for entry in retained.iterdir()} != {".BUILDINFO", ".MTREE", ".PKGINFO"}:
+            fail(f"retained metadata files mismatch for {name}")
+        for metadata_name, content in extracted.items():
+            relative = f"packages/{name}/{metadata_name}"
+            if retained_evidence[relative] != content:
+                fail(f"retained {metadata_name} does not match package {name}")
+        scalar_build_fields = (
+            "format",
+            "pkgbase",
+            "pkgver",
+            "pkgarch",
+            "pkgbuild_sha256sum",
+            "builddate",
+            "builddir",
+            "packager",
+        )
+        repeated_build_fields = ("buildenv", "options", "installed")
+        for key in scalar_build_fields:
+            require_single_metadata_value(buildinfo, key, ".BUILDINFO")
+        for key in repeated_build_fields:
+            if not buildinfo.get(key):
+                fail(f".BUILDINFO must contain {key}")
+        common = {
+            key: tuple(buildinfo[key])
+            for key in scalar_build_fields + repeated_build_fields
+        }
+        if common_build is None:
+            common_build = common
+        elif common != common_build:
+            fail("package .BUILDINFO provenance does not agree across the package set")
+        pkgbuild_hash = require_single_metadata_value(
+            buildinfo, "pkgbuild_sha256sum", ".BUILDINFO"
+        )
+        expected_pkgbuild_hash = hashlib.sha256(retained_evidence["PKGBUILD"]).hexdigest()
+        if not HEX_64.fullmatch(pkgbuild_hash) or pkgbuild_hash != expected_pkgbuild_hash:
+            fail(f"PKGBUILD hash mismatch for {name}")
+        record = {
+            "name": name,
+            "version": spec["version"],
+            "architecture": policy["architecture"],
+            "sha256": archive_hash,
+            "archive": archive,
+            "member_files": member_files,
+            "artifact_name": artifact_archive.name,
+            "members": members,
+            "pkgbuild_sha256": pkgbuild_hash,
+        }
+        by_role[spec["role"]] = record
+        records.append(record)
+    if {record["artifact_name"] for record in records} != {
+        path for path in sums if path.endswith(".pkg.tar.zst")
+    } or set(by_role) != {"kernel", "headers", "nvidia-open"}:
+        fail("package checksum or role set is not exact")
+    return by_role, records
+
+
+def normalized_certificate(
+    cert: pathlib.Path, work: pathlib.Path, label: str
+) -> tuple[pathlib.Path, str, bytes]:
+    content = read_limited(cert, label, 1024 * 1024)
+    if cert.suffix.lower() in UNSAFE_PRIVATE_SUFFIXES or any(
+        marker in content for marker in PRIVATE_MARKERS
+    ):
+        fail(f"{label} must be a public X.509 certificate, never a private key")
+    pem = re.fullmatch(
+        rb"\s*-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\r\n\t ]+)"
+        rb"-----END CERTIFICATE-----\s*",
+        content,
+    )
+    source = work / f"{label.replace(' ', '-')}.input"
+    source.write_bytes(content)
+    der = work / f"{label.replace(' ', '-')}.der"
+    run(
+        [
+            "openssl",
+            "x509",
+            "-inform",
+            "PEM" if pem is not None else "DER",
+            "-in",
+            str(source),
+            "-outform",
+            "DER",
+            "-out",
+            str(der),
+        ],
+        f"parsing {label}",
+    )
+    regular_file(der, f"parsed {label}")
+    der_content = der.read_bytes()
+    if pem is not None:
+        try:
+            supplied_der = base64.b64decode(re.sub(rb"\s+", b"", pem.group(1)), validate=True)
+        except (binascii.Error, ValueError):
+            fail(f"{label} is not one exact X.509 certificate")
+    else:
+        supplied_der = content
+    if supplied_der != der_content:
+        fail(f"{label} must contain exactly one X.509 certificate with no trailing data")
+    reject_sensitive_blob(
+        content, label, work, frozenset({der_content})
+    )
+    normalized = work / f"{label.replace(' ', '-')}.pem"
+    run(
+        ["openssl", "x509", "-inform", "DER", "-in", str(der), "-out", str(normalized)],
+        f"normalizing {label}",
+    )
+    regular_file(normalized, f"normalized {label}")
+    return normalized, hashlib.sha256(der_content).hexdigest(), der_content
+
+
+def canonical_sensitive_artifact_inspection(
+    script_root: pathlib.Path,
+    root: pathlib.Path,
+    module_certificate: pathlib.Path,
+    kernel_certificate: pathlib.Path,
+) -> None:
+    command = resolved_command(
+        [
+            "python3",
+            "-I",
+            str(script_root / "scripts/check-sensitive-history"),
+            "--tree",
+            str(root),
+            "--allow-public-certificate",
+            str(module_certificate),
+            "--allow-public-certificate",
+            str(kernel_certificate),
+        ]
+    )
+    try:
+        result = subprocess.run(
+            command,
+            env=SUBPROCESS_ENV,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=120,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        fail("canonical sensitive-artifact inspection failed")
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        fail(
+            "canonical sensitive-artifact inspection failed"
+            + (f": {detail}" if detail else "")
+        )
+
+
+def verify_expected_fingerprint(actual: str, expected: str, label: str) -> None:
+    if not HEX_64.fullmatch(expected) or actual != expected:
+        fail(f"{label} fingerprint mismatch")
+
+
+def kernel_payload_sections(
+    image: bytes,
+    depth: int = 0,
+    byte_budget: list[int] | None = None,
+    charged: bool = False,
+) -> list[tuple[str, bytes]]:
+    if byte_budget is None:
+        byte_budget = [MAX_KERNEL_PAYLOAD_RESIDENCY]
+    if not charged:
+        if len(image) > byte_budget[0]:
+            fail("signed kernel image exceeds the nested payload memory budget")
+        byte_budget[0] -= len(image)
+    if depth > 4:
+        fail("signed kernel image has excessive nested .linux payloads")
+    if len(image) < 0x40 or image[:2] != b"MZ":
+        fail("signed kernel image is not a PE image")
+    pe_offset = struct.unpack_from("<I", image, 0x3C)[0]
+    if pe_offset > len(image) - 24 or image[pe_offset : pe_offset + 4] != b"PE\0\0":
+        fail("signed kernel image has an invalid PE header")
+    section_count = struct.unpack_from("<H", image, pe_offset + 6)[0]
+    optional_size = struct.unpack_from("<H", image, pe_offset + 20)[0]
+    if section_count == 0 or section_count > 96:
+        fail("signed kernel image has an invalid PE section count")
+    optional_offset = pe_offset + 24
+    optional_end = optional_offset + optional_size
+    if optional_end > len(image) or optional_size < 112:
+        fail("signed kernel image has a truncated PE optional header")
+    optional_magic = struct.unpack_from("<H", image, optional_offset)[0]
+    if optional_magic == 0x10B:
+        directory_count_offset = optional_offset + 92
+        directory_offset = optional_offset + 96
+    elif optional_magic == 0x20B:
+        directory_count_offset = optional_offset + 108
+        directory_offset = optional_offset + 112
+    else:
+        fail("signed kernel image has an unsupported PE optional header")
+    directory_count = struct.unpack_from("<I", image, directory_count_offset)[0]
+    certificate_range = None
+    if directory_count > 4:
+        security_entry = directory_offset + 8 * 4
+        if security_entry + 8 > optional_end:
+            fail("signed kernel image has a truncated PE security directory")
+        certificate_offset, certificate_size = struct.unpack_from(
+            "<II", image, security_entry
+        )
+        if bool(certificate_offset) != bool(certificate_size):
+            fail("signed kernel image has an invalid PE certificate table")
+        if certificate_size:
+            certificate_end = certificate_offset + certificate_size
+            if certificate_offset < optional_end or certificate_end > len(image):
+                fail("signed kernel image has an out-of-bounds PE certificate table")
+            certificate_range = (certificate_offset, certificate_end)
+    section_table = optional_end
+    if section_table > len(image) - 40 * section_count:
+        fail("signed kernel image has a truncated PE section table")
+    linux_payloads = []
+    bzimage_text_sections = []
+    ranges = []
+    for index in range(section_count):
+        offset = section_table + 40 * index
+        raw_name = image[offset : offset + 8].split(b"\0", 1)[0]
+        try:
+            name = raw_name.decode("ascii")
+        except UnicodeDecodeError:
+            fail("signed kernel image has a non-ASCII PE section name")
+        virtual_size = struct.unpack_from("<I", image, offset + 8)[0]
+        raw_size, raw_offset = struct.unpack_from("<II", image, offset + 16)
+        if raw_size == 0:
+            continue
+        end = raw_offset + raw_size
+        if raw_offset < section_table + 40 * section_count or end > len(image):
+            fail("signed kernel image has an out-of-bounds PE section")
+        if any(raw_offset < prior_end and prior_offset < end for prior_offset, prior_end in ranges):
+            fail("signed kernel image has overlapping PE sections")
+        if certificate_range is not None:
+            certificate_offset, certificate_end = certificate_range
+            if raw_offset < certificate_end and certificate_offset < end:
+                fail("signed kernel image payload overlaps the PE certificate table")
+        ranges.append((raw_offset, end))
+        if name == ".linux":
+            if virtual_size == 0 or virtual_size > raw_size:
+                fail("signed kernel image has an ambiguous kernel payload size")
+            linux_payloads.append((name, raw_offset, virtual_size))
+        elif name == ".text":
+            if virtual_size == 0 or virtual_size > raw_size:
+                fail("signed kernel image has an ambiguous .text section size")
+            bzimage_text_sections.append((raw_offset, raw_offset + virtual_size))
+    if linux_payloads:
+        if len(linux_payloads) != 1:
+            fail("signed kernel image has multiple .linux payload sections")
+        _, linux_offset, linux_size = linux_payloads[0]
+        if linux_size > byte_budget[0]:
+            fail("signed kernel image exceeds the nested payload memory budget")
+        byte_budget[0] -= linux_size
+        linux_payload = image[linux_offset : linux_offset + linux_size]
+        nested = kernel_payload_sections(
+            linux_payload, depth + 1, byte_budget, charged=True
+        )
+        return [(f".linux embedded {name}", payload) for name, payload in nested]
+    if len(bzimage_text_sections) != 1 or len(image) < 0x250:
+        fail("signed kernel image has no inspectable kernel payload section")
+    if (
+        image[0x1FE:0x200] != b"\x55\xaa"
+        or image[0x202:0x206] != b"HdrS"
+        or struct.unpack_from("<H", image, 0x206)[0] < 0x0208
+        or image[0x1F1] == 0
+        or not image[0x211] & 0x01
+    ):
+        fail("signed kernel image has an invalid x86 boot protocol header")
+    payload_offset, payload_size = struct.unpack_from("<II", image, 0x248)
+    text_start, text_end = bzimage_text_sections[0]
+    payload_start = text_start + payload_offset
+    payload_end = payload_start + payload_size
+    if (
+        payload_offset == 0
+        or payload_size == 0
+        or payload_start < text_start
+        or payload_end < payload_start
+        or payload_end > text_end
+    ):
+        fail("signed kernel image has invalid x86 boot payload bounds")
+    if payload_size > byte_budget[0]:
+        fail("signed kernel image exceeds the nested payload memory budget")
+    byte_budget[0] -= payload_size
+    return [(".text boot payload", image[payload_start:payload_end])]
+
+
+def builtin_trust_certificate_count(
+    payload: bytes, certificate: bytes, symbols: dict[str, int]
+) -> int:
+    if len(payload) < 64 or payload[:7] != b"\x7fELF\x02\x01\x01":
+        fail("signed kernel payload is not an inspectable 64-bit ELF image")
+    if (
+        struct.unpack_from("<H", payload, 16)[0] not in (2, 3)
+        or struct.unpack_from("<H", payload, 18)[0] != 62
+        or struct.unpack_from("<I", payload, 20)[0] != 1
+        or struct.unpack_from("<H", payload, 52)[0] != 64
+    ):
+        fail("signed kernel payload has an invalid ELF identity")
+    section_offset = struct.unpack_from("<Q", payload, 40)[0]
+    program_offset = struct.unpack_from("<Q", payload, 32)[0]
+    program_entry_size, program_count = struct.unpack_from("<HH", payload, 54)
+    section_entry_size, section_count, section_names_index = struct.unpack_from(
+        "<HHH", payload, 58
+    )
+    if (
+        program_count == 0
+        or program_count > MAX_ELF_PROGRAM_HEADERS
+        or program_entry_size != 56
+        or program_offset + program_entry_size * program_count > len(payload)
+        or section_count == 0
+        or section_count > MAX_ELF_SECTION_HEADERS
+        or section_entry_size != 64
+        or section_names_index >= section_count
+        or section_offset + section_entry_size * section_count > len(payload)
+    ):
+        fail("signed kernel payload has invalid ELF table bounds")
+
+    def section(index: int) -> dict[str, int]:
+        offset = section_offset + index * section_entry_size
+        name, kind = struct.unpack_from("<II", payload, offset)
+        flags, address = struct.unpack_from("<QQ", payload, offset + 8)
+        file_offset, size = struct.unpack_from("<QQ", payload, offset + 24)
+        link, info = struct.unpack_from("<II", payload, offset + 40)
+        alignment, entry_size = struct.unpack_from("<QQ", payload, offset + 48)
+        if kind != 8 and (file_offset > len(payload) or size > len(payload) - file_offset):
+            fail("signed kernel payload has an out-of-bounds ELF section")
+        return {
+            "name_offset": name,
+            "kind": kind,
+            "flags": flags,
+            "address": address,
+            "file_offset": file_offset,
+            "size": size,
+            "link": link,
+            "info": info,
+            "alignment": alignment,
+            "entry_size": entry_size,
+        }
+
+    names_section = section(section_names_index)
+    if names_section["kind"] != 3:
+        fail("signed kernel payload has an invalid ELF section-name table")
+    names = payload[
+        names_section["file_offset"] : names_section["file_offset"]
+        + names_section["size"]
+    ]
+
+    sections = []
+    file_ranges = []
+    for index in range(section_count):
+        item = section(index)
+        name_offset = item["name_offset"]
+        if name_offset >= len(names):
+            fail("signed kernel payload has an invalid ELF section name")
+        name_end = names.find(
+            b"\0", name_offset, min(len(names), name_offset + MAX_ELF_SECTION_NAME + 1)
+        )
+        if name_end < 0:
+            fail("signed kernel payload has an oversized or unterminated ELF section name")
+        item["name"] = names[name_offset:name_end]
+        sections.append(item)
+        if item["kind"] != 8 and item["size"]:
+            file_ranges.append(
+                (
+                    item["file_offset"],
+                    item["file_offset"] + item["size"],
+                    item["name"],
+                )
+            )
+    file_ranges.sort()
+    if any(
+        current[0] < previous[1]
+        for previous, current in zip(file_ranges, file_ranges[1:], strict=False)
+    ):
+        fail("signed kernel payload has overlapping ELF sections")
+
+    load_segments = []
+    for index in range(program_count):
+        offset = program_offset + index * program_entry_size
+        kind = struct.unpack_from("<I", payload, offset)[0]
+        if kind != 1:
+            continue
+        file_offset, address, _, file_size, memory_size = struct.unpack_from(
+            "<QQQQQ", payload, offset + 8
+        )
+        if (
+            file_size > memory_size
+            or file_offset > len(payload)
+            or file_size > len(payload) - file_offset
+        ):
+            fail("signed kernel payload has an invalid load segment")
+        load_segments.append((file_offset, address, file_size, memory_size))
+    if not load_segments:
+        fail("signed kernel payload has no loadable ELF segment")
+
+    embedded_symbols: dict[str, list[tuple[int, int, int]]] = {
+        name: [] for name in symbols
+    }
+    for symbol_table in sections:
+        if symbol_table["kind"] not in (2, 11):
+            continue
+        if (
+            symbol_table["entry_size"] != 24
+            or symbol_table["size"] % 24
+            or symbol_table["link"] >= len(sections)
+        ):
+            fail("signed kernel payload has an invalid ELF symbol table")
+        symbol_count = symbol_table["size"] // 24
+        if symbol_count > MAX_ELF_SYMBOLS:
+            fail("signed kernel payload has too many ELF symbols")
+        string_table = sections[symbol_table["link"]]
+        if string_table["kind"] != 3:
+            fail("signed kernel payload has an invalid ELF symbol string table")
+        strings = payload[
+            string_table["file_offset"] : string_table["file_offset"]
+            + string_table["size"]
+        ]
+        for index in range(symbol_count):
+            offset = symbol_table["file_offset"] + index * 24
+            name_offset = struct.unpack_from("<I", payload, offset)[0]
+            section_index = struct.unpack_from("<H", payload, offset + 6)[0]
+            value, size = struct.unpack_from("<QQ", payload, offset + 8)
+            if name_offset >= len(strings):
+                fail("signed kernel payload has an invalid ELF symbol name")
+            matched_name = next(
+                (
+                    name
+                    for name in embedded_symbols
+                    if strings.startswith(name.encode("ascii") + b"\0", name_offset)
+                ),
+                None,
+            )
+            if matched_name is not None:
+                if section_index == 0 or section_index >= len(sections):
+                    fail(f"signed kernel payload has an invalid {matched_name} symbol")
+                embedded_symbols[matched_name].append((value, size, section_index))
+    authenticated_symbol_sets = []
+    if any(embedded_symbols.values()):
+        if any(
+            len(embedded_symbols[name]) != 1
+            or embedded_symbols[name][0][0] != address
+            for name, address in symbols.items()
+        ):
+            fail("signed kernel payload symbols do not match the retained System.map")
+        authenticated_symbol_sets.append("ELF symbol table")
+
+    btf_symbols: dict[str, list[tuple[int, int, int]]] = {
+        name: [] for name in symbols
+    }
+    btf_sections = [item for item in sections if item["name"] == b".BTF"]
+    if len(btf_sections) > 1:
+        fail("signed kernel payload has multiple BTF sections")
+    if btf_sections:
+        btf_section = btf_sections[0]
+        if btf_section["kind"] != 1 or btf_section["size"] < 24:
+            fail("signed kernel payload has an invalid BTF section")
+        btf = payload[
+            btf_section["file_offset"] : btf_section["file_offset"]
+            + btf_section["size"]
+        ]
+        magic, version, flags, header_size, type_offset, type_size, string_offset, string_size = (
+            struct.unpack_from("<HBBIIIII", btf)
+        )
+        if (
+            magic != 0xEB9F
+            or version != 1
+            or flags != 0
+            or header_size < 24
+            or header_size > len(btf)
+            or type_offset > len(btf) - header_size
+            or type_size > len(btf) - header_size - type_offset
+            or string_offset > len(btf) - header_size
+            or string_size > len(btf) - header_size - string_offset
+        ):
+            fail("signed kernel payload has invalid BTF table bounds")
+        type_start = header_size + type_offset
+        type_end = type_start + type_size
+        string_start = header_size + string_offset
+        string_end = string_start + string_size
+        if (
+            type_start > type_end
+            or string_start > string_end
+            or (type_start < string_end and string_start < type_end)
+        ):
+            fail("signed kernel payload has overlapping BTF tables")
+        btf_strings = btf[string_start:string_end]
+        if not btf_strings or btf_strings[0] != 0:
+            fail("signed kernel payload has an invalid BTF string table")
+
+        def btf_name(name_offset: int) -> bytes:
+            if name_offset >= len(btf_strings):
+                fail("signed kernel payload has an invalid BTF name")
+            name_end = btf_strings.find(
+                b"\0",
+                name_offset,
+                min(len(btf_strings), name_offset + MAX_ELF_SECTION_NAME + 1),
+            )
+            if name_end < 0:
+                fail("signed kernel payload has an oversized or unterminated BTF name")
+            return btf_strings[name_offset:name_end]
+
+        variable_names: dict[int, bytes] = {}
+        data_sections = []
+        btf_type_offset = type_start
+        type_id = 1
+        while btf_type_offset < type_end:
+            if type_id > MAX_BTF_TYPES or type_end - btf_type_offset < 12:
+                fail("signed kernel payload has an invalid BTF type table")
+            name_offset, info, size_or_type = struct.unpack_from(
+                "<III", btf, btf_type_offset
+            )
+            kind = (info >> 24) & 0x1F
+            value_count = info & 0xFFFF
+            name = btf_name(name_offset)
+            extra_sizes = {
+                1: 4,
+                2: 0,
+                3: 12,
+                4: 12 * value_count,
+                5: 12 * value_count,
+                6: 8 * value_count,
+                7: 0,
+                8: 0,
+                9: 0,
+                10: 0,
+                11: 0,
+                12: 0,
+                13: 8 * value_count,
+                14: 4,
+                15: 12 * value_count,
+                16: 0,
+                17: 4,
+                18: 0,
+                19: 12 * value_count,
+            }
+            if kind not in extra_sizes:
+                fail("signed kernel payload has an unsupported BTF type")
+            record_end = btf_type_offset + 12 + extra_sizes[kind]
+            if record_end > type_end:
+                fail("signed kernel payload has a truncated BTF type")
+            if kind == 14:
+                variable_names[type_id] = name
+            elif kind == 15:
+                entries = [
+                    struct.unpack_from("<III", btf, btf_type_offset + 12 + index * 12)
+                    for index in range(value_count)
+                ]
+                data_sections.append((name, size_or_type, entries))
+            btf_type_offset = record_end
+            type_id += 1
+        if btf_type_offset != type_end:
+            fail("signed kernel payload has an invalid BTF type boundary")
+
+        for data_name, data_size, entries in data_sections:
+            matching_sections = [
+                (index, item)
+                for index, item in enumerate(sections)
+                if item["name"] == data_name
+                and item["kind"] == 1
+                and item["flags"] & 0x2
+                and item["size"] == data_size
+            ]
+            if len(matching_sections) > 1:
+                fail("signed kernel payload has an ambiguous BTF data section")
+            if not matching_sections:
+                continue
+            section_index, data_section = matching_sections[0]
+            for variable_type, offset, size in entries:
+                variable_name = variable_names.get(variable_type)
+                if variable_name is None:
+                    continue
+                matched_name = next(
+                    (
+                        name
+                        for name in btf_symbols
+                        if variable_name == name.encode("ascii")
+                    ),
+                    None,
+                )
+                if matched_name is None:
+                    continue
+                if offset > data_size or size > data_size - offset:
+                    fail(f"signed kernel payload has an invalid {matched_name} BTF variable")
+                btf_symbols[matched_name].append(
+                    (data_section["address"] + offset, size, section_index)
+                )
+        if any(btf_symbols.values()):
+            if any(
+                len(btf_symbols[name]) != 1
+                or btf_symbols[name][0][0] != address
+                for name, address in symbols.items()
+            ):
+                fail("signed kernel BTF variables do not match the retained System.map")
+            authenticated_symbol_sets.append("BTF variables")
+
+    if not authenticated_symbol_sets:
+        fail("retained System.map is not authenticated by signed kernel metadata")
+
+    def mapped_symbol(name: str, width: int) -> tuple[int, int]:
+        address = symbols[name]
+        section_matches = [
+            (index, item)
+            for index, item in enumerate(sections)
+            if item["kind"] == 1
+            and item["flags"] & 0x2
+            and item["address"] <= address
+            and width <= item["size"]
+            and address - item["address"] <= item["size"] - width
+        ]
+        if len(section_matches) != 1:
+            fail(f"signed kernel payload cannot uniquely map {name}")
+        section_index, item = section_matches[0]
+        symbol_offset = item["file_offset"] + address - item["address"]
+        matches = [
+            segment
+            for segment in load_segments
+            if segment[0] <= symbol_offset
+            and width <= segment[2]
+            and symbol_offset - segment[0] <= segment[2] - width
+            and segment[1] <= address
+            and address - segment[1] <= segment[3] - width
+            and symbol_offset - segment[0] == address - segment[1]
+        ]
+        if len(matches) != 1:
+            fail(f"signed kernel payload cannot uniquely map {name}")
+        return symbol_offset, section_index
+
+    padding = b"\0" * ((-len(certificate)) % 8)
+    certificate_offset, certificate_section = mapped_symbol(
+        "system_certificate_list", len(certificate)
+    )
+    system_size_offset, system_size_section = mapped_symbol(
+        "system_certificate_list_size", 8
+    )
+    module_size_offset, module_size_section = mapped_symbol("module_cert_size", 8)
+    if (
+        certificate_section != system_size_section
+        or certificate_section != module_size_section
+        or system_size_offset != certificate_offset + len(certificate) + len(padding)
+        or module_size_offset != system_size_offset + 8
+        or payload[certificate_offset : certificate_offset + len(certificate)]
+        != certificate
+        or payload[certificate_offset + len(certificate) : system_size_offset]
+        != padding
+        or struct.unpack_from("<Q", payload, system_size_offset)[0] != len(certificate)
+        or struct.unpack_from("<Q", payload, module_size_offset)[0] != len(certificate)
+    ):
+        return 0
+    return 1
+
+
+def kernel_payload_certificate_counts(
+    image: bytes, certificate: bytes, symbols: dict[str, int], work: pathlib.Path
+) -> tuple[int, int]:
+    budget = inspection_budget()
+    residency_budget = [MAX_KERNEL_PAYLOAD_RESIDENCY]
+    pending = collections.deque(
+        (f"signed kernel image {name} section", payload)
+        for name, payload in kernel_payload_sections(
+            image, byte_budget=residency_budget
+        )
+    )
+    raw_count = 0
+    trusted_count = 0
+    while pending:
+        label, payload = pending.popleft()
+        outer = exact_compressed_kernel_payload(
+            payload, label, work, budget, residency_budget
+        )
+        if outer is not None:
+            pending.append(outer)
+            continue
+        certificate_ranges = []
+        certificate_offset = payload.find(certificate)
+        while certificate_offset >= 0:
+            certificate_ranges.append(
+                (certificate_offset, certificate_offset + len(certificate))
+            )
+            certificate_offset = payload.find(certificate, certificate_offset + 1)
+        if embedded_compressed_children(
+            payload,
+            label,
+            work,
+            budget,
+            max_expanded_size=residency_budget[0] // 2,
+            residency_budget=residency_budget,
+            ignored_ranges=tuple(certificate_ranges),
+        ):
+            fail(f"{label} contains a non-exact embedded compressed payload")
+        raw_count += payload.count(certificate)
+        trusted_count += builtin_trust_certificate_count(payload, certificate, symbols)
+    return raw_count, trusted_count
+
+
+def exact_compressed_kernel_payload(
+    payload: bytes,
+    label: str,
+    work: pathlib.Path,
+    budget: dict[str, object],
+    residency_budget: list[int],
+) -> tuple[str, bytes] | None:
+    magics = (
+        ("gzip", b"\x1f\x8b"),
+        ("xz", b"\xfd7zXZ\x00"),
+        ("bzip2", b"BZh"),
+        ("zstd", b"\x28\xb5\x2f\xfd"),
+    )
+    for kind, magic in magics:
+        if not payload.startswith(magic):
+            continue
+        spend_budget(budget, "candidates", 1, label)
+        spend_budget(budget, "work", len(payload), label)
+        output_limit = min(MAX_SENSITIVE_BLOB, residency_budget[0] // 2)
+        if output_limit == 0:
+            fail(f"{label} exceeds the kernel payload residency budget")
+        if kind == "zstd":
+            compressed_payload = payload
+            expected_expanded_size = None
+            if not complete_zstd_envelope(compressed_payload):
+                if len(payload) <= 4 or not complete_zstd_envelope(payload[:-4]):
+                    fail(f"{label} has trailing or invalid compressed payload bytes")
+                compressed_payload = payload[:-4]
+                expected_expanded_size = struct.unpack_from("<I", payload, len(payload) - 4)[0]
+                if expected_expanded_size == 0:
+                    fail(f"{label} has an invalid kernel payload size trailer")
+            spend_budget(budget, "zstd_processes", 1, label)
+            token = secrets.token_hex(12)
+            compressed = work / f"kernel-{token}.zst"
+            destination = work / f"kernel-{token}.expanded"
+            compressed.write_bytes(compressed_payload)
+            try:
+                with destination.open("xb") as output:
+                    stream_limited(
+                        ["zstd", "-q", "-d", "-c", str(compressed)],
+                        f"decompressing {label}",
+                        output_limit,
+                        output,
+                    )
+                expanded = read_limited(
+                    destination, f"decompressed {label}", output_limit
+                )
+            finally:
+                compressed.unlink(missing_ok=True)
+                destination.unlink(missing_ok=True)
+            if (
+                expected_expanded_size is not None
+                and len(expanded) != expected_expanded_size
+            ):
+                fail(f"{label} kernel payload size trailer does not match decompressed bytes")
+        else:
+            try:
+                result = decompress_first_stream(
+                    payload, kind, max_output_size=output_limit
+                )
+            except OverflowError:
+                fail(f"{label} contains an oversized compressed payload")
+            if result is None or result[1] != len(payload):
+                fail(f"{label} has trailing or invalid compressed payload bytes")
+            expanded = result[0]
+        if len(expanded) > residency_budget[0] // 2:
+            fail(f"{label} exceeds the kernel payload residency budget")
+        residency_budget[0] -= 2 * len(expanded)
+        spend_budget(budget, "expanded", len(expanded), label)
+        return f"{label} exact {kind} payload", expanded
+    return None
+
+
+def kernel_trust_symbols(content: bytes) -> dict[str, int]:
+    try:
+        text = content.decode("ascii")
+    except UnicodeDecodeError:
+        fail("packaged System.map is not ASCII")
+    required = {
+        "system_certificate_list",
+        "system_certificate_list_size",
+        "module_cert_size",
+    }
+    symbols = {}
+    for line in text.splitlines():
+        match = re.fullmatch(r"([0-9a-fA-F]{16}) [A-Za-z?] ([^\s]+)", line)
+        if not match:
+            fail("packaged System.map has invalid syntax")
+        address, name = match.groups()
+        if name in required:
+            if name in symbols:
+                fail(f"packaged System.map contains duplicate {name}")
+            symbols[name] = int(address, 16)
+    if set(symbols) != required:
+        fail("packaged System.map is missing kernel trust symbols")
+    return symbols
+
+
+def verify_kernel_module_trust(
+    headers: dict,
+    image: pathlib.Path,
+    policy: dict,
+    module_fingerprint: str,
+    module_certificate_der: bytes,
+    work: pathlib.Path,
+) -> dict[str, str]:
+    config_path = policy["kernel_config_path"]
+    certificate_path = policy["module_trust_certificate_path"]
+    system_map_path = str(pathlib.PurePosixPath(config_path).with_name("System.map"))
+    required = {config_path, certificate_path, system_map_path}
+    if not required.issubset(headers["members"]):
+        fail("headers package is missing kernel module-trust evidence")
+    config_content = read_limited(
+        headers["member_files"][config_path], "packaged kernel configuration"
+    )
+    try:
+        config_text = config_content.decode("utf-8")
+    except UnicodeDecodeError:
+        fail("packaged kernel configuration is not UTF-8")
+    settings = {}
+    for line in config_text.splitlines():
+        match = re.fullmatch(r"(CONFIG_[A-Z0-9_]+)=(.*)", line)
+        disabled = re.fullmatch(r"# (CONFIG_[A-Z0-9_]+) is not set", line)
+        if match:
+            key, value = match.groups()
+        elif disabled:
+            key, value = disabled.group(1), "n"
+        else:
+            continue
+        if key in settings:
+            fail("packaged kernel configuration contains duplicate settings")
+        settings[key] = value
+    expected = {
+        "CONFIG_64BIT": "y",
+        "CONFIG_MODULE_SIG": "y",
+        "CONFIG_MODULE_SIG_ALL": "y",
+        "CONFIG_MODULE_SIG_SHA512": "y",
+        "CONFIG_MODULE_SIG_KEY": '"certs/signing_key.pem"',
+        "CONFIG_SYSTEM_EXTRA_CERTIFICATE": "n",
+        "CONFIG_SYSTEM_TRUSTED_KEYRING": "y",
+        "CONFIG_SYSTEM_TRUSTED_KEYS": '""',
+    }
+    if any(settings.get(key) != value for key, value in expected.items()):
+        fail("packaged kernel configuration does not retain the module trust policy")
+    _, embedded_fingerprint, packaged_certificate_der = normalized_certificate(
+        headers["member_files"][certificate_path],
+        work,
+        "packaged module trust certificate",
+    )
+    verify_expected_fingerprint(
+        embedded_fingerprint, module_fingerprint, "packaged module trust certificate"
+    )
+    if packaged_certificate_der != module_certificate_der:
+        fail("packaged module trust certificate bytes do not match the module signer")
+    system_map_content = read_limited(
+        headers["member_files"][system_map_path], "packaged System.map", 64 * 1024 * 1024
+    )
+    symbols = kernel_trust_symbols(system_map_content)
+    image_content = read_limited(image, "signed kernel image", 512 * 1024 * 1024)
+    raw_count, trusted_count = kernel_payload_certificate_counts(
+        image_content, module_certificate_der, symbols, work
+    )
+    if raw_count != 1 or trusted_count != 1:
+        fail(
+            "signed kernel payload does not bind exactly one module certificate "
+            "to the built-in trust store"
+        )
+    return {
+        "config_path": "/" + config_path,
+        "config_sha256": hashlib.sha256(config_content).hexdigest(),
+        "module_trust_certificate_path": "/" + certificate_path,
+        "module_trust_certificate_fingerprint": embedded_fingerprint,
+    }
+
+
+def decompress_bzip2_exact(content: bytes, limit: int) -> bytes | None:
+    pending = content
+    expanded = bytearray()
+    streams = 0
+    while pending:
+        if not pending.startswith(b"BZh"):
+            return None
+        decoder = bz2.BZ2Decompressor()
+        chunk = pending
+        while True:
+            allowance = limit + 1 - len(expanded)
+            if allowance <= 0:
+                return None
+            expanded.extend(decoder.decompress(chunk, allowance))
+            if len(expanded) > limit:
+                return None
+            if decoder.eof:
+                pending = decoder.unused_data
+                break
+            if decoder.needs_input:
+                return None
+            chunk = b""
+        streams += 1
+        if streams > 4096:
+            return None
+    return bytes(expanded)
+
+
+def decompress_member(
+    compressed: pathlib.Path,
+    member: str,
+    output: pathlib.Path,
+    budget: dict[str, object] | None = None,
+) -> None:
+    try:
+        with compressed.open("rb") as source:
+            header = source.read(4)
+    except OSError:
+        fail(f"compressed package member {member} cannot be read")
+    limit = 512 * 1024 * 1024
+    if budget is not None:
+        expanded_remaining = budget["expanded"]
+        work_remaining = budget["work"]
+        assert isinstance(expanded_remaining, int)
+        assert isinstance(work_remaining, int)
+        limit = min(limit, expanded_remaining, work_remaining)
+        if limit <= 0:
+            fail(f"compressed package member {member} exceeds the aggregate expansion budget")
+    if header.startswith(b"BZh") or member.endswith(".bz2"):
+        try:
+            content = read_limited(
+                compressed, f"compressed package member {member}", 512 * 1024 * 1024
+            )
+            expanded = decompress_bzip2_exact(content, limit)
+            if expanded is None:
+                fail(f"decompressing {member} did not consume one exact BZip2 envelope")
+            output.write_bytes(expanded)
+        except (EOFError, OSError):
+            output.unlink(missing_ok=True)
+            fail(f"decompressing {member} failed")
+        if budget is not None:
+            spend_budget(
+                budget, "expanded", len(expanded), f"compressed package member {member}"
+            )
+            spend_budget(
+                budget, "work", len(expanded), f"compressed package member {member}"
+            )
+        return
+    if zstd_container(header) or member.endswith(".zst"):
+        command = ["zstd", "-q", "-d", "-c", str(compressed)]
+    elif member.endswith(".xz"):
+        command = ["xz", "-d", "-c", str(compressed)]
+    elif header.startswith(b"\x1f\x8b") or member.endswith(".gz"):
+        command = ["gzip", "-d", "-c", str(compressed)]
+    else:
+        shutil.copyfile(compressed, output)
+        return
+    with output.open("xb") as destination:
+        try:
+            stream_limited(
+                command, f"decompressing {member}", limit, destination
+            )
+        except BaseException:
+            output.unlink(missing_ok=True)
+            raise
+    if budget is not None:
+        size = output.stat().st_size
+        spend_budget(budget, "expanded", size, f"compressed package member {member}")
+        spend_budget(budget, "work", size, f"compressed package member {member}")
+
+
+def verify_detached_signature(
+    signature: pathlib.Path,
+    content: pathlib.Path,
+    cert: pathlib.Path,
+    label: str,
+    digest_algorithm: str = "sha256",
+) -> None:
+    read_limited(signature, f"{label} signature")
+    regular_file(content, f"{label} content")
+    cms_description = stream_limited(
+        [
+            "openssl", "cms", "-cmsout", "-print", "-inform", "DER",
+            "-in", str(signature),
+        ],
+        f"inspecting {label} signature",
+        4 * 1024 * 1024,
+    )
+    try:
+        cms_text = cms_description.decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"invalid {label} signature description")
+    digest_set = re.search(
+        r"^\s*digestAlgorithms:\s*$([\s\S]*?)^\s*encapContentInfo:\s*$",
+        cms_text,
+        re.MULTILINE,
+    )
+    signer_section = re.search(
+        r"^\s*signerInfos:\s*$([\s\S]*)", cms_text, re.MULTILINE
+    )
+    detached_content = re.search(
+        r"^\s*eContent:\s*<ABSENT>\s*$", cms_text, re.MULTILINE
+    )
+    set_algorithms = (
+        re.findall(r"^\s*algorithm:\s+([^\s(]+)", digest_set.group(1), re.MULTILINE)
+        if digest_set
+        else []
+    )
+    signer_algorithms = (
+        re.findall(
+            r"^\s*digestAlgorithm:\s*\n\s*algorithm:\s+([^\s(]+)",
+            signer_section.group(1),
+            re.MULTILINE,
+        )
+        if signer_section
+        else []
+    )
+    if not detached_content:
+        fail(f"{label} signature must be detached")
+    if set_algorithms != [digest_algorithm] or not signer_algorithms or any(
+        algorithm != digest_algorithm for algorithm in signer_algorithms
+    ):
+        fail(f"{label} signature must use {digest_algorithm.upper()} digest algorithms")
+    run(
+        [
+            "openssl", "cms", "-verify", "-binary", "-inform", "DER",
+            "-in", str(signature), "-content", str(content), "-nointern",
+            "-certfile", str(cert), "-noverify", "-out", os.devnull,
+        ],
+        f"{label} signature verification",
+    )
+
+
+def verify_module_signature(module: pathlib.Path, cert: pathlib.Path, work: pathlib.Path, index: int) -> None:
+    data = read_limited(module, "decompressed module", 512 * 1024 * 1024)
+    if not data.endswith(MODULE_SIGNATURE_MAGIC) or len(data) < len(MODULE_SIGNATURE_MAGIC) + 12:
+        fail("module signature trailer is missing")
+    trailer_at = len(data) - len(MODULE_SIGNATURE_MAGIC) - 12
+    algo, hash_algo, identifier, signer_len, key_id_len, signature_len = struct.unpack(
+        ">BBBBB3xI", data[trailer_at : trailer_at + 12]
+    )
+    if identifier != 2 or signature_len == 0 or algo > 10 or hash_algo != 6:
+        fail("module signature trailer is invalid")
+    signed_length = trailer_at - signer_len - key_id_len - signature_len
+    if signed_length <= 0:
+        fail("module signature lengths are invalid")
+    signature_at = signed_length + signer_len + key_id_len
+    reject_sensitive_blob(data[:signed_length], "signed module payload", work)
+    signed = work / f"module-{index}.signed"
+    signature = work / f"module-{index}.p7s"
+    signed.write_bytes(data[:signed_length])
+    signature.write_bytes(data[signature_at:trailer_at])
+    verify_detached_signature(signature, signed, cert, "module", "sha512")
+
+
+def read_module_field(module: pathlib.Path, field: str) -> str:
+    output = stream_limited(
+        ["modinfo", "-F", field, str(module)],
+        f"reading module {field}",
+        64 * 1024,
+    )
+    try:
+        value = output.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        fail(f"invalid module {field}")
+    if not value or "\n" in value:
+        fail(f"ambiguous module {field}")
+    return value
+
+
+def module_record(
+    package: dict,
+    member: str,
+    provenance: str,
+    expected_name: str,
+    expected_vermagic: str,
+    expected_version: str | None,
+    signer_fingerprint: str,
+    source: dict[str, str],
+    cert: pathlib.Path,
+    work: pathlib.Path,
+    index: int,
+) -> dict:
+    compressed = package["member_files"][member]
+    module = work / f"module-{index}.ko"
+    digest = sha256_file(compressed)
+    decompress_member(compressed, member, module)
+    verify_module_signature(module, cert, work, index)
+    fields = {field: read_module_field(module, field) for field in ("name", "vermagic")}
+    if fields["name"] != expected_name:
+        fail(f"module name mismatch for {member}")
+    if fields["vermagic"] != expected_vermagic:
+        fail(f"module vermagic mismatch for {member}")
+    if expected_version is not None:
+        fields["version"] = read_module_field(module, "version")
+        if fields["version"] != expected_version:
+            fail(f"module source version mismatch for {member}")
+    return {
+        "name": fields["name"],
+        "path": "/" + member,
+        "sha256": digest,
+        "signer_fingerprint": signer_fingerprint,
+        "vermagic": fields["vermagic"],
+        "provenance": provenance,
+        "package": package["name"],
+        "source": source,
+    }
+
+
+def validate_protected_module_ownership(
+    by_role: dict, policy: dict, work: pathlib.Path
+) -> None:
+    expected = {
+        "acer_wmi": ("kernel", policy["acer_module_path"]),
+        **{
+            pathlib.PurePosixPath(path).name.split(".ko", 1)[0].replace("-", "_"): (
+                "nvidia-open",
+                path,
+            )
+            for path in policy["nvidia_module_paths"]
+        },
+    }
+    module_index = 0
+    for role, package in by_role.items():
+        for member in package["members"]:
+            if not member.endswith(MODULE_SUFFIXES):
+                continue
+            module = work / f"ownership-module-{module_index}.ko"
+            module_index += 1
+            decompress_member(package["member_files"][member], member, module)
+            name = read_module_field(module, "name")
+            module.unlink()
+            if name in expected and expected[name] != (role, member):
+                fail(f"protected module {name} is owned outside its exact policy path")
+
+
+def verify_inputs(
+    lock_bytes: bytes,
+    environment_bytes: bytes,
+    attestation_bytes: bytes,
+    pkgbuild_bytes: bytes,
+    srcinfo_bytes: bytes,
+    policy: dict,
+) -> tuple[str, str, str, str]:
+    script_root = pathlib.Path(__file__).resolve().parent.parent
+    tracked_lock = script_root / "packaging/kernel/source-lock.toml"
+    tracked_environment = script_root / "packaging/kernel/build-environment.toml"
+    if lock_bytes != read_limited(tracked_lock, "tracked source lock"):
+        fail("retained source lock does not match this source tree")
+    if environment_bytes != read_limited(tracked_environment, "tracked build environment"):
+        fail("retained build environment does not match this source tree")
+    lock = parse_toml_bytes(lock_bytes, "retained source lock")
+    environment = parse_toml_bytes(environment_bytes, "retained build environment")
+    attestation = parse_toml_bytes(attestation_bytes, "retained build attestation")
+    exact_keys(
+        attestation,
+        {
+            "format",
+            "source_lock_sha256",
+            "build_environment_sha256",
+            "pkgbuild_sha256",
+            "package_set_srcinfo_sha256",
+        },
+        "retained build attestation",
+    )
+    if attestation.get("format") != 1:
+        fail("unsupported retained build attestation format")
+    bindings = {
+        "source_lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
+        "build_environment_sha256": hashlib.sha256(environment_bytes).hexdigest(),
+        "pkgbuild_sha256": hashlib.sha256(pkgbuild_bytes).hexdigest(),
+        "package_set_srcinfo_sha256": hashlib.sha256(srcinfo_bytes).hexdigest(),
+    }
+    if any(attestation.get(key) != value for key, value in bindings.items()):
+        fail("retained build attestation does not bind the authenticated build inputs")
+    source = [item for item in lock.get("inputs", []) if isinstance(item, dict) and item.get("name") == "kernel-source"]
+    nvidia_source = [item for item in lock.get("inputs", []) if isinstance(item, dict) and item.get("name") == "nvidia-open-source"]
+    if (
+        lock.get("source_commit") != policy["kernel_source_commit"]
+        or len(source) != 1
+        or source[0].get("revision") != policy["kernel_source_commit"]
+    ):
+        fail("kernel source commit does not match policy")
+    if len(nvidia_source) != 1 or nvidia_source[0].get("revision") != policy["nvidia_source_version"]:
+        fail("NVIDIA source version does not match policy")
+    if environment.get("candidate") != policy["candidate"] or environment.get("architecture") != policy["architecture"]:
+        fail("build environment identity does not match policy")
+    expected_names = [item["name"] for item in policy["packages"]]
+    if environment.get("package_names") != expected_names:
+        fail("build environment package order does not match policy")
+    if environment.get("nvidia_open_version") != policy["nvidia_source_version"]:
+        fail("build environment NVIDIA source version does not match policy")
+    validate_srcinfo(srcinfo_bytes, lock, environment, policy)
+    return (
+        bindings["source_lock_sha256"],
+        bindings["build_environment_sha256"],
+        hashlib.sha256(attestation_bytes).hexdigest(),
+        bindings["package_set_srcinfo_sha256"],
+    )
+
+
+def validate_srcinfo(
+    content: bytes, lock: dict, environment: dict, policy: dict
+) -> None:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        fail("retained package-set.SRCINFO is not UTF-8")
+    fields: dict[str, list[str]] = collections.defaultdict(list)
+    package_fields: dict[str, dict[str, list[str]]] = {}
+    current_package = None
+    relationship_names = {
+        "depends",
+        "optdepends",
+        "makedepends",
+        "checkdepends",
+        "provides",
+        "conflicts",
+        "replaces",
+    }
+    global_relationship_keys = relationship_names | {
+        f"{key}_{policy['architecture']}" for key in relationship_names
+    }
+    global_relationships: dict[str, list[str]] = collections.defaultdict(list)
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        match = re.fullmatch(r"[ \t]*([A-Za-z][A-Za-z0-9_]*) = ([^\x00-\x1f\x7f]+)", line)
+        if not match:
+            fail("retained package-set.SRCINFO has invalid syntax")
+        key, value = match.groups()
+        fields[key].append(value)
+        if key == "pkgname":
+            if value in package_fields:
+                fail("retained package-set.SRCINFO contains a duplicate package section")
+            current_package = value
+            package_fields[value] = collections.defaultdict(list)
+        elif current_package is None and key in global_relationship_keys:
+            global_relationships[key].append(value)
+        elif current_package is not None:
+            package_fields[current_package][key].append(value)
+
+    def exactly_one(name: str) -> str:
+        values = fields.get(name, [])
+        if len(values) != 1:
+            fail(f"retained package-set.SRCINFO must contain one {name}")
+        return values[0]
+
+    expected_names = [item["name"] for item in policy["packages"]]
+    expected_global_relationships = {
+        "makedepends": [
+            "bc",
+            "binutils",
+            "cpio",
+            "gettext",
+            "glibc",
+            "libelf",
+            "libgcc",
+            "openssl",
+            "pahole",
+            "perl",
+            "python",
+            "rust",
+            "rust-bindgen",
+            "rust-src",
+            "tar",
+            "xxhash",
+            "xz",
+            "zlib",
+            "zstd",
+        ]
+    }
+    if dict(global_relationships) != expected_global_relationships:
+        fail("retained package-set.SRCINFO global build relationships do not match policy")
+    expected_versions = {item["version"] for item in policy["packages"]}
+    if len(expected_versions) != 1:
+        fail("policy package versions cannot be represented by one package-set.SRCINFO")
+    version = f"{exactly_one('pkgver')}-{exactly_one('pkgrel')}"
+    epochs = fields.get("epoch", [])
+    if len(epochs) > 1:
+        fail("retained package-set.SRCINFO contains duplicate epoch fields")
+    if epochs:
+        version = f"{epochs[0]}:{version}"
+    if (
+        exactly_one("pkgbase") != environment.get("pkgbase")
+        or fields.get("pkgname", []) != expected_names
+        or {version} != expected_versions
+        or fields.get("arch", []) != [policy["architecture"]]
+    ):
+        fail("retained package-set.SRCINFO package identity does not match policy")
+    nvidia = policy["packages_by_role"]["nvidia-open"]
+    expected_nvidia_fields = {
+        "depends": [
+            f"{policy['packages_by_role']['kernel']['name']}={policy['packages_by_role']['kernel']['version']}",
+            f"nvidia-utils={policy['nvidia_source_version']}",
+            "libglvnd",
+        ],
+        "provides": ["NVIDIA-MODULE"],
+        "conflicts": [f"{policy['packages_by_role']['kernel']['name']}-nvidia"],
+    }
+    nvidia_fields = package_fields.get(nvidia["name"], {})
+    unexpected_relationships = {
+        key
+        for key, values in nvidia_fields.items()
+        if values
+        and (
+            key in relationship_names
+            or any(key.startswith(f"{name}_") for name in relationship_names)
+        )
+        and key not in expected_nvidia_fields
+    }
+    if unexpected_relationships or any(
+        nvidia_fields.get(key, []) != values
+        for key, values in expected_nvidia_fields.items()
+    ):
+        fail("retained package-set.SRCINFO NVIDIA relationships do not match policy")
+
+    source_kinds = {
+        "kernel-source",
+        "kernel-signature",
+        "kernel-config",
+        "nvidia-source",
+        "nvidia-patch",
+        "patch",
+    }
+    expected_sources = {}
+    for item in lock.get("inputs", []):
+        if not isinstance(item, dict) or item.get("kind") not in source_kinds:
+            continue
+        path = item.get("path")
+        origin = item.get("origin")
+        if not isinstance(path, str) or not isinstance(origin, str):
+            fail("source lock contains an invalid package source identity")
+        name = pathlib.PurePosixPath(path).name
+        if not name or name in expected_sources:
+            fail("source lock contains duplicate package source identities")
+        expected_sources[name] = (origin, path)
+    actual_sources = {}
+    for key, values in fields.items():
+        if key != "source" and key != f"source_{policy['architecture']}":
+            continue
+        for value in values:
+            location = value
+            if "::" in value:
+                name, location = value.split("::", 1)
+            else:
+                parsed = urllib.parse.urlsplit(value)
+                name = pathlib.PurePosixPath(parsed.path).name
+            if not name or name in actual_sources:
+                fail("retained package-set.SRCINFO contains duplicate source identities")
+            actual_sources[name] = location
+    if set(actual_sources) != set(expected_sources):
+        fail("retained package-set.SRCINFO source set does not match the source lock")
+    for name, location in actual_sources.items():
+        origin, path = expected_sources[name]
+        local_lock_source = (
+            origin.startswith("repository:")
+            and pathlib.PurePosixPath(origin.removeprefix("repository:")).name == name
+            and pathlib.PurePosixPath(path).name == name
+            and location == name
+        )
+        if location != origin and not local_lock_source:
+            fail("retained package-set.SRCINFO source origin does not match the source lock")
+
+
+def write_evidence(path: pathlib.Path, evidence: dict) -> None:
+    if not path.name or path.name in {".", ".."}:
+        fail("output must name a new file")
+    content = (json.dumps(evidence, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if any(marker in content for marker in PRIVATE_MARKERS):
+        fail("refusing sensitive evidence output")
+    try:
+        directory = os.open(
+            path.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+    except OSError:
+        fail("output parent must be an existing non-symlink directory")
+    temporary = f".{path.name}.tmp-{secrets.token_hex(16)}"
+    descriptor = -1
+    published = False
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
+        )
+        with os.fdopen(descriptor, "wb", closefd=False) as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.fchmod(descriptor, 0o444)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.link(
+            temporary,
+            path.name,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+            follow_symlinks=False,
+        )
+        published = True
+        os.unlink(temporary, dir_fd=directory)
+        os.fsync(directory)
+    except FileExistsError:
+        fail("output must be a new file in an existing directory")
+    except OSError:
+        if published:
+            try:
+                os.unlink(path.name, dir_fd=directory)
+                os.fsync(directory)
+            except OSError:
+                pass
+        fail("atomic evidence publication failed")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        os.close(directory)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--artifacts", required=True, type=pathlib.Path)
+    parser.add_argument("--module-cert", required=True, type=pathlib.Path)
+    parser.add_argument("--module-cert-sha256", required=True)
+    parser.add_argument("--package-cert", required=True, type=pathlib.Path)
+    parser.add_argument("--package-cert-sha256", required=True)
+    parser.add_argument("--kernel-cert", required=True, type=pathlib.Path)
+    parser.add_argument("--kernel-cert-sha256", required=True)
+    parser.add_argument("--package-manifest-signature", required=True, type=pathlib.Path)
+    parser.add_argument("--output", required=True, type=pathlib.Path)
+    args = parser.parse_args()
+    require_tools()
+    script_root = pathlib.Path(__file__).resolve().parent.parent
+    policy = parse_policy(script_root / "packaging/kernel/provenance-policy.toml")
+    validate_schema_policy(script_root / "schemas/package-provenance-v1.json", policy)
+    compatibility = parse_toml(
+        script_root / "compatibility/pt315-53.toml", "compatibility declaration"
+    )
+    validate_compatibility_policy(compatibility, policy)
+    root = args.artifacts
+    validate_artifact_tree(root)
+    with tempfile.TemporaryDirectory(prefix="package-provenance-") as temporary:
+        work = pathlib.Path(temporary)
+        module_cert, module_fingerprint, module_certificate_der = normalized_certificate(args.module_cert, work, "module certificate")
+        package_cert, package_fingerprint, _ = normalized_certificate(args.package_cert, work, "package certificate")
+        kernel_cert, kernel_fingerprint, kernel_certificate_der = normalized_certificate(args.kernel_cert, work, "kernel certificate")
+        verify_expected_fingerprint(module_fingerprint, args.module_cert_sha256, "module certificate")
+        verify_expected_fingerprint(package_fingerprint, args.package_cert_sha256, "package certificate")
+        verify_expected_fingerprint(kernel_fingerprint, args.kernel_cert_sha256, "kernel certificate")
+        if len({module_fingerprint, package_fingerprint, kernel_fingerprint}) != 3:
+            fail("package, module, and kernel image signers must be distinct")
+        verify_expected_fingerprint(
+            package_fingerprint, policy["package_signer_sha256"], "policy package signer"
+        )
+        verify_expected_fingerprint(
+            module_fingerprint, policy["module_signer_sha256"], "policy module signer"
+        )
+        verify_expected_fingerprint(
+            kernel_fingerprint,
+            policy["kernel_image_signer_sha256"],
+            "policy kernel image signer",
+        )
+        canonical_sensitive_artifact_inspection(
+            script_root,
+            root,
+            args.module_cert,
+            args.kernel_cert,
+        )
+        manifest_signature = work / "package-manifest.p7s"
+        manifest_signature.write_bytes(
+            read_limited(args.package_manifest_signature, "package manifest signature")
+        )
+        signed_sums = snapshot_file(
+            root / "SHA256SUMS",
+            work / "SHA256SUMS",
+            "package manifest",
+        )
+        verify_detached_signature(
+            manifest_signature,
+            signed_sums,
+            package_cert,
+            "package manifest",
+        )
+        sums = parse_sums(signed_sums)
+        retained_evidence = verify_retained_evidence(root, policy, sums, work)
+        lock_hash, environment_hash, attestation_hash, srcinfo_hash = verify_inputs(
+            retained_evidence["source-lock.toml"],
+            retained_evidence["build-environment.toml"],
+            retained_evidence["build-attestation.toml"],
+            retained_evidence["PKGBUILD"],
+            retained_evidence["package-set.SRCINFO"],
+            policy,
+        )
+        by_role, packages = package_records(
+            root,
+            policy,
+            work,
+            sums,
+            retained_evidence,
+            module_certificate_der,
+            kernel_certificate_der,
+        )
+        release = policy["kernel_release"]
+        kernel = by_role["kernel"]
+        nvidia = by_role["nvidia-open"]
+        validate_protected_module_ownership(by_role, policy, work)
+        required_kernel_members = {policy["kernel_image_path"], policy["acer_module_path"]}
+        if not required_kernel_members.issubset(kernel["members"]):
+            fail("kernel package is missing its image or acer_wmi module")
+        actual_nvidia = {item for item in nvidia["members"] if item.endswith(MODULE_SUFFIXES)}
+        if actual_nvidia != set(policy["nvidia_module_paths"]):
+            fail("NVIDIA package module set does not match policy")
+        if any(item.endswith(MODULE_SUFFIXES) for item in by_role["headers"]["members"]):
+            fail("headers package unexpectedly owns a module")
+        image = work / "kernel-image"
+        shutil.copyfile(kernel["member_files"][policy["kernel_image_path"]], image)
+        run(["sbverify", "--cert", str(kernel_cert), str(image)], "kernel image signature verification")
+        kernel_trust = verify_kernel_module_trust(
+            by_role["headers"], image, policy, module_fingerprint,
+            module_certificate_der, work
+        )
+        acer_module = module_record(
+            kernel, policy["acer_module_path"], "in-tree", "acer_wmi",
+            policy["module_vermagic"],
+            None,
+            module_fingerprint,
+            {"kind": "kernel-tree", "revision": policy["kernel_source_commit"]},
+            module_cert, work, 0,
+        )
+        modules = [acer_module]
+        for index, member in enumerate(policy["nvidia_module_paths"], 1):
+            modules.append(
+                module_record(
+                    nvidia, member, "nvidia-open", pathlib.PurePosixPath(member).name.split(".ko", 1)[0].replace("-", "_"),
+                    policy["module_vermagic"], policy["nvidia_source_version"],
+                    module_fingerprint,
+                    {"kind": "nvidia-open", "revision": policy["nvidia_source_version"]},
+                    module_cert, work, index,
+                )
+            )
+        packages_evidence = [
+            {key: record[key] for key in ("name", "version", "architecture", "sha256")}
+            for record in sorted(packages, key=lambda item: item["name"])
+        ]
+        evidence = {
+            "schema_version": 1,
+            "candidate": policy["candidate"],
+            "build": {
+                "source_commit": policy["kernel_source_commit"],
+                "source_lock_sha256": lock_hash,
+                "build_environment_sha256": environment_hash,
+                "build_attestation_sha256": attestation_hash,
+                "pkgbuild_sha256": packages[0]["pkgbuild_sha256"],
+                "package_set_srcinfo_sha256": srcinfo_hash,
+                "package_manifest_signer_fingerprint": package_fingerprint,
+            },
+            "kernel": {
+                "release": release,
+                "package": kernel["name"],
+                "image_path": "/" + policy["kernel_image_path"],
+                "image_sha256": sha256_file(image),
+                "image_signer_fingerprint": kernel_fingerprint,
+                **kernel_trust,
+            },
+            "modules": modules,
+            "packages": packages_evidence,
+        }
+        write_evidence(args.output, evidence)
+    print(f"verified package provenance: {len(packages)} packages, {len(modules)} modules")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except VerificationError as error:
+        print(f"verify-package-provenance: {error}", file=sys.stderr)
+        raise SystemExit(1)
