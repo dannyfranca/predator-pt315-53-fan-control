@@ -1,0 +1,32 @@
+name: Repository policy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install policy tooling
+        run: |
+          pacman -Syu --noconfirm cargo-deny git gnupg kmod libarchive lychee openssl \
+            python rust sbsigntools systemd zstd
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+      - name: Prepare locked dependency and advisory inputs
+        run: |
+          su builder -c 'cd "$GITHUB_WORKSPACE" && cargo fetch --locked'
+          su builder -c 'cd "$GITHUB_WORKSPACE" && cargo deny fetch'
+      - name: Run offline read-only repository policy
+        run: >-
+          su builder -c 'cd "$GITHUB_WORKSPACE" &&
+          CARGO_NET_OFFLINE=true scripts/check-repository-policy'
