@@ -1174,6 +1174,285 @@ sudo /usr/bin/pt31553-fan-restore --restore
 The candidate entry must show `selected`; a stock entry must still show
 `default`. Only the separate qualification procedure may proceed from here.
 
+## Canonical runbook: qualification and operation
+
+> **CURRENT REVISION: DO NOT ENABLE OR START.** This source revision is an
+> unqualified publication. Its daemon is deliberately status-only and cannot
+> become ready under systemd. The commands in step 8 are the post-qualification
+> operator contract for a later build that has passed every gate below; they are
+> not authorization to run this revision. Source-complete is not qualification.
+> CI success is not qualification. Neither result permits Custom control.
+
+Run this ladder only on the exact Predator PT315-53 / Civic_TLS machine and
+candidate package set verified above. Keep a second operator present for every
+stage that can enter Custom control. Never substitute raw EC writes, a forced
+module capability, a replacement module, manual fan mode, or module unload.
+The fixed commands and schedules in
+[`qualification/workloads/README.md`](qualification/workloads/README.md) are
+part of the evidence identity; do not tune them during a run.
+
+Every successful stage boundary uses the same fail-closed handoff:
+
+1. stop the workload and confirm that its process group or cgroup is absent;
+2. stop normal fan writes, then stop the service if it was involved;
+3. request Firmware Auto independently for both fans;
+4. read back `2` from both enable endpoints.
+
+Read-only preflight uses a separate boundary: confirm no workload is running,
+no normal fan writer or service is active, and both enable endpoints already
+read `2`. Preflight itself never requests Auto or issues any other fan write.
+
+An abort performs steps 1 through 4, then preserves the failure evidence and
+blocks the next stage. A successful handoff advances only after its evidence is
+complete and accepted.
+
+If step 4 fails, stop the controller or qualification run and use only normal
+firmware or operating-system restoration. If both fans cannot be confirmed in
+Auto immediately, shut down the machine; do not reboot into any kernel. A
+confirmed emergency maximum containment attempt is temporary protection, not
+permission to continue or reboot. Only after both fans again confirm Auto may
+the operator use [Return to stock before removal](#return-to-stock-before-removal).
+A timeout, missing sample, unexpected write/readback, tachometer failure,
+thermal limit, workload-control failure, service-control failure, or loss of
+either operator invokes this same abort sequence.
+
+### 1. Establish the qualification prerequisites
+
+Before any qualifying boot or stage, verify all of the following:
+
+- the installed controller, kernel, NVIDIA-open, module, image, signatures,
+  signer identities, source lock, compatibility declaration, and package
+  provenance still match the already verified candidate artifacts;
+- the running DMI, board, BIOS, candidate kernel, signed in-tree `acer_wmi`
+  module, Secure Boot state, two-fan hwmon ABI, `coretemp`, NVIDIA temperature
+  and utilization source, and AC/battery source match the declared envelope;
+- the stock and stock-LTS boot entries remain present and bootable, a stock
+  entry remains the persistent default, and another operator can select it;
+- no competing controller is loaded or running, sufficient journal and
+  evidence storage exists, and the fixed workload prerequisites are installed;
+- `/etc/pt31553-fan-control/config.toml` is complete and atomically valid, while
+  the Compatibility declaration, candidate protected policy, Qualification
+  record, and Promotion manifest retain their distinct ownership roles; and
+- both units remain disabled and inactive and both fan enable endpoints read
+  Firmware Auto (`2`).
+
+The initial candidate policy and curves are hypotheses, not authority. Record
+the exact candidate identity and environmental limits before stage 2. Start
+each following stage only after the preceding evidence is complete, protected,
+and accepted. At every handoff, repeat the Auto boundary above.
+
+> **IMPLEMENTATION BLOCK:** this source revision packages no production stage
+> runner for preflight, baseline, calibration, matched workloads, or live
+> lifecycle, and packages no reviewed endurance harness. Therefore stages 2
+> through 7 describe the required evidence procedure but cannot be executed by
+> this revision. Stop here. Do not improvise commands, direct sysfs writes, or a
+> local harness. A later revision must add and package reviewed stage-oriented
+> entrypoints before an operator may follow the live steps below.
+
+### 2. Run read-only preflight
+
+Preflight performs no fan writes. Capture exact DMI/board/BIOS, running kernel,
+module path/version/hash/signature and signer, Secure Boot, the hwmon endpoint
+mapping, CPU/GPU sensors, NVIDIA health, external-power source, configuration,
+tool and unit identities, journal/storage health, recovery entries, and both
+enable readbacks. Reject unexpected devices, paths, identities, permissions,
+values, missing prerequisites, or a non-`2` enable readback.
+
+Publish the protected result as
+`/var/lib/pt31553-fan-control/evidence/preflight.json`. End by repeating the
+read-only preflight form of the Auto boundary. Because this revision does not
+expose a production preflight stage command, it cannot create qualifying
+preflight evidence; do not replace that missing entrypoint with ad-hoc shell
+writes or treat source tests as hardware evidence.
+
+### 3. Record Firmware Auto baselines
+
+Remain in Firmware Auto throughout this stage. In comparable ambient and
+starting-temperature conditions, run AC idle for 10 minutes, AC CPU for 20,
+AC GPU for 20, AC combined for 30, then battery idle/CPU/GPU for 10 minutes
+each. Capture temperatures, utilization, power state, fan RPM, firmware
+behavior, workload identity, start/end conditions, limits, and cleanup outcome
+for all seven baselines. Stop immediately at CPU `95°C`, GPU `85°C`, any CPU or
+GPU thermal throttling, or any other abort condition; never switch to Custom to
+salvage a baseline. Between every baseline, complete the Auto boundary and wait
+for comparable starting conditions before continuing.
+
+Store the seven root-owned evidence records under
+`/var/lib/pt31553-fan-control/evidence/`. Their identities and paths become the
+ordered `baselines` array in the endurance plan.
+
+### 4. Calibrate one fan at a time
+
+Begin in confirmed Auto. Capture two fresh temperature and tachometer samples,
+arm through maximum PWM (`255`), confirm Custom readback and tachometer
+response, then calibrate only one physical fan while leaving the other at the
+safety maximum. Maximum output must produce plausible tachometer response
+within 10 seconds. For CPU, then GPU, sweep `100`, `60`, `50`, `40`, and `30`
+percent with the fixed settle and response deadlines. Stop at the first
+unstable level and never test below it. At a first unstable level, the lowest
+stable level is the immediately preceding higher step; if every level passes,
+it is 30%. Set the protected floor one full ten-percentage-point step above that
+stable level and fail qualification if this margin cannot fit at or below 100%.
+Use deduplicated anchors at the floor, the midpoint from the floor to 75%, 75%,
+and 100%, with plausible RPM bands of plus or minus 30%. Set each response
+deadline to the slowest successful response plus two seconds, capped at 10
+seconds. Prove five maximum-to-floor transitions plus the required 15-minute
+hold.
+
+After the CPU calibration, complete the Auto boundary before beginning GPU.
+Complete it again after GPU. A missed deadline, unstable RPM, wrong endpoint,
+readback mismatch, or failed restoration rejects that fan's calibration and
+blocks all later stages. Store the accepted records as
+`cpu-calibration.json` and `gpu-calibration.json` in the protected evidence
+directory.
+
+### 5. Run matched thermal workloads
+
+For each baseline identity, begin from confirmed Auto with ambient temperature
+no more than `2°C` from baseline and starting CPU and GPU temperatures no more
+than `3°C` from baseline. Run one Custom comparison for each 10-minute idle case
+and two Custom comparisons for each non-idle case: AC CPU 20 minutes, AC GPU 20,
+AC combined 30, battery CPU 10, and battery GPU 10. This is the required
+twelve-run matrix. Compare temperature, utilization, RPM, response, limits, and
+cleanup against its matching Firmware Auto baseline; never compare unmatched
+power profiles or starting conditions. CPU and GPU peak and P95 must each be no
+more than `2°C` above baseline, each final-five-minute slope must be at most
+`1°C/min`, neither component may throttle, CPU must remain below `95°C`, and
+GPU must remain below `85°C`.
+
+After every run, apply the Auto boundary before inspecting acceptance or
+starting another run. Any thermal-limit breach, missing/stale sample,
+tachometer/readback/deadline failure, workload escape, or restoration failure
+rejects the run. Store the twelve accepted protected records and list their
+paths, in plan order, as `matched_workload_runs`.
+
+### 6. Exercise lifecycle and fault handling
+
+Use the deterministic fake platform first for dangerous faults. Confirm that
+sensor failure, stale/future/late samples, cadence loss, device replacement,
+write/readback mismatch, tachometer faults, missed deadlines, and failed
+restoration all stop normal writes, latch the fault, and invoke Auto or maximum
+containment as designed. Fake-platform success is simulated safety evidence,
+not hardware qualification.
+
+On live hardware exercise only: invalid configuration, duplicate ownership,
+normal stop and restart, SIGKILL/watchdog recovery, AC-to-battery transitions,
+suspend/resume, and reboot. Do not inject dangerous live sensor, write,
+tachometer, or restoration failures. Begin and end every case with the Auto
+boundary, keep the stock boot default, and abort the entire stage on any
+unexpected restart, readiness, write, readback, journal, or cleanup result.
+Publish the accepted protected record as `live-lifecycle.json`.
+
+### 7. Complete supervised endurance and authorization
+
+Create a root-owned, non-group/world-writable plan manifest containing the
+accepted preflight, seven baseline, twelve matched-run, two calibration, and
+live-lifecycle evidence paths. The root-owned executable endurance harness must
+implement only the protocol in
+[`qualification/supervised-endurance-harness.md`](qualification/supervised-endurance-harness.md).
+Its identity is part of the reviewed candidate; do not improvise a harness at
+the machine.
+
+The final run is 60 minutes total with two fixed load/idle cycles and one
+AC/battery/AC transition: AC load 15 minutes, AC idle 10, battery load 10,
+battery idle 5, AC load 10, then AC idle 10. Run it only after a fresh Auto
+boundary. The following is the exact invocation contract for a later package
+that actually installs the reviewed harness; it cannot succeed from this
+revision's package:
+
+```sh
+sudo /usr/bin/pt31553-fan-qualify supervised-endurance \
+  --manifest /etc/pt31553-fan-control/endurance-plan.json \
+  --harness /usr/lib/pt31553-fan-control/endurance-harness \
+  --evidence-output \
+    /var/lib/pt31553-fan-control/evidence/supervised-endurance.json \
+  --qualification-record /var/lib/pt31553-fan-control/qualification.json
+```
+
+The qualifier owns the schedule and cleanup deadlines. On failure it must stop
+the workload first, confirm absence, stop the service, restore CPU Auto, then
+restore GPU Auto. Only a complete passing envelope may create both output
+files. Validate them independently and finish with another Auto boundary:
+
+```sh
+sudo /usr/bin/pt31553-fan-qualify validate-records \
+  --qualification-record /var/lib/pt31553-fan-control/qualification.json \
+  --evidence \
+    /var/lib/pt31553-fan-control/evidence/supervised-endurance.json \
+  --authorized-evidence-path \
+    /var/lib/pt31553-fan-control/evidence/supervised-endurance.json
+```
+
+No output, a partial output, a no-go result, or a validation failure leaves the
+candidate unqualified and disabled. Preserve raw evidence only under the
+root-owned `/var/lib/pt31553-fan-control/evidence/` directory.
+
+### 8. Enable, start, and inspect an authorized build
+
+This step is forbidden for the current status-only revision. For a later
+operational build, first reverify the installed hashes/signers and repeat
+`pt31553-fan-qualify validate-records` exactly as above. Confirm that the
+Qualification record binds the installed protected policy and complete exact
+machine envelope, both fans read Auto, the stock recovery entry remains the
+default, and no fault latch is present. Then enable both required units:
+
+```sh
+sudo /usr/bin/systemctl enable pt31553-fan-sleep-guard.service
+sudo /usr/bin/systemctl enable --now pt31553-fand.service
+/usr/bin/systemctl is-enabled pt31553-fand.service
+/usr/bin/systemctl is-enabled pt31553-fan-sleep-guard.service
+/usr/bin/systemctl status --no-pager pt31553-fand.service
+sudo /usr/bin/journalctl -b -u pt31553-fand.service --no-pager
+sudo /usr/bin/journalctl -b -u pt31553-fan-sleep-guard.service --no-pager
+sudo /usr/bin/journalctl -b -u pt31553-fand.service --no-pager \
+  PT31553_EVENT_ID=pt31553.state-transition.v1
+sudo /usr/bin/journalctl -b -u pt31553-fand.service --no-pager \
+  PT31553_EVENT_ID=pt31553.runtime-fault.v1
+```
+
+Require the daemon to be active and ready, both units to be enabled, expected
+`firmware-auto` to `arming` to `custom-control` transitions, fresh bounded
+control-cycle fields, and no `PT31553_FAULT_ID`. The sleep guard normally stays
+inactive until a sleep transaction; never start it directly as an ordinary
+service. Keep journald as the runtime log; do not create a parallel log file.
+Keep raw qualification evidence private at the paths above.
+
+The daemon validates the complete TOML atomically during startup. For a
+configuration change, retain a protected copy of the last working file,
+publish the complete candidate to
+`/etc/pt31553-fan-control/config.toml`, and use a service restart:
+
+```sh
+sudo /usr/bin/systemctl restart pt31553-fand.service
+/usr/bin/systemctl status --no-pager pt31553-fand.service
+sudo /usr/bin/journalctl -b -u pt31553-fand.service --no-pager
+```
+
+There is no live reload. There is no manual or fixed-output mode. Invalid or
+less-safe-than-policy configuration must fail before Custom entry and leave
+both fans in Auto. A change proven pointwise at least as aggressive as the
+protected envelope still requires startup validation, the normal restart, and
+fresh arming. A quieter change requires full requalification before it can be
+authorized; restore the last working file until that completes.
+
+On any runtime fault, the latch deliberately refuses automatic rearm. Use this
+order: stop the workload, stop the unit, independently restore and confirm
+Auto, inspect the structured fault, correct the cause, then explicitly restart:
+
+```sh
+sudo /usr/bin/systemctl stop pt31553-fand.service
+sudo /usr/bin/pt31553-fan-restore --restore
+sudo /usr/bin/journalctl -b -u pt31553-fand.service --no-pager \
+  PT31553_EVENT_ID=pt31553.runtime-fault.v1
+# Correct and revalidate the reported cause before clearing the latch.
+sudo /usr/bin/systemctl reset-failed pt31553-fand.service
+sudo /usr/bin/systemctl restart pt31553-fand.service
+/usr/bin/systemctl status --no-pager pt31553-fand.service
+```
+
+Do not reset or restart around an unresolved `PT31553_FAULT_ID`. If Auto cannot
+be confirmed immediately, shut down the machine; do not attempt rearm or reboot.
+
 ### Sanitize qualification evidence and check promotion
 
 Promotion is a manual, local operation after supervised endurance succeeds. Complete the
