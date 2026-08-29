@@ -1,7 +1,9 @@
 use serde_yaml::{Mapping, Value};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tempfile::TempDir;
 
 fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -40,6 +42,109 @@ fn script_lines(value: &Value) -> Vec<&str> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect()
+}
+
+struct PolicySandbox {
+    root: TempDir,
+    log: PathBuf,
+}
+
+impl PolicySandbox {
+    fn new() -> Self {
+        let root = tempfile::Builder::new()
+            .prefix("pt31553-policy-")
+            .tempdir()
+            .expect("create policy sandbox");
+        let bin = root.path().join("bin");
+        let scripts = root.path().join("scripts");
+        fs::create_dir_all(&bin).expect("create policy stub bin directory");
+        fs::create_dir_all(&scripts).expect("create policy stub scripts directory");
+        fs::create_dir(root.path().join("launch")).expect("create policy launch directory");
+
+        write_executable(
+            &bin.join("git"),
+            r#"#!/usr/bin/bash
+printf 'git %s cwd=%s\n' "$*" "$PWD" >> "$POLICY_TEST_LOG"
+case "$*" in
+    "rev-parse --show-toplevel") printf '%s\n' "$POLICY_TEST_ROOT" ;;
+    "ls-files *.md") printf '%s\n' README.md ;;
+    *) exit 2 ;;
+esac
+"#,
+        );
+        write_executable(
+            &bin.join("cargo"),
+            r#"#!/usr/bin/bash
+command="cargo $*"
+printf '%s\n' "$command" >> "$POLICY_TEST_LOG"
+[[ ${POLICY_TEST_FAIL:-} != "$command" ]]
+"#,
+        );
+        write_executable(
+            &bin.join("lychee"),
+            r#"#!/usr/bin/bash
+printf 'lychee %s\n' "$*" >> "$POLICY_TEST_LOG"
+"#,
+        );
+        write_executable(
+            &scripts.join("check-sensitive-history"),
+            r#"#!/usr/bin/bash
+printf '%s\n' sensitive-history >> "$POLICY_TEST_LOG"
+"#,
+        );
+
+        Self {
+            log: root.path().join("commands.log"),
+            root,
+        }
+    }
+
+    fn run(&self, failure: Option<&str>) -> std::process::Output {
+        let mut command = Command::new("/usr/bin/bash");
+        command
+            .env_clear()
+            .arg(workspace().join("scripts/check-repository-policy"))
+            .current_dir(self.root.path().join("launch"))
+            .env("PATH", self.root.path().join("bin"))
+            .env("POLICY_TEST_ROOT", self.root.path())
+            .env("POLICY_TEST_LOG", &self.log)
+            .env_remove("PT31553_RUN_SYSTEMD_LIFECYCLE")
+            .env_remove("PT31553_USE_SYSTEM_MANAGER");
+        if let Some(failure) = failure {
+            command.env("POLICY_TEST_FAIL", failure);
+        }
+        command.output().expect("run instrumented policy gate")
+    }
+
+    fn commands(&self) -> Vec<String> {
+        fs::read_to_string(&self.log)
+            .expect("read policy command log")
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn expected_commands(&self) -> Vec<String> {
+        vec![
+            format!(
+                "git rev-parse --show-toplevel cwd={}",
+                self.root.path().join("launch").display()
+            ),
+            "cargo fmt --all -- --check".into(),
+            "cargo clippy --frozen --workspace --all-targets --all-features -- -D warnings".into(),
+            "cargo test --frozen --workspace --all-targets --all-features".into(),
+            "cargo deny --frozen check advisories bans licenses sources".into(),
+            "sensitive-history".into(),
+            format!("git ls-files *.md cwd={}", self.root.path().display()),
+            "lychee --offline --no-progress README.md".into(),
+        ]
+    }
+}
+
+fn write_executable(path: &Path, contents: &str) {
+    fs::write(path, contents).expect("write policy stub");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .expect("make policy stub executable");
 }
 
 #[test]
@@ -159,6 +264,25 @@ fn policy_is_offline_complete_and_explicitly_not_hardware_qualification() {
     assert!(policy.contains("PT31553_RUN_SYSTEMD_LIFECYCLE"));
     assert!(policy.contains("PT31553_USE_SYSTEM_MANAGER"));
     assert!(!policy.contains("/sys/class/hwmon"));
+}
+
+#[test]
+fn policy_executes_every_gate_in_order_and_stops_at_the_first_failure() {
+    let success = PolicySandbox::new();
+    let expected = success.expected_commands();
+    let output = success.run(None);
+    assert!(output.status.success());
+    assert_eq!(success.commands(), expected);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).lines().last(),
+        Some("repository policy passed: source checks only; not hardware qualification")
+    );
+
+    let failure = PolicySandbox::new();
+    let expected = failure.expected_commands();
+    let output = failure.run(Some(&expected[3]));
+    assert!(!output.status.success());
+    assert_eq!(failure.commands(), expected[..=3]);
 }
 
 #[test]
