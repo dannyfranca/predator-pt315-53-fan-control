@@ -1233,11 +1233,11 @@ pub(crate) fn matched_control_evidence_is_complete(record: &EvidenceRecord) -> b
 
     let mut endpoint_identities: [[Option<&str>; 3]; 2] = [[None; 3]; 2];
     for sample_index in 0..sample_count {
-        for fan_index in 0..2 {
+        for (fan_index, fan_endpoint_identities) in endpoint_identities.iter_mut().enumerate() {
             let Some(command) = commands[sample_index][fan_index] else {
                 return false;
             };
-            for field_index in 0..3 {
+            for (field_index, endpoint_identity) in fan_endpoint_identities.iter_mut().enumerate() {
                 let Some(readback) = readbacks[sample_index][fan_index][field_index] else {
                     return false;
                 };
@@ -1249,13 +1249,12 @@ pub(crate) fn matched_control_evidence_is_complete(record: &EvidenceRecord) -> b
                 if readback.outcome != ObservationOutcome::Confirmed
                     || readback.value != expected_value
                     || readback.timestamp.monotonic_millis < command.timestamp.monotonic_millis
-                    || endpoint_identities[fan_index][field_index]
+                    || endpoint_identity
                         .is_some_and(|identity| identity != readback.endpoint_identity)
                 {
                     return false;
                 }
-                endpoint_identities[fan_index][field_index] =
-                    Some(readback.endpoint_identity.as_str());
+                *endpoint_identity = Some(readback.endpoint_identity.as_str());
             }
         }
     }

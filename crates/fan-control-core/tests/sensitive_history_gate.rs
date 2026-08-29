@@ -1,4 +1,5 @@
 use sha2::Digest;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
 use std::mem::size_of;
@@ -911,9 +912,11 @@ fn accepts_benign_deep_base64_alphabet_path_content() {
 #[test]
 fn rejects_cumulative_path_shaped_base64_candidate_budgets() {
     let root = repository();
-    let ambiguous = (0..56)
-        .map(|index| format!("{index:04}{}AAAA\n", "AAAA/".repeat(14)))
-        .collect::<String>();
+    let repeated = "AAAA/".repeat(14);
+    let ambiguous = (0..56).fold(String::new(), |mut output, index| {
+        writeln!(output, "{index:04}{repeated}AAAA").unwrap();
+        output
+    });
     fs::write(root.join("ambiguous-path-record.txt"), ambiguous).unwrap();
     git(&root, &["add", "ambiguous-path-record.txt"]);
     git(
