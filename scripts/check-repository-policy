@@ -8,7 +8,8 @@ for live_opt_in in PT31553_RUN_SYSTEMD_LIFECYCLE PT31553_USE_SYSTEM_MANAGER; do
     fi
 done
 
-cd "$(git rev-parse --show-toplevel)"
+repository_root=$(git rev-parse --show-toplevel)
+cd "$repository_root"
 
 export CARGO_NET_OFFLINE=true
 
@@ -28,7 +29,11 @@ printf '%s\n' '==> repository history secret scan'
 scripts/check-sensitive-history
 
 printf '%s\n' '==> offline local-link validation'
-mapfile -t markdown_files < <(git ls-files '*.md')
+markdown_output=$(git ls-files '*.md')
+markdown_files=()
+if [[ -n $markdown_output ]]; then
+    mapfile -t markdown_files <<< "$markdown_output"
+fi
 lychee --offline --no-progress "${markdown_files[@]}"
 
 printf '%s\n' 'repository policy passed: source checks only; not hardware qualification'

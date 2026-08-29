@@ -44,13 +44,23 @@ fn script_lines(value: &Value) -> Vec<&str> {
         .collect()
 }
 
+fn encoded_command(program: &str, arguments: &[&str]) -> String {
+    let mut command = program.to_owned();
+    for argument in arguments {
+        command.push('\u{1f}');
+        command.push_str(argument);
+    }
+    command
+}
+
 struct PolicySandbox {
     root: TempDir,
     log: PathBuf,
+    markdown_output: String,
 }
 
 impl PolicySandbox {
-    fn new() -> Self {
+    fn new(markdown_output: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("pt31553-policy-")
             .tempdir()
@@ -64,18 +74,29 @@ impl PolicySandbox {
         write_executable(
             &bin.join("git"),
             r#"#!/usr/bin/bash
-printf 'git %s cwd=%s\n' "$*" "$PWD" >> "$POLICY_TEST_LOG"
-case "$*" in
-    "rev-parse --show-toplevel") printf '%s\n' "$POLICY_TEST_ROOT" ;;
-    "ls-files *.md") printf '%s\n' README.md ;;
-    *) exit 2 ;;
-esac
+command=git
+for argument in "$@"; do
+    command+=$'\x1f'"$argument"
+done
+event="$command cwd=$PWD"
+printf '%s\n' "$event" >> "$POLICY_TEST_LOG"
+[[ ${POLICY_TEST_FAIL:-} != "$event" ]] || exit 1
+if [[ $command == "git"$'\x1f'"rev-parse"$'\x1f'"--show-toplevel" ]]; then
+    printf '%s\n' "$POLICY_TEST_ROOT"
+elif [[ $command == "git"$'\x1f'"ls-files"$'\x1f'"*.md" ]]; then
+    printf '%s' "$POLICY_TEST_MARKDOWN_OUTPUT"
+else
+    exit 2
+fi
 "#,
         );
         write_executable(
             &bin.join("cargo"),
             r#"#!/usr/bin/bash
-command="cargo $*"
+command=cargo
+for argument in "$@"; do
+    command+=$'\x1f'"$argument"
+done
 printf '%s\n' "$command" >> "$POLICY_TEST_LOG"
 [[ ${POLICY_TEST_FAIL:-} != "$command" ]]
 "#,
@@ -83,19 +104,27 @@ printf '%s\n' "$command" >> "$POLICY_TEST_LOG"
         write_executable(
             &bin.join("lychee"),
             r#"#!/usr/bin/bash
-printf 'lychee %s\n' "$*" >> "$POLICY_TEST_LOG"
+command=lychee
+for argument in "$@"; do
+    command+=$'\x1f'"$argument"
+done
+printf '%s\n' "$command" >> "$POLICY_TEST_LOG"
+[[ ${POLICY_TEST_FAIL:-} != "$command" ]]
 "#,
         );
         write_executable(
             &scripts.join("check-sensitive-history"),
             r#"#!/usr/bin/bash
-printf '%s\n' sensitive-history >> "$POLICY_TEST_LOG"
+command=sensitive-history
+printf '%s\n' "$command" >> "$POLICY_TEST_LOG"
+[[ ${POLICY_TEST_FAIL:-} != "$command" ]]
 "#,
         );
 
         Self {
             log: root.path().join("commands.log"),
             root,
+            markdown_output: markdown_output.to_owned(),
         }
     }
 
@@ -108,6 +137,7 @@ printf '%s\n' sensitive-history >> "$POLICY_TEST_LOG"
             .env("PATH", self.root.path().join("bin"))
             .env("POLICY_TEST_ROOT", self.root.path())
             .env("POLICY_TEST_LOG", &self.log)
+            .env("POLICY_TEST_MARKDOWN_OUTPUT", &self.markdown_output)
             .env_remove("PT31553_RUN_SYSTEMD_LIFECYCLE")
             .env_remove("PT31553_USE_SYSTEM_MANAGER");
         if let Some(failure) = failure {
@@ -125,18 +155,61 @@ printf '%s\n' sensitive-history >> "$POLICY_TEST_LOG"
     }
 
     fn expected_commands(&self) -> Vec<String> {
+        let markdown_files = self.markdown_output.lines().collect::<Vec<_>>();
+        let lychee_arguments = ["--offline", "--no-progress"]
+            .into_iter()
+            .chain(markdown_files)
+            .collect::<Vec<_>>();
+
         vec![
             format!(
-                "git rev-parse --show-toplevel cwd={}",
+                "{} cwd={}",
+                encoded_command("git", &["rev-parse", "--show-toplevel"]),
                 self.root.path().join("launch").display()
             ),
-            "cargo fmt --all -- --check".into(),
-            "cargo clippy --frozen --workspace --all-targets --all-features -- -D warnings".into(),
-            "cargo test --frozen --workspace --all-targets --all-features".into(),
-            "cargo deny --frozen check advisories bans licenses sources".into(),
+            encoded_command("cargo", &["fmt", "--all", "--", "--check"]),
+            encoded_command(
+                "cargo",
+                &[
+                    "clippy",
+                    "--frozen",
+                    "--workspace",
+                    "--all-targets",
+                    "--all-features",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            ),
+            encoded_command(
+                "cargo",
+                &[
+                    "test",
+                    "--frozen",
+                    "--workspace",
+                    "--all-targets",
+                    "--all-features",
+                ],
+            ),
+            encoded_command(
+                "cargo",
+                &[
+                    "deny",
+                    "--frozen",
+                    "check",
+                    "advisories",
+                    "bans",
+                    "licenses",
+                    "sources",
+                ],
+            ),
             "sensitive-history".into(),
-            format!("git ls-files *.md cwd={}", self.root.path().display()),
-            "lychee --offline --no-progress README.md".into(),
+            format!(
+                "{} cwd={}",
+                encoded_command("git", &["ls-files", "*.md"]),
+                self.root.path().display()
+            ),
+            encoded_command("lychee", &lychee_arguments),
         ]
     }
 }
@@ -268,7 +341,7 @@ fn policy_is_offline_complete_and_explicitly_not_hardware_qualification() {
 
 #[test]
 fn policy_executes_every_gate_in_order_and_stops_at_the_first_failure() {
-    let success = PolicySandbox::new();
+    let success = PolicySandbox::new("README.md\n");
     let expected = success.expected_commands();
     let output = success.run(None);
     assert!(output.status.success());
@@ -278,11 +351,27 @@ fn policy_executes_every_gate_in_order_and_stops_at_the_first_failure() {
         Some("repository policy passed: source checks only; not hardware qualification")
     );
 
-    let failure = PolicySandbox::new();
-    let expected = failure.expected_commands();
-    let output = failure.run(Some(&expected[3]));
-    assert!(!output.status.success());
-    assert_eq!(failure.commands(), expected[..=3]);
+    for failed_index in 0..expected.len() {
+        let failure = PolicySandbox::new("README.md\n");
+        let expected = failure.expected_commands();
+        let output = failure.run(Some(&expected[failed_index]));
+        assert!(
+            !output.status.success(),
+            "policy accepted failed command: {}",
+            expected[failed_index]
+        );
+        assert_eq!(failure.commands(), expected[..=failed_index]);
+    }
+}
+
+#[test]
+fn policy_preserves_empty_and_space_containing_markdown_lists() {
+    for markdown_output in ["", "README.md\ndocs/a b.md\n"] {
+        let sandbox = PolicySandbox::new(markdown_output);
+        let output = sandbox.run(None);
+        assert!(output.status.success());
+        assert_eq!(sandbox.commands(), sandbox.expected_commands());
+    }
 }
 
 #[test]
