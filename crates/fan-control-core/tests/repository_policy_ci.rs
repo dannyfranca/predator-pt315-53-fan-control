@@ -23,6 +23,15 @@ fn workflow_runs_the_complete_policy_for_every_change() {
     assert!(workflow.contains("rustup toolchain install 1.85.0"));
     assert!(workflow.contains("rustup override set 1.85.0"));
     assert!(workflow.contains("CARGO_NET_OFFLINE=true scripts/check-repository-policy"));
+
+    let install = workflow.find("name: Install policy tooling").unwrap();
+    let checkout = workflow.find("uses: actions/checkout@v4").unwrap();
+    let chown = workflow.find("chown -R builder:builder").unwrap();
+    assert!(install < checkout, "Git must exist before checkout");
+    assert!(
+        checkout < chown,
+        "checkout must be owned by the non-root runner"
+    );
 }
 
 #[test]

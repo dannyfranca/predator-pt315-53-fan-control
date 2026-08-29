@@ -13,14 +13,16 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - name: Install policy tooling
         run: |
           pacman -Syu --noconfirm cargo-deny git gnupg kmod libarchive lychee openssl \
             python rustup sbsigntools systemd zstd
           useradd --create-home builder
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare non-root checkout
+        run: |
           chown -R builder:builder "$GITHUB_WORKSPACE"
       - name: Select the supported Rust toolchain
         run: |
