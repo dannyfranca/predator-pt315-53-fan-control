@@ -614,6 +614,37 @@ fn accepts_incidental_legacy_cpio_magic_without_a_valid_header() {
 }
 
 #[test]
+fn accepts_digest_info_without_treating_it_as_an_encrypted_private_key() {
+    let digest_info = [
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+        0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    ];
+    let tree = temporary_fixture("digest-info-tree");
+    fs::write(tree.join("digest-info.der"), digest_info).unwrap();
+    let output = tree_gate(&tree, &[]);
+    assert!(
+        output.status.success(),
+        "tree rejected DigestInfo: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(tree).unwrap();
+
+    let root = repository();
+    fs::write(root.join("digest-info.der"), digest_info).unwrap();
+    git(&root, &["add", "digest-info.der"]);
+    git(&root, &["commit", "-q", "-m", "add public digest"]);
+    let output = gate_command(&root).output().unwrap();
+    assert!(
+        output.status.success(),
+        "history rejected DigestInfo: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn accepts_empty_zip_directory_entries() {
     let archive = zip_directory_entry_bytes();
 

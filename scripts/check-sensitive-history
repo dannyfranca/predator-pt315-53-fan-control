@@ -290,6 +290,18 @@ def ber_tlv(
     raise ValueError("BER child count exceeds inspection budget")
 
 
+def is_digest_algorithm_oid(content: bytes, oid: tuple[int, ...]) -> bool:
+    value = content[oid[1] : oid[2]]
+    return value in (
+        b"\x2a\x86\x48\x86\xf7\x0d\x02\x05",  # MD5
+        b"\x2b\x0e\x03\x02\x1a",  # SHA-1
+    ) or (
+        value.startswith(b"\x60\x86\x48\x01\x65\x03\x04\x02")
+        and len(value) == 9
+        and 1 <= value[-1] <= 12
+    )
+
+
 def contains_encrypted_private_key_info(content: bytes) -> bool:
     for offset, value in enumerate(content):
         if value != 0x30:
@@ -306,6 +318,7 @@ def contains_encrypted_private_key_info(content: bytes) -> bool:
             oid is not None
             and oid[0] == 0x06
             and oid[2] > oid[1]
+            and not is_digest_algorithm_oid(content, oid)
             and encrypted is not None
             and encrypted[0] == 0x04
             and encrypted[2] > encrypted[1]
@@ -327,6 +340,7 @@ def contains_encrypted_private_key_info(content: bytes) -> bool:
             oid is not None
             and oid[0] == 0x06
             and oid[2] > oid[1]
+            and not is_digest_algorithm_oid(content, oid)
             and encrypted is not None
             and encrypted[0] in (0x04, 0x24)
             and encrypted[2] > encrypted[1]
