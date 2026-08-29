@@ -1,4 +1,5 @@
 use sha2::Digest;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
 use std::mem::size_of;
@@ -911,9 +912,11 @@ fn accepts_benign_deep_base64_alphabet_path_content() {
 #[test]
 fn rejects_cumulative_path_shaped_base64_candidate_budgets() {
     let root = repository();
-    let ambiguous = (0..56)
-        .map(|index| format!("{index:04}{}AAAA\n", "AAAA/".repeat(14)))
-        .collect::<String>();
+    let repeated = "AAAA/".repeat(14);
+    let ambiguous = (0..56).fold(String::new(), |mut output, index| {
+        writeln!(output, "{index:04}{repeated}AAAA").unwrap();
+        output
+    });
     fs::write(root.join("ambiguous-path-record.txt"), ambiguous).unwrap();
     git(&root, &["add", "ambiguous-path-record.txt"]);
     git(
@@ -955,7 +958,7 @@ fn rejects_pkcs11_references_in_ordinary_historical_files() {
     let root = repository();
     fs::write(
         root.join("build-notes.txt"),
-        &[
+        [
             b"signer = pkcs".as_slice(),
             b"11:token=machine-trust;object=release-key\n",
         ]
@@ -2620,7 +2623,7 @@ fn arbitrary_short_path_base64(content: &[u8]) -> Vec<u8> {
 fn ordered_multifield_base64(content: &[u8]) -> Vec<u8> {
     let mut padded = content.to_vec();
     padded.resize(content.len().next_multiple_of(12), 0);
-    if !padded.len().div_ceil(12).is_multiple_of(2) {
+    if padded.len().div_ceil(12) % 2 != 0 {
         padded.resize(padded.len() + 12, 0);
     }
     padded
@@ -2673,7 +2676,7 @@ fn variable_field_count_base64(content: &[u8]) -> Vec<u8> {
         .chunks(32)
         .enumerate()
         .map(|(index, chunk)| {
-            let labels = if index.is_multiple_of(2) {
+            let labels = if index % 2 == 0 {
                 "HarmlessLabelA"
             } else {
                 "HarmlessLabelA HarmlessLabelB"

@@ -1,0 +1,36 @@
+name: Repository policy
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install policy tooling
+        run: |
+          pacman -Syu --noconfirm cargo-deny git gnupg kmod libarchive lychee openssl \
+            python rustup sbsigntools systemd zstd
+          useradd --create-home builder
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare non-root checkout
+        run: |
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+      - name: Select the supported Rust toolchain
+        run: |
+          su builder -c 'rustup toolchain install 1.85.0 --profile minimal --component clippy --component rustfmt'
+          su builder -c "cd '$GITHUB_WORKSPACE' && rustup override set 1.85.0"
+      - name: Prepare locked dependency and advisory inputs
+        run: |
+          su builder -c "cd '$GITHUB_WORKSPACE' && cargo fetch --locked"
+          su builder -c "cd '$GITHUB_WORKSPACE' && cargo deny fetch"
+      - name: Run offline read-only repository policy
+        run: |
+          su builder -c "cd '$GITHUB_WORKSPACE' && CARGO_NET_OFFLINE=true scripts/check-repository-policy"

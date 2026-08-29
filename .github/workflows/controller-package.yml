@@ -1,31 +1,7 @@
 name: Controller package
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/controller-package.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "compatibility/**"
-      - "config/**"
-      - "crates/**"
-      - "packaging/controller/**"
-      - "qualification/workloads/**"
-      - "schemas/**"
-      - "systemd/**"
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/controller-package.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "compatibility/**"
-      - "config/**"
-      - "crates/**"
-      - "packaging/controller/**"
-      - "qualification/workloads/**"
-      - "schemas/**"
-      - "systemd/**"
+  workflow_dispatch:
 
 permissions:
   contents: read

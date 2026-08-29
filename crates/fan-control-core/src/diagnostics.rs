@@ -722,8 +722,6 @@ pub(crate) fn record_test_diagnostics<R>(
 mod tests {
     use std::{collections::BTreeMap, fs, process::Command, sync::Mutex, time::Duration};
 
-    use tracing_subscriber::prelude::*;
-
     use super::*;
 
     static JOURNAL_TEST_LOCK: Mutex<()> = Mutex::new(());

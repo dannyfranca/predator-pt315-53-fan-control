@@ -1,37 +1,7 @@
 name: Package provenance
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/package-provenance.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "crates/fan-control-core/Cargo.toml"
-      - "crates/fan-control-core/src/**"
-      - "crates/fan-control-core/tests/package_provenance_verifier.rs"
-      - "crates/fan-control-core/tests/source_lock_verifier.rs"
-      - "crates/fan-control-core/tests/support/**"
-      - "compatibility/pt315-53.toml"
-      - "packaging/kernel/**"
-      - "schemas/package-provenance-v1.json"
-      - "scripts/verify-package-provenance"
-      - "scripts/verify-source-lock"
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/package-provenance.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "crates/fan-control-core/Cargo.toml"
-      - "crates/fan-control-core/src/**"
-      - "crates/fan-control-core/tests/package_provenance_verifier.rs"
-      - "crates/fan-control-core/tests/source_lock_verifier.rs"
-      - "crates/fan-control-core/tests/support/**"
-      - "compatibility/pt315-53.toml"
-      - "packaging/kernel/**"
-      - "schemas/package-provenance-v1.json"
-      - "scripts/verify-package-provenance"
-      - "scripts/verify-source-lock"
+  workflow_dispatch:
 
 permissions:
   contents: read

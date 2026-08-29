@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for live_opt_in in PT31553_RUN_SYSTEMD_LIFECYCLE PT31553_USE_SYSTEM_MANAGER; do
+    if [[ -n ${!live_opt_in:-} ]]; then
+        printf 'repository policy: refusing live-hardware opt-in %s\n' "$live_opt_in" >&2
+        exit 1
+    fi
+done
+
+repository_root=$(git rev-parse --show-toplevel)
+cd "$repository_root"
+
+export CARGO_NET_OFFLINE=true
+
+printf '%s\n' '==> formatting'
+cargo fmt --all -- --check
+
+printf '%s\n' '==> linting'
+cargo clippy --frozen --workspace --all-targets --all-features -- -D warnings
+
+printf '%s\n' '==> unit, integration, schema/example, source-lock, patch-scope, and fake-platform lifecycle tests'
+cargo test --frozen --workspace --all-targets --all-features
+
+printf '%s\n' '==> dependency advisories, licenses, bans, and sources'
+cargo deny --frozen check advisories bans licenses sources
+
+printf '%s\n' '==> repository history secret scan'
+scripts/check-sensitive-history
+
+printf '%s\n' '==> offline local-link validation'
+markdown_output=$(git ls-files '*.md')
+markdown_files=()
+if [[ -n $markdown_output ]]; then
+    mapfile -t markdown_files <<< "$markdown_output"
+fi
+lychee --offline --no-progress "${markdown_files[@]}"
+
+printf '%s\n' 'repository policy passed: source checks only; not hardware qualification'

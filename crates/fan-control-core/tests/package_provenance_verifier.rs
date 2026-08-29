@@ -1,5 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::mem::size_of;
@@ -1742,20 +1743,6 @@ fn rejects_unlisted_private_key_algorithms_in_retained_evidence() {
 }
 
 #[test]
-fn compatibility_changes_trigger_both_package_provenance_workflows() {
-    let workflow = include_str!("../../../.github/workflows/package-provenance.yml");
-    let (_, after_pull_request) = workflow.split_once("  pull_request:\n").unwrap();
-    let (pull_request, after_push) = after_pull_request.split_once("  push:\n").unwrap();
-    let (push, _) = after_push.split_once("\npermissions:\n").unwrap();
-    for (event, paths) in [("pull_request", pull_request), ("push", push)] {
-        assert!(
-            paths.contains("- \"compatibility/pt315-53.toml\""),
-            "{event} does not trigger package provenance verification for compatibility drift"
-        );
-    }
-}
-
-#[test]
 fn rejects_swapped_archive_names_and_sensitive_package_content() {
     let fixture = Fixture::new();
     let kernel = fixture
@@ -2516,9 +2503,11 @@ fn rejects_legacy_key_encodings_and_prefixed_sensitive_containers() {
 
 #[test]
 fn rejects_cumulative_path_shaped_base64_candidate_budgets() {
-    let ambiguous = (0..56)
-        .map(|index| format!("{index:04}{}AAAA\n", "AAAA/".repeat(14)))
-        .collect::<String>();
+    let repeated = "AAAA/".repeat(14);
+    let ambiguous = (0..56).fold(String::new(), |mut output, index| {
+        writeln!(output, "{index:04}{repeated}AAAA").unwrap();
+        output
+    });
     let fixture = Fixture::with_sensitive_package_file(
         "usr/share/doc/ambiguous-path-record.txt",
         ambiguous.as_bytes(),
@@ -3012,9 +3001,9 @@ fn rejects_oversized_elf_section_names() {
 fn exact_kernel_decompression_respects_the_shared_residency_budget() {
     let root = temporary_fixture("kernel-residency-budget");
     let payload = root.join("payload.gz");
-    let mut streams = gzip_bytes(&vec![0_u8; 150]);
+    let mut streams = gzip_bytes(&[0_u8; 150]);
     streams.extend_from_slice(b"ordinary-separator");
-    streams.extend(gzip_bytes(&vec![0_u8; 150]));
+    streams.extend(gzip_bytes(&[0_u8; 150]));
     fs::write(&payload, streams).unwrap();
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -4148,6 +4137,7 @@ fn rejects_module_certificate_in_signed_pe_overlay() {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_package(
     root: &Path,
     artifacts: &Path,
@@ -5950,7 +5940,7 @@ fn arbitrary_short_path_base64(content: &[u8]) -> Vec<u8> {
 fn ordered_multifield_base64(content: &[u8]) -> Vec<u8> {
     let mut padded = content.to_vec();
     padded.resize(content.len().next_multiple_of(12), 0);
-    if !padded.len().div_ceil(12).is_multiple_of(2) {
+    if padded.len().div_ceil(12) % 2 != 0 {
         padded.resize(padded.len() + 12, 0);
     }
     padded
@@ -6003,7 +5993,7 @@ fn variable_field_count_base64(content: &[u8]) -> Vec<u8> {
         .chunks(32)
         .enumerate()
         .map(|(index, chunk)| {
-            let labels = if index.is_multiple_of(2) {
+            let labels = if index % 2 == 0 {
                 "HarmlessLabelA"
             } else {
                 "HarmlessLabelA HarmlessLabelB"

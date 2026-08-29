@@ -70,7 +70,7 @@ impl<'de> Deserialize<'de> for FiniteF64 {
     {
         struct FiniteFloatVisitor;
 
-        impl<'de> de::Visitor<'de> for FiniteFloatVisitor {
+        impl de::Visitor<'_> for FiniteFloatVisitor {
             type Value = FiniteF64;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -22,3 +22,5 @@ tracing-subscriber = "0.3.23"
 [dev-dependencies]
 flate2 = "1.1.2"
 jsonschema = { version = "0.30.0", default-features = false }
+serde_yaml = "0.9.34"
+tempfile = "3.23"
