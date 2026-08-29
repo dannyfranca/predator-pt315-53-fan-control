@@ -229,7 +229,10 @@ pub fn matching_observation(declaration: &CompatibilityDeclarationV1) -> Compati
 }
 
 pub fn matching_record(policy: &str) -> String {
-    let evidence_sha256 = sha256(&matching_endurance_evidence(policy));
+    let evidence = matching_endurance_evidence(policy);
+    let evidence_sha256 = sha256(&evidence);
+    let completed_at =
+        serde_json::from_str::<serde_json::Value>(&evidence).unwrap()["completed_at"].clone();
     serde_json::to_string(&serde_json::json!({
         "schema_version": 2,
         "qualification_id": "pt31553-v1",
@@ -247,10 +250,7 @@ pub fn matching_record(policy: &str) -> String {
             "final_firmware_auto_confirmed": true,
             "workload_stopped": true,
             "service_stopped": true,
-            "completed_at": {
-                "monotonic_millis": 3_600_000,
-                "wall_unix_millis": 3_600_000
-            }
+            "completed_at": completed_at
         }
     }))
     .expect("qualification fixture serializes")

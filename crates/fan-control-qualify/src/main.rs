@@ -1,6 +1,7 @@
 use std::{
     env,
     error::Error,
+    ffi::OsString,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -16,8 +17,9 @@ use fan_control_core::{
     StartupStatus, SupervisedEnduranceEnvironment, SupervisedEndurancePlan,
     SupervisedEnduranceProcessStopConfirmation, SupervisedEnduranceSegment,
     SupervisedEnduranceSegmentConfirmation, SystemOwnershipPlatform, WorkloadEvidence,
-    parse_evidence_v2, run_supervised_endurance, validate_root_owned_output_destination,
-    validate_root_owned_protected_file, write_qualification_record_after_endurance,
+    parse_evidence_v2, run_supervised_endurance, validate_qualification_evidence_v2,
+    validate_root_owned_output_destination, validate_root_owned_protected_file,
+    write_qualification_record_after_endurance,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -48,7 +50,7 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let mut values = env::args().skip(1);
+    let mut values = env::args_os().skip(1);
     let Some(command) = values.next() else {
         println!(
             "fan-control-qualify: {}; run `fan-control-qualify supervised-endurance --help`",
@@ -56,10 +58,16 @@ fn run() -> Result<(), Box<dyn Error>> {
         );
         return Ok(());
     };
+    let remaining = values.collect::<Vec<_>>();
+    if command == "validate-records" {
+        return validate_records(remaining.into_iter());
+    }
+    let command = command
+        .into_string()
+        .map_err(|_| "qualification command must be UTF-8")?;
     if command != "supervised-endurance" {
         return Err(format!("unknown qualification command: {command}").into());
     }
-    let remaining = values.collect::<Vec<_>>();
     if remaining.first().is_some_and(|value| value == "--help") {
         println!(
             "usage: fan-control-qualify supervised-endurance --manifest FILE --harness FILE \
@@ -70,6 +78,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     if unsafe { libc::geteuid() } != 0 {
         return Err("supervised endurance must run as UID 0".into());
     }
+    let remaining = remaining
+        .into_iter()
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| "supervised-endurance arguments must be UTF-8")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let arguments = parse_arguments(remaining.into_iter())?;
     validate_root_owned_output_destination(&arguments.evidence_output)?;
     validate_root_owned_output_destination(&arguments.qualification_record)?;
@@ -118,6 +134,45 @@ fn run() -> Result<(), Box<dyn Error>> {
         "supervised endurance passed; authorization published at {}",
         arguments.qualification_record.display()
     );
+    Ok(())
+}
+
+fn validate_records(mut values: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> {
+    let mut qualification_record = None;
+    let mut evidence = None;
+    let mut authorized_evidence_path = None;
+    while let Some(flag) = values.next() {
+        if flag == "--help" {
+            println!(
+                "usage: fan-control-qualify validate-records --qualification-record FILE \
+                 --evidence FILE [--authorized-evidence-path FILE]"
+            );
+            return Ok(());
+        }
+        let value = values
+            .next()
+            .ok_or_else(|| format!("missing value for {}", flag.to_string_lossy()))?;
+        match flag.to_str() {
+            Some("--qualification-record") => qualification_record = Some(PathBuf::from(value)),
+            Some("--evidence") => evidence = Some(PathBuf::from(value)),
+            Some("--authorized-evidence-path") => {
+                authorized_evidence_path = Some(PathBuf::from(value));
+            }
+            Some(flag) => return Err(format!("unknown argument: {flag}").into()),
+            None => return Err("validate-records argument flags must be UTF-8".into()),
+        }
+    }
+    let qualification_record = qualification_record.ok_or("--qualification-record is required")?;
+    let evidence = evidence.ok_or("--evidence is required")?;
+    let authorized_evidence_path = authorized_evidence_path.unwrap_or_else(|| evidence.clone());
+    let qualification_source = std::fs::read_to_string(&qualification_record)?;
+    let evidence_source = std::fs::read_to_string(&evidence)?;
+    validate_qualification_evidence_v2(
+        &qualification_source,
+        &evidence_source,
+        &authorized_evidence_path,
+    )?;
+    println!("qualification and supervised endurance records are valid");
     Ok(())
 }
 

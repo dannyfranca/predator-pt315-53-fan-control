@@ -161,6 +161,7 @@ pub enum PolicyAuthorityError {
     QualificationRecordRead(crate::PlatformError),
     ProtectedPolicyParse(toml::de::Error),
     QualificationRecordParse(serde_json::Error),
+    EvidenceParse(crate::EvidenceParseError),
     InvalidIdentity {
         artifact: &'static str,
         field: &'static str,
@@ -190,6 +191,9 @@ impl fmt::Display for PolicyAuthorityError {
             Self::QualificationRecordParse(error) => {
                 write!(formatter, "qualification record: {error}")
             }
+            Self::EvidenceParse(error) => {
+                write!(formatter, "supervised endurance evidence: {error}")
+            }
             Self::InvalidIdentity { artifact, field } => {
                 write!(formatter, "invalid {artifact} identity at {field}")
             }
@@ -216,6 +220,7 @@ impl Error for PolicyAuthorityError {
             Self::ProtectedPolicyParse(error) => Some(error),
             Self::QualificationRecordRead(error) => Some(error),
             Self::QualificationRecordParse(error) => Some(error),
+            Self::EvidenceParse(error) => Some(error),
             Self::InvalidProtectedPolicy(error) => Some(error),
             Self::InvalidTachometerCalibration(error) => Some(error),
             Self::CompatibilityAdmission(error) => Some(error),
@@ -242,6 +247,65 @@ fn parse_qualification_record_v2(
         serde_json::from_str(source).map_err(PolicyAuthorityError::QualificationRecordParse)?;
     validate_record_identity(&record)?;
     Ok(record)
+}
+
+/// Validates a V2 qualification record and its exact supervised-endurance evidence together.
+///
+/// This is the read-only validation path used for retained rollback artifacts. It applies the
+/// same strict parsers and authorization binding checks as runtime policy admission.
+pub fn validate_qualification_evidence_v2(
+    qualification_record_source: &str,
+    evidence_source: &str,
+    evidence_path: &Path,
+) -> Result<(), PolicyAuthorityError> {
+    let record = parse_qualification_record_v2(qualification_record_source)?;
+    let evidence =
+        crate::parse_evidence_v2(evidence_source).map_err(PolicyAuthorityError::EvidenceParse)?;
+    let authorization = record.supervised_endurance();
+    let evidence_path = evidence_path
+        .to_str()
+        .ok_or(PolicyAuthorityError::InvalidIdentity {
+            artifact: "supervised endurance evidence",
+            field: "evidence_path",
+        })?;
+    let expected_envelope = QualificationEnvelopeIdentityV1 {
+        qualification_record_schema_version: 1,
+        qualification_id: record.qualification_id().into(),
+        policy_version: record.policy_version().into(),
+        protected_policy_sha256: record.protected_policy_sha256().into(),
+        compatibility: record.compatibility().clone(),
+    };
+
+    require_equal(
+        "supervised_endurance.evidence_path",
+        &authorization.evidence_path.as_str(),
+        &evidence_path,
+    )?;
+    require_equal(
+        "supervised_endurance.evidence_sha256",
+        &authorization.evidence_sha256(),
+        &sha256_hex(evidence_source.as_bytes()).as_str(),
+    )?;
+    require_equal(
+        "supervised_endurance.qualification_envelope",
+        &expected_envelope,
+        &evidence.qualification_envelope,
+    )?;
+    require_equal(
+        "supervised_endurance.completed_at",
+        &authorization.completed_at,
+        &evidence.completed_at,
+    )?;
+    if evidence.stage != "supervised-endurance"
+        || evidence.outcome.status != crate::RunOutcomeStatus::Passed
+        || !crate::endurance::supervised_endurance_is_complete(&evidence)
+    {
+        return Err(PolicyAuthorityError::InvalidIdentity {
+            artifact: "supervised endurance evidence",
+            field: "completion",
+        });
+    }
+    Ok(())
 }
 
 pub fn admit_policy_authority<P>(

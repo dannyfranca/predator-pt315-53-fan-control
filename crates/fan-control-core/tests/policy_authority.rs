@@ -1,10 +1,13 @@
 use std::path::Path;
 
+#[cfg(unix)]
+use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
 use fan_control_core::{
     CompatibilityAdmissionError, CompatibilityObservation, FakePlatform, FilePermissions,
     PolicyAuthorityAdmissionError, PolicyAuthorityError, QUALIFICATION_RECORD_PATH,
     SUPERVISED_ENDURANCE_EVIDENCE_PATH, TachometerCalibrationError, acquire_controller_ownership,
-    admit_policy_authority, discover_acer_hwmon,
+    admit_policy_authority, discover_acer_hwmon, validate_qualification_evidence_v2,
 };
 
 mod support;
@@ -17,6 +20,99 @@ use support::{
 const OTHER_SOURCE_COMMIT: &str = "fedcba9876543210fedcba9876543210fedcba98";
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
+
+#[test]
+fn retained_record_validation_rejects_incomplete_or_rebound_authorization() {
+    let record = matching_record(PROTECTED_POLICY);
+    let evidence = matching_endurance_evidence(PROTECTED_POLICY);
+    let path = Path::new(SUPERVISED_ENDURANCE_EVIDENCE_PATH);
+    validate_qualification_evidence_v2(&record, &evidence, path).unwrap();
+
+    for invalid in [
+        record.replacen("\"schema_version\":2", "\"schema_version\":3", 1),
+        record.replacen(
+            "\"stage\":\"supervised-endurance\"",
+            "\"stage\":\"other\"",
+            1,
+        ),
+        record.replacen("\"policy_version\":\"1.0.0\",", "", 1),
+        record.replacen(&sha256(PROTECTED_POLICY), &"0".repeat(64), 1),
+    ] {
+        assert!(
+            validate_qualification_evidence_v2(&invalid, &evidence, path).is_err(),
+            "invalid retained authorization was accepted: {invalid}"
+        );
+    }
+    assert!(
+        validate_qualification_evidence_v2(&record, &evidence, Path::new("/other/evidence.json"))
+            .is_err()
+    );
+
+    let original: serde_json::Value = serde_json::from_str(&evidence).unwrap();
+    let mut altered_evidence = Vec::new();
+
+    let mut wrong_stage = original.clone();
+    wrong_stage["stage"] = "other".into();
+    altered_evidence.push(("stage", wrong_stage, false));
+
+    let mut failed = original.clone();
+    failed["outcome"]["status"] = "failed".into();
+    altered_evidence.push(("outcome", failed, false));
+
+    let mut rebound_envelope = original.clone();
+    rebound_envelope["qualification_envelope"]["policy_version"] = "2.0.0".into();
+    altered_evidence.push(("envelope", rebound_envelope, false));
+
+    let mut rebound_completion = original.clone();
+    rebound_completion["completed_at"]["wall_unix_millis"] = 1_787_695_200_005_i64.into();
+    altered_evidence.push(("completed_at", rebound_completion, false));
+
+    let mut invalid_bound_completion = original.clone();
+    invalid_bound_completion["completed_at"]["monotonic_millis"] = 0.into();
+    invalid_bound_completion["completed_at"]["wall_unix_millis"] = 0.into();
+    altered_evidence.push(("bound invalid completion", invalid_bound_completion, true));
+
+    let mut incomplete = original;
+    incomplete["process_stops"].as_array_mut().unwrap().pop();
+    altered_evidence.push(("completeness", incomplete, false));
+
+    for (field, altered, bind_completed_at) in altered_evidence {
+        let altered = serde_json::to_string(&altered).unwrap();
+        let rebound_record = record_bound_to_evidence(&record, &altered, bind_completed_at);
+        assert!(
+            validate_qualification_evidence_v2(&rebound_record, &altered, path).is_err(),
+            "altered evidence field was accepted after digest rebinding: {field}"
+        );
+    }
+}
+
+fn record_bound_to_evidence(record: &str, evidence: &str, bind_completed_at: bool) -> String {
+    let mut record: serde_json::Value = serde_json::from_str(record).unwrap();
+    let evidence_value: serde_json::Value = serde_json::from_str(evidence).unwrap();
+    record["supervised_endurance"]["evidence_sha256"] = sha256(evidence).into();
+    if bind_completed_at {
+        record["supervised_endurance"]["completed_at"] = evidence_value["completed_at"].clone();
+    }
+    serde_json::to_string(&record).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn retained_record_validation_rejects_non_utf8_evidence_paths() {
+    let record = matching_record(PROTECTED_POLICY);
+    let evidence = matching_endurance_evidence(PROTECTED_POLICY);
+    let path = Path::new(OsStr::from_bytes(
+        b"/var/lib/pt31553-fan-control/evidence/\xff.json",
+    ));
+
+    assert!(matches!(
+        validate_qualification_evidence_v2(&record, &evidence, path),
+        Err(PolicyAuthorityError::InvalidIdentity {
+            artifact: "supervised endurance evidence",
+            field: "evidence_path",
+        })
+    ));
+}
 
 #[test]
 fn exact_policy_record_and_live_envelope_are_admitted_together() {
