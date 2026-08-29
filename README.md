@@ -1453,6 +1453,166 @@ sudo /usr/bin/systemctl restart pt31553-fand.service
 Do not reset or restart around an unresolved `PT31553_FAULT_ID`. If Auto cannot
 be confirmed immediately, shut down the machine; do not attempt rearm or reboot.
 
+## Canonical runbook: maintenance, rollback, and retirement
+
+This section is the only supported path for recovery, package changes,
+requalification, promotion, uninstall, candidate retirement, and replacement by
+upstream code. Stop at the first failed check. Package installation, an update,
+a successful build, or upstream acceptance never inherits runtime authority.
+Keep the stock standard and LTS entries installed and keep the last qualified
+candidate archived until its replacement passes the required qualification.
+
+### Recover before changing anything
+
+Treat an unsafe temperature, unexpected mode or RPM, missing telemetry, daemon
+fault, planned update, rollback, and removal as the same safety boundary. In
+this order: contain the exact dedicated workload cgroup and prove it empty, stop
+the sleep guard, stop the daemon, request independent restoration, and confirm
+both fans report Firmware Auto (`2`). A supported workload launcher must create
+its cgroup below `/sys/fs/cgroup/pt31553-qualification/` and atomically install
+the root-owned record before starting load. It removes both only after the
+cgroup is empty. This source revision has no production workload launcher, so
+the only valid idle state is that both record and hierarchy are absent. A stale,
+broad, or untrusted record is a failed recovery, never permission to guess
+process names. The present-record command branch below is a future-only contract:
+it is reachable only after a package-owned production launcher is installed;
+do not create or substitute that executable manually. Stop the
+sleep guard before the daemon because a prepared guard can otherwise resume the
+daemon. The daemon stop hook requests Auto, but it is not the independent
+confirmation; run the separately installed restoration command afterward:
+
+```sh
+set -eu
+workload_cgroup_record=/run/pt31553-fan-control/active-workload-cgroup
+workload_cgroup_root=/sys/fs/cgroup/pt31553-qualification
+workload_launcher=/usr/bin/pt31553-fan-workload-launcher
+if test -x "$workload_launcher"; then
+  test -f "$workload_launcher"
+  test ! -L "$workload_launcher"
+  test "$(/usr/bin/pacman -Qqo "$workload_launcher")" = pt31553-fan-control
+  test "$(sudo /usr/bin/stat -c '%U:%G:%a:%h' "$workload_launcher")" = root:root:755:1
+  test -e "$workload_cgroup_record" || test -L "$workload_cgroup_record"
+  test ! -L "$workload_cgroup_record"
+  test -f "$workload_cgroup_record"
+  test "$(sudo /usr/bin/stat -c '%U:%G:%a:%h' "$workload_cgroup_record")" = root:root:400:1
+  workload_cgroup=$(sudo /usr/bin/cat "$workload_cgroup_record")
+  case "$workload_cgroup" in "$workload_cgroup_root"/workload-*) ;; *) exit 1 ;; esac
+  test "$workload_cgroup" = "$(/usr/bin/realpath -e "$workload_cgroup")"
+  test -f "$workload_cgroup/cgroup.kill"
+  /usr/bin/printf '1\n' | sudo /usr/bin/tee "$workload_cgroup/cgroup.kill" >/dev/null
+  sudo /usr/bin/timeout --foreground 30 /usr/bin/sh -eu -c '
+    while :; do
+      workload_pids=$(/usr/bin/find "$1" -name cgroup.procs -type f \
+        -exec /usr/bin/cat {} +)
+      test -z "$workload_pids" && break
+      /usr/bin/sleep 0.1
+    done
+  ' sh "$workload_cgroup"
+  workload_pids=$(sudo /usr/bin/find "$workload_cgroup" \
+    -name cgroup.procs -type f -exec /usr/bin/cat {} +)
+  test -z "$workload_pids"
+else
+  test ! -e "$workload_launcher"
+  test ! -L "$workload_launcher"
+  test ! -e "$workload_cgroup_record"
+  test ! -L "$workload_cgroup_record"
+  test ! -e "$workload_cgroup_root"
+fi
+sudo /usr/bin/systemctl stop pt31553-fan-sleep-guard.service
+sudo /usr/bin/systemctl stop pt31553-fand.service || true
+sudo /usr/bin/pt31553-fan-restore --restore
+sudo /usr/bin/systemctl disable \
+  pt31553-fand.service pt31553-fan-sleep-guard.service
+# A disable operation does not stop an unexpectedly restarted process.
+sudo /usr/bin/systemctl stop pt31553-fand.service
+sudo /usr/bin/systemctl reset-failed pt31553-fand.service
+sudo /usr/bin/pt31553-fan-restore --restore
+test "$(/usr/bin/systemctl is-active \
+  pt31553-fan-sleep-guard.service || true)" = inactive
+test "$(/usr/bin/systemctl is-active pt31553-fand.service || true)" = inactive
+for unit in pt31553-fand.service pt31553-fan-sleep-guard.service; do
+  test "$(/usr/bin/systemctl is-enabled "$unit")" = disabled
+done
+```
+
+Any invalid workload record, failed cgroup traversal, containment timeout, or
+nonempty final PID snapshot aborts before controller shutdown. In that state,
+do not change packages, remove components, or reboot; power the machine off
+immediately. Treat it as failed restoration and preserve evidence only after a
+later cold stock boot if safe.
+
+The restoration helper owns the controller lock, requests Auto for CPU and GPU
+independently, and returns success only after both enable readbacks are `2`. If
+an Auto request fails while a fan is confirmed in Custom, it requests verified
+maximum containment and keeps retrying Auto. Maximum containment is temporary
+protection, not successful restoration or permission to continue.
+
+If either readback cannot be confirmed immediately, stop all load, keep AC
+connected, do not terminate the recovery helper, do not remove either the
+controller or candidate kernel, and do not reboot. Shut down the machine
+immediately; do not delay shutdown to collect evidence and do not attempt
+another Custom write, module unload, raw EC/WMI access, package change, or warm
+boot. After a later cold firmware initialization into a known stock boot,
+preserve the prior-boot journal and failure evidence if safe. Follow
+[`SECURITY.md`](SECURITY.md) for private reporting. Custom control remains
+disabled.
+
+Removal is forbidden unless both fans have confirmed Firmware Auto. After that
+confirmation, use the checked `Return to stock before removal` procedure below.
+It records the candidate-side confirmation, performs a one-shot stock LTS
+recovery boot, proves the stock driver cannot issue Custom-mode writes, and
+only then removes exact packages without recursive dependency removal.
+
+### Classify every kernel and controller update
+
+Always start with the recovery sequence above. Install a successor disabled and
+side-by-side, leave a stock entry as the persistent default, and compare the
+candidate with the protected policy and last qualification. Apply exactly one
+of these paths:
+
+| Change | Required path |
+| --- | --- |
+| Identical qualified kernel, module, controller executables, authority artifacts, and protected policy; only an editable configuration changes | Validate the complete configuration against the protected envelope, restart normally, and perform fresh arming. Reject a less-conservative configuration. This is not a hardware requalification. |
+| Same-code kernel rebuild: package/source behavior, module name/provenance, signers, Secure Boot state, hardware identity, fan mapping, control path, and protected policy are unchanged; only release, image hash, module path/hash, or vermagic changes | Run all six abbreviated checks below. Do not reuse the old promotion claim. |
+| Any controller executable or controller source change, or any BIOS, fan or board, fan mapping or control path, hardware identity, behavior-changing kernel or driver, signer/Secure Boot trust, or changed or weakened protected policy | Full requalification through stages 1–7 of the qualification runbook. |
+| Unknown, ambiguous, incompletely evidenced, failed, or different result | Full requalification. Never choose the shorter path by assumption. |
+
+The same-code kernel rebuild path contains exactly these ordered checks:
+
+1. offline identity and ABI;
+2. Firmware Auto restoration;
+3. arming maximum and tachometer;
+4. one uninterrupted 20-minute combined AC workload, assessed against the
+   qualified comparison limits;
+5. service-stop restoration; and
+6. reboot restoration.
+
+Any abbreviated-check difference or failure expands to full requalification.
+An interrupted or shorter combined workload is a difference, not a partial
+pass. A controller packaging change may use abbreviated requalification only
+when the installed controller executables are byte-identical to the qualified
+ones and every same-code kernel condition above holds; otherwise it is an
+`Any controller executable or controller source change` and requires full
+requalification.
+
+> **ABBREVIATED PATH BLOCKED IN THIS REVISION.** The library makes the
+> fail-closed abbreviated-versus-full decision, but this package has no reviewed
+> production runner, result format, or authority publisher for the six checks.
+> Do not execute them manually, synthesize `AbbreviatedRecheckResults`, or reuse
+> the old record. Until a later package supplies those reviewed entrypoints, a
+> same-code rebuild stays disabled and must use the full qualification path.
+> The full live path is also blocked by the qualification runbook's current
+> implementation boundary. Therefore this revision cannot authorize any successor.
+
+Keep the successor disabled throughout either requalification path. A future
+reviewed runner must bind every result to the baseline record, candidate
+compatibility, protected-policy hash, fixed check identities, continuous
+20-minute workload evidence, and pass/different/fail outcome; only then may it
+atomically create a new qualification record and evidence set for the
+successor. Then perform promotion and publish a new versioned rollback archive
+before enabling it. Until those steps finish, use the prior qualified candidate
+or remain on the stock boot; never install over or retire the retained build.
+
 ### Sanitize qualification evidence and check promotion
 
 Promotion is a manual, local operation after supervised endurance succeeds. Complete the
@@ -1858,8 +2018,10 @@ stop is fail-closed.
 set -eu
 lts_entry='REPLACE_WITH_STOCK_LTS_ENTRY_ID'
 candidate_entry='REPLACE_WITH_PT31553_CANDIDATE_ENTRY_ID'
+candidate_release='REPLACE_WITH_RUNNING_CANDIDATE_RELEASE'
 recovery_attestation=/var/lib/pt31553-fan-control/recovery-to-stock.json
-test "$(/usr/bin/uname -r)" = 7.1.8-cachyos-pt31553
+case "$candidate_release" in REPLACE_*|*' '*|'') exit 1 ;; esac
+test "$(/usr/bin/uname -r)" = "$candidate_release"
 sudo /usr/bin/systemctl stop pt31553-fan-sleep-guard.service
 sudo /usr/bin/systemctl stop pt31553-fand.service || true
 test "$(/usr/bin/systemctl is-active pt31553-fan-sleep-guard.service || true)" = inactive
@@ -1888,13 +2050,14 @@ cleanup_recovery_attestation_temps() {
   sudo /usr/bin/rm -f -- "$attestation_target"
 }
 trap cleanup_recovery_attestation_temps EXIT HUP INT TERM
-/usr/bin/python3 -I - "$candidate_entry" "$lts_entry" >"$attestation_source" <<'PY'
+/usr/bin/python3 -I - "$candidate_entry" "$lts_entry" \
+  "$candidate_release" >"$attestation_source" <<'PY'
 import json
 import pathlib
 import subprocess
 import sys
 
-candidate_id, lts_id = sys.argv[1:]
+candidate_id, lts_id, candidate_release = sys.argv[1:]
 entries = json.loads(subprocess.run(
     ["/usr/bin/bootctl", "list", "--json=short"],
     check=True,
@@ -1909,7 +2072,7 @@ print(json.dumps({
     "source_boot_id": pathlib.Path(
         "/proc/sys/kernel/random/boot_id"
     ).read_text().strip(),
-    "source_kernel_release": "7.1.8-cachyos-pt31553",
+    "source_kernel_release": candidate_release,
     "source_entry": candidate_id,
     "target_entry": lts_id,
 }, separators=(",", ":")))
@@ -2057,6 +2220,7 @@ set -eu
 stock_entry='REPLACE_WITH_STOCK_STANDARD_ENTRY_ID'
 lts_entry='REPLACE_WITH_STOCK_LTS_ENTRY_ID'
 candidate_entry='REPLACE_WITH_PT31553_CANDIDATE_ENTRY_ID'
+candidate_release='REPLACE_WITH_RUNNING_CANDIDATE_RELEASE'
 recovery_attestation=/var/lib/pt31553-fan-control/recovery-to-stock.json
 remove_controller=0 # set to 1 only when controller removal is desired
 case "$remove_controller" in 0|1) ;; *) exit 1 ;; esac
@@ -2069,7 +2233,8 @@ case "$previous_boot_id" in
 esac
 test "${#previous_boot_id}" = 32
 sudo /usr/bin/python3 -I - "$recovery_attestation" \
-  "$candidate_entry" "$lts_entry" "$previous_boot_id" <<'PY'
+  "$candidate_entry" "$lts_entry" "$previous_boot_id" \
+  "$candidate_release" <<'PY'
 import json
 import pathlib
 import sys
@@ -2081,7 +2246,7 @@ assert set(attestation) == {
 }
 assert attestation["schema_version"] == 1
 assert attestation["firmware_auto_confirmed"] is True
-assert attestation["source_kernel_release"] == "7.1.8-cachyos-pt31553"
+assert attestation["source_kernel_release"] == sys.argv[5]
 assert attestation["source_entry"] == sys.argv[2]
 assert attestation["target_entry"] == sys.argv[3]
 current_boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
@@ -2199,7 +2364,7 @@ for path in "$candidate_image" "$candidate_initramfs"; do
   fi
 done
 if test "$candidate_kernel_installed" = 1 && test -e "$candidate_image"; then
-  /usr/bin/cmp /usr/lib/modules/7.1.8-cachyos-pt31553/vmlinuz \
+  /usr/bin/cmp "/usr/lib/modules/$candidate_release/vmlinuz" \
     "$candidate_image"
 fi
 if test -e "$candidate_initramfs"; then
@@ -2382,13 +2547,25 @@ test -x "$last_qualified/pt31553-fan-qualify"
 archived_controller_version=$(/usr/bin/pacman -Qp "$archived_controller")
 installed_controller_version=$(/usr/bin/pacman -Q pt31553-fan-control 2>/dev/null || true)
 if test -n "$installed_controller_version"; then
-  test -x /usr/bin/pt31553-fan-restore
   for unit in pt31553-fand.service pt31553-fan-sleep-guard.service; do
     /usr/bin/systemctl cat "$unit" >/dev/null
     test "$(/usr/bin/systemctl is-enabled "$unit")" = disabled
     test "$(/usr/bin/systemctl is-active "$unit" || true)" = inactive
   done
-  sudo /usr/bin/pt31553-fan-restore --restore
+  running_module=$(/usr/bin/modinfo -n acer_wmi)
+  running_module_owner=$(/usr/bin/pacman -Qqo "$running_module")
+  case "$running_module_owner" in
+    linux-cachyos|linux-cachyos-lts)
+      # Stock has no recovery PWM ABI. Rely on the already completed
+      # candidate-side Auto attestation and stock-side absence checks.
+      ! /usr/bin/pgrep -x pt31553-fand >/dev/null
+      ;;
+    linux-cachyos-pt31553)
+      test -x /usr/bin/pt31553-fan-restore
+      sudo /usr/bin/pt31553-fan-restore --restore
+      ;;
+    *) exit 1 ;;
+  esac
 fi
 if test "$installed_controller_version" != "$archived_controller_version"; then
   sudo /usr/bin/pacman -U "$archived_controller"
@@ -2412,6 +2589,152 @@ An upgrade with the same package names may replace the installed candidate,
 but it must not delete the last-qualified artifacts; they remain available for
 reinstallation from a stock boot. Retire them only after the successor is
 formally qualified.
+
+### Roll back to the retained candidate
+
+Use this path after a successor fails installation, boot, requalification, or
+operation. Choose the branch that matches the last successful boundary:
+
+- If the successor booted, run `Recover before changing anything` on that boot,
+  then run the complete `Return to stock before removal` procedure with the
+  failed successor's exact entry ID and running release substituted for
+  `candidate_entry` and `candidate_release`.
+- If installation failed before any successor boot, do not run the candidate-
+  only restoration helper from stock. Fail the package operation, clear the EFI
+  immutable flag, restore the recorded stock default, and remain in the same
+  clean stock boot recorded by `Record the stock recovery entries`. Require the
+  selected and default entries to remain stock, both controller units disabled
+  and inactive, no daemon process, and no successor boot journal. A missing
+  clean-boot record or any uncertainty leaves this branch. From the verified
+  clean stock boot, use the checked LTS entry and image validation in `Return to
+  stock before removal` to select the LTS entry for one boot; the candidate Auto
+  attestation is inapplicable only because the clean-boot record proves no
+  candidate boot or control attempt occurred. After the LTS boot, repeat its
+  stock module, endpoint-absence, and inactive-unit checks. The guarded retained-
+  package transaction below replaces any partially installed same-name
+  successor artifacts without a separate removal.
+- If a successor started booting but never became reachable enough to run
+  recovery, power off; do not remove or change its packages. Cold-start through
+  firmware into the checked stock LTS entry, then prove the LTS module, absent
+  Custom endpoints, inactive units, and absent daemon exactly as in `Return to
+  stock before removal`. Because that stock proof cannot attest the prior fan
+  mode, removal and replacement remain forbidden. Do not run the archive recheck
+  or guarded install below: the recheck may replace the controller and the
+  install replaces the failed kernel packages before Auto is confirmed. This
+  revision does not provide a separately named, preinstalled recovery candidate,
+  so rollback from this state is blocked. Leave all failed-successor artifacts
+  intact, preserve evidence if safe, and shut down. A future procedure may
+  unblock this branch only by provisioning and verifying a separately named,
+  recovery-capable candidate before successor installation; booting that
+  already-present candidate must replace no successor artifact. It must run the
+  independent restoration helper and require both Auto readbacks to be `2`
+  before this rollback may restart. Failure returns to immediate shutdown and
+  the recovery boundary.
+
+The two recoverable branches converge only on a proven stock LTS recovery boot
+with both controller units disabled and inactive. Complete `Reverify the retained
+candidate before a successor` above against the retained archive. Its stock
+branch deliberately does not call `pt31553-fan-restore`. After a reachable
+successor failure it relies on the prior candidate-side Auto attestation plus
+the completed stock-side absence checks. After a pre-boot install failure it
+relies on the clean-stock-boot proof that no candidate or control attempt ran,
+plus the same absence checks. The inaccessible-boot branch does not converge
+here until a separately installed recovery candidate has produced a new Auto
+attestation; removal stays forbidden. The recheck restores the archived
+controller package when necessary and leaves it disabled.
+
+Reinstall only the three immutable, reverified archived packages. Their exact
+names are part of this candidate's package-provenance contract; do not use a
+glob or recursive package operation. Bind the archived inputs first:
+
+```sh
+set -eu
+last_qualified=/var/lib/pt31553-fan-control/rollback/pt31553-last-qualified-7.1.8-1
+artifact_dir="$last_qualified/build-output"
+kernel_package="$artifact_dir/linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst"
+headers_package="$artifact_dir/linux-cachyos-pt31553-headers-7.1.8-1-x86_64.pkg.tar.zst"
+nvidia_package="$artifact_dir/linux-cachyos-pt31553-nvidia-open-7.1.8-1-x86_64.pkg.tar.zst"
+test "$(/usr/bin/pacman -Qp "$kernel_package")" = \
+  'linux-cachyos-pt31553 7.1.8-1'
+test "$(/usr/bin/pacman -Qp "$headers_package")" = \
+  'linux-cachyos-pt31553-headers 7.1.8-1'
+test "$(/usr/bin/pacman -Qp "$nvidia_package")" = \
+  'linux-cachyos-pt31553-nvidia-open 7.1.8-1'
+```
+
+Next rerun `Record the stock recovery entries`. Then rerun the complete
+`Install without changing the default` procedure from its first `set -eu`, not
+from its `pacman -U` command. Use the retained archive for `artifact_dir`,
+`package-provenance-v1.json`, package-set signature, and all three public
+certificates; invoke its bundled verifier revision. Its stock-default EFI
+guard, immutable flag, cleanup trap, archive verification, and exact three-file
+`pacman -U` transaction are mandatory and must surround the package hooks.
+Continue through every remaining block to recreate and verify the candidate
+image, initramfs, and BLS entry, prove the stock entry is still the persistent
+default, and select the retained candidate for one boot only. Do not omit or
+shorten any block merely because this candidate passed in the past.
+
+On that one-shot candidate boot, repeat the existing disabled-candidate checks,
+validate the archived qualification and evidence with the archived validator,
+and independently confirm Firmware Auto:
+
+```sh
+set -eu
+last_qualified=/var/lib/pt31553-fan-control/rollback/pt31553-last-qualified-7.1.8-1
+for unit in pt31553-fand.service pt31553-fan-sleep-guard.service; do
+  test "$(/usr/bin/systemctl is-enabled "$unit")" = disabled
+  test "$(/usr/bin/systemctl is-active "$unit" || true)" = inactive
+done
+"$last_qualified/pt31553-fan-qualify" validate-records \
+  --qualification-record "$last_qualified/qualification.json" \
+  --evidence "$last_qualified/supervised-endurance.json" \
+  --authorized-evidence-path \
+    /var/lib/pt31553-fan-control/evidence/supervised-endurance.json
+sudo /usr/bin/pt31553-fan-restore --restore
+```
+
+This restores the last qualified package and boot candidate, not runtime
+authorization for the current source revision. Keep it disabled. A future
+operational package may rearm only after its normal authority validation binds
+the installed hashes, archived protected policy, qualification record, and
+evidence without drift. Any mismatch returns to the stock boot and full
+requalification; do not regenerate or edit archived authority.
+
+### Exit through upstream
+
+The preferred long-term exit is an accepted in-tree `acer_wmi` change, but the
+evidence boundary remains the exact Acer Predator `PT315-53`, board
+`Civic_TLS`, and BIOS V1.17. Do not prepare or submit the control change until
+this exact machine has passed both ordered local gates: the telemetry-only
+Predator-v4 stage and the separate PWM stage, followed by the complete
+qualification ladder. A telemetry-only result is not evidence for PWM.
+
+After those two local evidence stages pass, squash the qualified delta into one
+narrow upstream patch: add only the exact Acer / Predator PT315-53 / Civic_TLS
+DMI quirk with both `.predator_v4 = 1` and `.pwm = 1`. Include the commit
+tested, CachyOS/kernel/module/Secure Boot identities, the exact two-fan endpoint
+map, initial and restored Auto readbacks, and the smallest sanitized
+qualification excerpt required by the relevant Linux maintainers. Follow
+[`CONTRIBUTING.md`](CONTRIBUTING.md) and keep raw evidence private.
+
+Do not generalize the DMI match to a product family, nearby model, board alias,
+BIOS range, distribution, force-capability path, or raw WMI/EC backend. Evidence
+from another machine cannot widen this declaration, and this machine's
+promotion does not authorize another machine. A maintainer request for broader
+support requires separate model-specific evidence and review.
+
+Upstream acceptance does not preserve qualification. Treat the first released
+or backported upstream kernel as a behavior-changing driver update: build it as
+a new signed side-by-side candidate, keep it disabled and non-default, and run
+it through package provenance plus the complete qualification ladder. It must
+be promoted only after it passes full requalification on this exact machine.
+
+Retain the local-patch candidate and its immutable rollback archive throughout
+that process. Only then retire the local-patch candidate: after the upstream
+candidate passes full requalification, receives its own promotion claim and
+archive, independently restores both fans to Auto, and completes the checked
+stock LTS recovery boot and removal procedure. Keep at least the last qualified
+archive until a later qualified successor replaces it.
 
 ## Project boundary
 
