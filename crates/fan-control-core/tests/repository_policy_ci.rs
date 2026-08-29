@@ -279,8 +279,12 @@ fn workflow_runs_the_complete_policy_only_when_manually_requested() {
     let checkout_options = field(checkout, "with")
         .as_mapping()
         .expect("checkout options are a mapping");
-    assert_eq!(checkout_options.len(), 1);
+    assert_eq!(checkout_options.len(), 2);
     assert_eq!(field(checkout_options, "fetch-depth").as_i64(), Some(0));
+    assert_eq!(
+        field(checkout_options, "persist-credentials").as_bool(),
+        Some(false)
+    );
 
     let chown = named_step(steps, 2, "Prepare non-root checkout");
     assert_eq!(
@@ -313,6 +317,48 @@ fn workflow_runs_the_complete_policy_only_when_manually_requested() {
             "su builder -c \"cd '$GITHUB_WORKSPACE' && CARGO_NET_OFFLINE=true scripts/check-repository-policy\""
         )
     );
+}
+
+#[test]
+fn dependency_policy_is_fail_closed_and_explicit() {
+    let source = fs::read_to_string(workspace().join("deny.toml")).expect("read dependency policy");
+    let actual: toml::Value = toml::from_str(&source).expect("parse dependency policy");
+    let expected: toml::Value = toml::from_str(
+        r#"
+[graph]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+ignore = []
+
+[licenses]
+allow = ["Apache-2.0", "MIT", "Unicode-3.0"]
+confidence-threshold = 0.8
+
+[licenses.private]
+ignore = false
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+"#,
+    )
+    .expect("parse expected dependency policy");
+
+    assert_eq!(actual, expected, "deny.toml policy changed");
 }
 
 #[test]
@@ -377,17 +423,23 @@ fn policy_preserves_empty_and_space_containing_markdown_lists() {
 #[test]
 fn policy_rejects_live_lifecycle_opt_ins_before_invoking_tools() {
     let root = workspace();
-    let output = Command::new("/usr/bin/bash")
-        .arg(root.join("scripts/check-repository-policy"))
-        .current_dir(&root)
-        .env("PT31553_RUN_SYSTEMD_LIFECYCLE", "1")
-        .env("PATH", "")
-        .output()
-        .expect("run repository policy gate");
+    for live_opt_in in [
+        "PT31553_RUN_SYSTEMD_LIFECYCLE",
+        "PT31553_USE_SYSTEM_MANAGER",
+    ] {
+        let output = Command::new("/usr/bin/bash")
+            .arg(root.join("scripts/check-repository-policy"))
+            .current_dir(&root)
+            .env_clear()
+            .env(live_opt_in, "1")
+            .env("PATH", "")
+            .output()
+            .expect("run repository policy gate");
 
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("refusing live-hardware opt-in PT31553_RUN_SYSTEMD_LIFECYCLE")
-    );
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("refusing live-hardware opt-in {live_opt_in}"))
+        );
+    }
 }

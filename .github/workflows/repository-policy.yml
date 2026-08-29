@@ -19,6 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Prepare non-root checkout
         run: |
           chown -R builder:builder "$GITHUB_WORKSPACE"
