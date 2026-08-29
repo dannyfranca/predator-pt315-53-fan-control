@@ -221,6 +221,63 @@ fn write_executable(path: &Path, contents: &str) {
 }
 
 #[test]
+fn every_github_workflow_is_manual_only() {
+    let workflows = workspace().join(".github/workflows");
+    let mut paths = fs::read_dir(&workflows)
+        .expect("read workflow directory")
+        .filter_map(|entry| {
+            let entry = entry.expect("read workflow entry");
+            let file_type = entry.file_type().expect("read workflow entry type");
+            let path = entry.path();
+            (file_type.is_file()
+                && matches!(
+                    path.extension().and_then(|value| value.to_str()),
+                    Some("yml" | "yaml")
+                ))
+            .then_some(path)
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    assert!(!paths.is_empty(), "repository has no workflows to verify");
+
+    for path in paths {
+        let display = path.display();
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read workflow {display}: {error}"));
+        let workflow: Value = serde_yaml::from_str(&source)
+            .unwrap_or_else(|error| panic!("parse workflow {display}: {error}"));
+        let workflow = workflow
+            .as_mapping()
+            .unwrap_or_else(|| panic!("workflow root is a mapping: {display}"));
+        let trigger_value = workflow
+            .get(Value::String("on".into()))
+            .unwrap_or_else(|| panic!("workflow has an on field: {display}"));
+        let mut triggers = match trigger_value {
+            Value::String(trigger) => vec![trigger.as_str()],
+            Value::Sequence(triggers) => triggers
+                .iter()
+                .map(|trigger| {
+                    trigger
+                        .as_str()
+                        .unwrap_or_else(|| panic!("workflow trigger is a string: {display}"))
+                })
+                .collect(),
+            Value::Mapping(triggers) => triggers
+                .keys()
+                .map(|trigger| {
+                    trigger
+                        .as_str()
+                        .unwrap_or_else(|| panic!("workflow trigger is a string: {display}"))
+                })
+                .collect(),
+            _ => panic!("workflow triggers use a supported YAML form: {display}"),
+        };
+        triggers.sort_unstable();
+        assert_eq!(triggers, ["workflow_dispatch"], "{display} is manual-only");
+    }
+}
+
+#[test]
 fn workflow_runs_the_complete_policy_only_when_manually_requested() {
     let source = fs::read_to_string(workspace().join(".github/workflows/repository-policy.yml"))
         .expect("read repository policy workflow");
