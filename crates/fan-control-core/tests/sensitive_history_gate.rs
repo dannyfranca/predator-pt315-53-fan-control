@@ -1,3 +1,4 @@
+use sha2::Digest;
 use std::fs;
 use std::io::Write;
 use std::mem::size_of;
@@ -117,6 +118,104 @@ fn accepts_public_openpgp_signature_checksum_in_commit_payloads() {
 
     assert!(gate(&root).success());
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn accepts_digest_info_inside_a_valid_ssh_signature() {
+    let digest_info = [
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+        0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    ];
+    let mut sshsig = b"SSHSIG".to_vec();
+    sshsig.extend(1_u32.to_be_bytes());
+    for field in [
+        b"public-key".as_slice(),
+        b"git".as_slice(),
+        b"".as_slice(),
+        b"sha256".as_slice(),
+        digest_info.as_slice(),
+    ] {
+        sshsig.extend(u32::try_from(field.len()).unwrap().to_be_bytes());
+        sshsig.extend(field);
+    }
+    let encoded = base64_bytes(&sshsig);
+    let payload = format!(
+        "gpgsig -----BEGIN SSH SIGNATURE-----\n {}\n -----END SSH SIGNATURE-----\n",
+        String::from_utf8_lossy(&encoded)
+    );
+    let root = repository();
+    fs::write(root.join("public-signature.commit"), payload).unwrap();
+    git(&root, &["add", "public-signature.commit"]);
+    git(
+        &root,
+        &["commit", "-q", "-m", "retain public SSH signature"],
+    );
+    let output = gate_command(&root).output().unwrap();
+    assert!(
+        output.status.success(),
+        "history rejected SSH signature: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn module_signature_masking_requires_successful_verification() {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .to_path_buf();
+    let source = r#"
+import importlib.machinery
+import importlib.util
+import sys
+loader = importlib.machinery.SourceFileLoader("history_scanner", sys.argv[1])
+spec = importlib.util.spec_from_loader("history_scanner", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+payload = b"module payload"
+signer = b"signer"
+key_id = b"key-id"
+signature = b"\x1f\x8bpublic detached signature"
+trailer = bytes((0, 6, 2, len(signer), len(key_id), 0, 0, 0))
+trailer += len(signature).to_bytes(4, "big")
+content = payload + signer + key_id + signature + trailer + module.MODULE_SIGNATURE_MAGIC
+signature_at = len(payload) + len(signer) + len(key_id)
+
+class Result:
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+module.probe = lambda command, budget: Result(0)
+masked = module.mask_verified_module_signature(
+    content, frozenset((b"certificate",)), module.inspection_budget()
+)
+module.probe = lambda command, budget: Result(1)
+unverified = module.mask_verified_module_signature(
+    content, frozenset((b"certificate",)), module.inspection_budget()
+)
+print(
+    int(masked[signature_at:signature_at + len(signature)] == b"\0" * len(signature)),
+    int(unverified == content),
+)
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "module signature masking harness failed"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "1 1",
+        "only a verified detached module signature may be masked"
+    );
 }
 
 #[test]
@@ -372,6 +471,62 @@ fn output_tree_normalizes_mtree_digests_without_skipping_encoded_secrets() {
 }
 
 #[test]
+fn output_tree_masks_only_sha256_digests_verified_against_tree_files() {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .to_path_buf();
+    let source = r#"
+import importlib.machinery
+import importlib.util
+import sys
+loader = importlib.machinery.SourceFileLoader("history_scanner", sys.argv[1])
+spec = importlib.util.spec_from_loader("history_scanner", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+secret = b"-----BEGIN PRIVATE KEY-----\nc2VjcmV0\n-----END PRIVATE KEY-----\n"
+secret += b"\n" * (-len(secret) % 32)
+chunks = [secret[index:index + 32].hex().encode() for index in range(0, len(secret), 32)]
+content = b"".join(
+    digest + b"  file-" + str(index).encode() + b"\n"
+    for index, digest in enumerate(chunks)
+)
+verified = {b"file-" + str(index).encode(): digest for index, digest in enumerate(chunks)}
+mismatched = dict(verified)
+mismatched[b"file-0"] = b"0" * 64
+print(
+    int(module.sensitive(content)),
+    int(module.sensitive(module.mask_verified_sha256sum_digests(content, verified))),
+    int(module.sensitive(module.mask_verified_sha256sum_digests(content, mismatched))),
+)
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "SHA256SUMS masking harness failed");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "1 0 1",
+        "only digests matching stable tree files may be masked"
+    );
+
+    let root = temporary_fixture("sha256sum-sensitive-scanning");
+    fs::write(root.join("payload"), b"safe payload\n").unwrap();
+    let digest = sha2::Sha256::digest(b"safe payload\n");
+    fs::write(root.join("SHA256SUMS"), format!("{digest:x}  payload\n")).unwrap();
+    let accepted = tree_gate(&root, &[]);
+    assert!(
+        accepted.status.success(),
+        "rejected a verified checksum manifest: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn output_tree_inspects_archive_members_without_scanning_container_bytes_as_payload() {
     let root = temporary_fixture("archive-container-scanning");
     let harmless_asn1_decoy = b"\x30\x0b\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01";
@@ -608,6 +763,37 @@ fn accepts_incidental_legacy_cpio_magic_without_a_valid_header() {
     assert!(
         output.status.success(),
         "history rejected incidental CPIO magic: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn accepts_digest_info_without_treating_it_as_an_encrypted_private_key() {
+    let digest_info = [
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+        0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    ];
+    let tree = temporary_fixture("digest-info-tree");
+    fs::write(tree.join("digest-info.der"), digest_info).unwrap();
+    let output = tree_gate(&tree, &[]);
+    assert!(
+        output.status.success(),
+        "tree rejected DigestInfo: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(tree).unwrap();
+
+    let root = repository();
+    fs::write(root.join("digest-info.der"), digest_info).unwrap();
+    git(&root, &["add", "digest-info.der"]);
+    git(&root, &["commit", "-q", "-m", "add public digest"]);
+    let output = gate_command(&root).output().unwrap();
+    assert!(
+        output.status.success(),
+        "history rejected DigestInfo: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     fs::remove_dir_all(root).unwrap();

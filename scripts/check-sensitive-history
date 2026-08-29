@@ -80,6 +80,7 @@ UNSAFE_PATH_PARTS = (
     ".p11-kit/",
 )
 PBES2_OID = b"\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x05\x0d"
+MODULE_SIGNATURE_MAGIC = b"~Module signature appended~\n"
 MAX_BLOB = 512 * 1024 * 1024
 MAX_EMBEDDED_WORK = 8 * MAX_BLOB
 MAX_EMBEDDED_CANDIDATES = 4096
@@ -290,6 +291,18 @@ def ber_tlv(
     raise ValueError("BER child count exceeds inspection budget")
 
 
+def is_digest_algorithm_oid(content: bytes, oid: tuple[int, ...]) -> bool:
+    value = content[oid[1] : oid[2]]
+    return value in (
+        b"\x2a\x86\x48\x86\xf7\x0d\x02\x05",  # MD5
+        b"\x2b\x0e\x03\x02\x1a",  # SHA-1
+    ) or (
+        value.startswith(b"\x60\x86\x48\x01\x65\x03\x04\x02")
+        and len(value) == 9
+        and 1 <= value[-1] <= 12
+    )
+
+
 def contains_encrypted_private_key_info(content: bytes) -> bool:
     for offset, value in enumerate(content):
         if value != 0x30:
@@ -306,6 +319,7 @@ def contains_encrypted_private_key_info(content: bytes) -> bool:
             oid is not None
             and oid[0] == 0x06
             and oid[2] > oid[1]
+            and not is_digest_algorithm_oid(content, oid)
             and encrypted is not None
             and encrypted[0] == 0x04
             and encrypted[2] > encrypted[1]
@@ -327,6 +341,7 @@ def contains_encrypted_private_key_info(content: bytes) -> bool:
             oid is not None
             and oid[0] == 0x06
             and oid[2] > oid[1]
+            and not is_digest_algorithm_oid(content, oid)
             and encrypted is not None
             and encrypted[0] in (0x04, 0x24)
             and encrypted[2] > encrypted[1]
@@ -538,6 +553,78 @@ def mask_valid_signature_payloads(content: bytes) -> tuple[bytes, list[bytes]]:
             if masked_content[offset] not in (0x0A, 0x0D):
                 masked_content[offset] = 0x20
     return bytes(masked_content), ssh_tokens
+
+
+def mask_verified_module_signature(
+    content: bytes,
+    allowed_certificates: frozenset[bytes],
+    budget: dict[str, object],
+) -> bytes | None:
+    if (
+        not allowed_certificates
+        or not content.endswith(MODULE_SIGNATURE_MAGIC)
+        or len(content) < len(MODULE_SIGNATURE_MAGIC) + 12
+    ):
+        return content
+    trailer_at = len(content) - len(MODULE_SIGNATURE_MAGIC) - 12
+    trailer = content[trailer_at : trailer_at + 12]
+    algorithm, hash_algorithm, identifier, signer_length, key_id_length = trailer[:5]
+    signature_length = int.from_bytes(trailer[8:12], "big")
+    signed_length = trailer_at - signer_length - key_id_length - signature_length
+    if (
+        identifier != 2
+        or signature_length == 0
+        or algorithm > 10
+        or not 1 <= hash_algorithm <= 6
+        or signed_length <= 0
+    ):
+        return content
+    signature_at = signed_length + signer_length + key_id_length
+    signature = content[signature_at:trailer_at]
+    with (
+        tempfile.NamedTemporaryFile() as signed,
+        tempfile.NamedTemporaryFile() as detached,
+        tempfile.NamedTemporaryFile() as certificate,
+    ):
+        signed.write(content[:signed_length])
+        signed.flush()
+        detached.write(signature)
+        detached.flush()
+        for certificate_der in sorted(allowed_certificates):
+            certificate.seek(0)
+            certificate.truncate()
+            certificate.write(b"-----BEGIN CERTIFICATE-----\n")
+            certificate.write(base64.encodebytes(certificate_der))
+            certificate.write(b"-----END CERTIFICATE-----\n")
+            certificate.flush()
+            verified = probe(
+                [
+                    "openssl",
+                    "cms",
+                    "-verify",
+                    "-binary",
+                    "-inform",
+                    "DER",
+                    "-in",
+                    detached.name,
+                    "-content",
+                    signed.name,
+                    "-nointern",
+                    "-certfile",
+                    certificate.name,
+                    "-noverify",
+                    "-out",
+                    os.devnull,
+                ],
+                budget,
+            )
+            if verified is None:
+                return None
+            if verified.returncode == 0:
+                masked = bytearray(content)
+                masked[signature_at:trailer_at] = b"\0" * signature_length
+                return bytes(masked)
+    return content
 
 
 def zstd_container(content: bytes) -> bool:
@@ -1895,6 +1982,34 @@ def mask_mtree_digest_attributes(content: bytes) -> bytes:
     return b"".join(masked)
 
 
+def mask_verified_sha256sum_digests(
+    content: bytes, tree_digests: dict[bytes, bytes]
+) -> bytes:
+    if not content or not content.endswith(b"\n"):
+        return content
+    line_pattern = re.compile(rb"([0-9a-f]{64})  ([^\x00\r\n]+)\n")
+    cursor = 0
+    seen = set()
+    matches = []
+    for match in line_pattern.finditer(content):
+        path = match.group(2)
+        if (
+            match.start() != cursor
+            or path in seen
+            or tree_digests.get(path) != match.group(1)
+        ):
+            return content
+        seen.add(path)
+        matches.append(match)
+        cursor = match.end()
+    if not matches or cursor != len(content):
+        return content
+    masked = bytearray(content)
+    for match in matches:
+        masked[match.start(1) : match.end(1)] = b"0" * 64
+    return bytes(masked)
+
+
 def mask_git_object_identifier_headers(content: bytes, kind: str) -> bytes:
     allowed_headers = {
         "commit": frozenset((b"tree", b"parent")),
@@ -2012,6 +2127,14 @@ def sensitive(
             or tar_container(content)
         )
         structured_content = b"" if outer_compression or archive_container else content
+        module_masked_content = mask_verified_module_signature(
+            structured_content,
+            allowed_public_certificates if allow_public_certificate else frozenset(),
+            budget,
+        )
+        if module_masked_content is None:
+            return True
+        signature_masked_content, _ = mask_valid_signature_payloads(module_masked_content)
         pem_certificates_allowed = (
             allow_public_certificate
             and allowed_pem_certificates(
@@ -2019,10 +2142,10 @@ def sensitive(
             )
         )
         if (
-            contains_private_jwk(structured_content)
-            or contains_putty_private_key(content)
-            or contains_encrypted_private_key_info(structured_content)
-            or contains_openpgp_secret_key(structured_content)
+            contains_private_jwk(signature_masked_content)
+            or contains_putty_private_key(signature_masked_content)
+            or contains_encrypted_private_key_info(signature_masked_content)
+            or contains_openpgp_secret_key(signature_masked_content)
             or PRIVATE_PEM_HEADER.search(content)
             or PGP_PRIVATE_HEADER.search(content)
             or AGE_SECRET_KEY.search(content)
@@ -2034,15 +2157,15 @@ def sensitive(
             or PRIVATE_PEM.search(content)
             or PGP_PRIVATE.search(content)
             or (CERTIFICATE.search(content) and not pem_certificates_allowed)
-            or b"openssh-key-v1\x00" in content
-            or PBES2_OID in structured_content
+            or b"openssh-key-v1\x00" in signature_masked_content
+            or PBES2_OID in signature_masked_content
             or b"pkcs" + b"11:" in content
             or re.search(
                 rb"(?m)^\[p11-kit-object-v1\]\r?$", content
             )
         ):
             return True
-        normalized_scan_content = mask_mtree_digest_attributes(structured_content)
+        normalized_scan_content = mask_mtree_digest_attributes(signature_masked_content)
         # Exact Zstandard payload bytes are opaque and probabilistically resemble
         # ASN.1/Base64. Their decompressed bytes are inspected recursively below.
         candidates = sensitive_asn1_candidates(normalized_scan_content)
@@ -2252,6 +2375,8 @@ def scan_tree(root_argument: str, allowed_certificates: frozenset[bytes]) -> int
     budget = inspection_budget()
     files = 0
     total_size = 0
+    tree_digests: dict[bytes, bytes] = {}
+    deferred_sha256sums: tuple[str, bytes] | None = None
 
     def reject_walk_error(error: OSError) -> None:
         raise SystemExit(
@@ -2346,6 +2471,12 @@ def scan_tree(root_argument: str, allowed_certificates: frozenset[bytes]) -> int
                 )
             ):
                 raise SystemExit("check-sensitive-history: tree file changed during inspection")
+            tree_digests[os.fsencode(relative)] = hashlib.sha256(content).hexdigest().encode(
+                "ascii"
+            )
+            if relative == "SHA256SUMS":
+                deferred_sha256sums = (relative, bytes(content))
+                continue
             if sensitive(
                 content,
                 relative,
@@ -2359,6 +2490,22 @@ def scan_tree(root_argument: str, allowed_certificates: frozenset[bytes]) -> int
                     file=sys.stderr,
                 )
                 return 1
+    if deferred_sha256sums is not None:
+        relative, content = deferred_sha256sums
+        masked_content = mask_verified_sha256sum_digests(content, tree_digests)
+        if sensitive(
+            masked_content,
+            relative,
+            budget=budget,
+            allowed_public_certificates=allowed_certificates,
+        ):
+            nested = budget.get("sensitive_path")
+            suffix = f" (inside {nested})" if isinstance(nested, str) else ""
+            print(
+                f"check-sensitive-history: sensitive tree file: {relative}{suffix}",
+                file=sys.stderr,
+            )
+            return 1
     print(f"sensitive tree gate passed: {files} files")
     return 0
 

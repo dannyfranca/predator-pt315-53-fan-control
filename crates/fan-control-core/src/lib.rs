@@ -44,6 +44,7 @@ pub use arming::{
 pub use authority::{
     AdmittedPolicyAuthority, PolicyAuthorityAdmissionError, PolicyAuthorityError,
     QUALIFICATION_RECORD_PATH, SUPERVISED_ENDURANCE_EVIDENCE_PATH, admit_policy_authority,
+    validate_qualification_evidence_v2,
 };
 pub use baseline::{
     BaselineCleanupAttestation, BaselineObservation, BaselineStartingConditions,

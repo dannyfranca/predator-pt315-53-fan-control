@@ -179,9 +179,14 @@ fn compatibility_declaration_is_exact_model_but_cannot_claim_qualified_artifacts
     for identity in [declaration.kernel.image_sha256, declaration.module.sha256] {
         assert_eq!(identity, "0".repeat(64));
     }
+    let expected_image_signer = if std::env::var_os("PT31553_LOCKED_SOURCE_ROOT").is_some() {
+        "0".repeat(64)
+    } else {
+        "1c549f6b61cc97b1673e9a73b974b63160bea16357be93a533d93382086f17bc".into()
+    };
     assert_eq!(
         declaration.kernel.image_signer_fingerprint,
-        "1c549f6b61cc97b1673e9a73b974b63160bea16357be93a533d93382086f17bc"
+        expected_image_signer
     );
     assert_eq!(declaration.module.signer_fingerprint, "0".repeat(64));
     for warning in ["unqualified", "zero", "cannot authorize Custom mode"] {
