@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() {
+    printf 'source-complete handoff: %s\n' "$1" >&2
+    exit 1
+}
+
+repository_root=$(git rev-parse --show-toplevel)
+cd "$repository_root"
+
+[[ $(git rev-parse --is-shallow-repository) == false ]] ||
+    fail 'repository is shallow; complete reachable history is required'
+
+check_clean_source() {
+    local status
+    status=$(git status --porcelain=v1 --untracked-files=all)
+    [[ -z $status ]] || fail 'source tree is not clean'
+}
+
+check_index_flags() {
+    local entries entry
+    entries=$(git ls-files -v)
+    while IFS= read -r entry; do
+        [[ ${entry:0:2} == 'H ' ]] ||
+            fail "nondefault Git index flag hides a tracked path: ${entry:2}"
+    done <<<"$entries"
+}
+
+check_regular_file() {
+    local path=$1
+    [[ -f $path ]] || fail "missing required handoff file: $path"
+    [[ ! -L $path ]] || fail "required handoff file is a symlink: $path"
+    [[ -s $path ]] || fail "required handoff file is empty: $path"
+}
+
+tracked_mode() {
+    local path=$1
+    local stage
+    stage=$(git ls-files --stage -- "$path")
+    [[ -n $stage && $stage != *$'\n'* ]] ||
+        fail "required handoff path has invalid index metadata: $path"
+    printf '%s\n' "${stage%% *}"
+}
+
+check_tracked_category() {
+    local label=$1
+    local pathspec=$2
+    local files
+    files=$(git ls-files -- "$pathspec")
+    [[ -n $files ]] || fail "required handoff category is empty: $label"
+    while IFS= read -r path; do
+        check_regular_file "$path"
+    done <<<"$files"
+}
+
+check_clean_source
+check_index_flags
+source_revision=$(git rev-parse HEAD)
+
+manifest=handoff/source-complete-files.txt
+check_regular_file "$manifest"
+git ls-files --error-unmatch -- "$manifest" >/dev/null ||
+    fail "required handoff file is not tracked: $manifest"
+LC_ALL=C sort -cu "$manifest" ||
+    fail 'source-complete manifest must be sorted and unique'
+last_manifest_byte=$(tail -c 1 "$manifest")
+[[ -z $last_manifest_byte ]] ||
+    fail 'source-complete manifest must end with a newline'
+tracked_files=$(LC_ALL=C git ls-files)
+manifest_files=$(<"$manifest")
+[[ $tracked_files == "$manifest_files" ]] ||
+    fail 'tracked file set does not exactly match source-complete manifest'
+
+while IFS= read -r path || [[ -n $path ]]; do
+    [[ -n $path && $path != /* && $path != *'..'* ]] ||
+        fail "invalid source-complete manifest path: $path"
+    check_regular_file "$path"
+    git ls-files --error-unmatch -- "$path" >/dev/null ||
+        fail "required handoff file is not tracked: $path"
+    mode=$(tracked_mode "$path")
+    [[ $mode == 100644 || $mode == 100755 ]] ||
+        fail "required handoff file has invalid index mode $mode: $path"
+done <"$manifest"
+
+check_tracked_category source crates
+check_tracked_category schemas schemas
+check_tracked_category packages packaging
+check_tracked_category units systemd
+check_tracked_category examples config
+check_tracked_category qualification qualification
+check_tracked_category policy policy
+check_tracked_category documentation README.md
+check_tracked_category licenses LICENSES
+check_tracked_category upstream upstream
+check_tracked_category checks scripts
+
+required_executables=(
+    packaging/kernel/build-candidate
+    qualification/workloads/combined
+    qualification/workloads/cpu
+    qualification/workloads/gpu
+    qualification/workloads/idle
+    qualification/workloads/mixed
+    scripts/check-promotion
+    scripts/check-repository-policy
+    scripts/check-sensitive-history
+    scripts/redact-evidence
+    scripts/verify-package-provenance
+    scripts/verify-source-complete-handoff
+    scripts/verify-source-lock
+)
+
+for path in "${required_executables[@]}"; do
+    [[ -x $path ]] || fail "required handoff command is not executable: $path"
+    [[ $(tracked_mode "$path") == 100755 ]] ||
+        fail "required handoff command is not executable in Git: $path"
+done
+
+target_dir=$(mktemp -d "${TMPDIR:-/tmp}/pt31553-source-complete-target.XXXXXX")
+cleanup() {
+    [[ -d $target_dir && ! -L $target_dir ]] && rm -rf -- "$target_dir"
+}
+trap cleanup EXIT
+
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR=$target_dir
+
+printf '%s\n' '==> clean workspace build'
+cargo build --frozen --workspace --all-targets --all-features
+
+scripts/check-repository-policy
+
+check_clean_source
+check_index_flags
+[[ $(git rev-parse HEAD) == "$source_revision" ]] ||
+    fail 'repository revision changed during verification'
+
+printf '%s\n' \
+    'Source-complete handoff passed: public source only; not hardware qualification; not Custom-control authorization; not artifact promotion'
