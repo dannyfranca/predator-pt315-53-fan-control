@@ -166,6 +166,13 @@ scripts/redact-evidence
 scripts/verify-package-provenance
 scripts/verify-source-complete-handoff
 scripts/verify-source-lock
+skills/predator-fan-control/SKILL.md
+skills/predator-fan-control/agents/openai.yaml
+skills/predator-fan-control/references/configuration.md
+skills/predator-fan-control/references/operations.md
+skills/predator-fan-control/references/recovery.md
+skills/predator-fan-control/references/safety.md
+skills/predator-fan-control/references/support.md
 systemd/90-pt31553-fan-control.preset
 systemd/pt31553-fan-sleep-guard.service
 systemd/pt31553-fand.service

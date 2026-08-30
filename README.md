@@ -11,6 +11,24 @@ authorize Custom fan control or service enablement.
 - `fan-control-restore`: independent Firmware Auto restoration tool
 - `fan-control-qualify`: privileged supervised qualification runner
 
+## Agent skill
+
+Install the portable operating skill from this repository with:
+
+```console
+npx skills add dannyfranca/predator-pt315-53-fan-control --skill predator-fan-control
+```
+
+The skill teaches an agent to inspect compatibility, select and verify a
+release or pinned source revision, prepare a disabled installation, propose
+configuration changes, and follow recovery/removal boundaries. It derives
+revision-specific commands from the selected checkout and requires approval
+before privileged or mutating operations. For this unqualified revision it
+must keep services disabled and inactive; it does not make active fan control
+available.
+
+Update an installed copy with `npx skills update predator-fan-control`.
+
 Build and test every workspace member:
 
 ```console

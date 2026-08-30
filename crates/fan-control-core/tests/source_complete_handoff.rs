@@ -69,6 +69,13 @@ impl HandoffSandbox {
             "policy/qualified-envelope.example.toml",
             "schemas/qualification-record.json",
             "scripts/verify-source-complete-handoff",
+            "skills/predator-fan-control/SKILL.md",
+            "skills/predator-fan-control/agents/openai.yaml",
+            "skills/predator-fan-control/references/configuration.md",
+            "skills/predator-fan-control/references/operations.md",
+            "skills/predator-fan-control/references/recovery.md",
+            "skills/predator-fan-control/references/safety.md",
+            "skills/predator-fan-control/references/support.md",
             "upstream/README.md",
         ] {
             let destination = repository.join(overlay);
