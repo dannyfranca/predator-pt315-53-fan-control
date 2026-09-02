@@ -194,6 +194,9 @@ name = "fan-control-daemon"
 version = "0.1.0"
 dependencies = [
  "fan-control-core",
+ "flate2",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

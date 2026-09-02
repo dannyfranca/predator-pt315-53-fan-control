@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Production daemon composition — prototype</title>
+  <style>
+    :root { color-scheme: dark; --bg:#10151b; --panel:#18212b; --line:#2b3a48; --ink:#eaf1f6; --muted:#9fb0be; --accent:#56c2a7; --bad:#f28b82; }
+    * { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,sans-serif }
+    main { width:min(1050px,calc(100% - 32px)); margin:36px auto 64px } h1 { margin:0 0 8px; font-size:clamp(26px,4vw,42px) }
+    h2 { font-size:18px; margin:0 0 14px } p { color:var(--muted); max-width:80ch } code { color:var(--accent) }
+    .notice { border-left:3px solid var(--accent); padding:10px 14px; background:#14241f; margin:22px 0 }
+    .grid { display:grid; grid-template-columns:1.2fr .8fr; gap:18px } .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px }
+    dl { display:grid; grid-template-columns:150px 1fr; gap:8px 12px; margin:0 } dt { color:var(--muted) } dd { margin:0; font-weight:650 }
+    .actions { display:flex; flex-wrap:wrap; gap:8px } button { border:1px solid var(--line); background:#22303c; color:var(--ink); padding:9px 12px; border-radius:8px; cursor:pointer }
+    button:hover { border-color:var(--accent) } button.done { color:var(--muted); text-decoration:line-through } .reset { margin-left:auto }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px } .tabs button.active { background:var(--accent); color:#092019; border-color:var(--accent) }
+    .walk { margin-top:18px } .steps { display:flex; gap:8px; flex-wrap:wrap; align-items:center } .arrow { color:var(--muted) }
+    .log { min-height:120px; max-height:250px; overflow:auto; font-family:ui-monospace,monospace; font-size:13px; color:var(--muted) }
+    .log div:last-child { color:var(--ink) } .bad { color:var(--bad)!important } .good { color:var(--accent)!important }
+    @media(max-width:760px){.grid{grid-template-columns:1fr}dl{grid-template-columns:120px 1fr}}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Production daemon composition</h1>
+  <p>Question: can one small application seam compose the existing safety modules without recreating their authority rules?</p>
+  <div class="notice"><strong>PROTOTYPE.</strong> No host access. The executable companion runs the same five scenarios through real core APIs on <code>FakePlatform</code>.</div>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>Current state</h2>
+      <dl id="state"></dl>
+    </section>
+    <section class="panel">
+      <h2>What owns what</h2>
+      <dl>
+        <dt>Daemon session</dt><dd>platform, runtime lock, shutdown controller</dd>
+        <dt>Core receipts</dt><dd>authority → arming → live control</dd>
+        <dt>Adapters</dt><dd>startup inputs, sensor discovery, systemd notifier</dd>
+        <dt>Release gate</dt><dd>core-confirmed Firmware Auto only</dd>
+      </dl>
+    </section>
+  </div>
+
+  <section class="panel walk">
+    <h2>Guided walkthroughs</h2>
+    <div class="tabs" id="tabs"></div>
+    <p id="description"></p>
+    <div class="steps" id="steps"></div>
+  </section>
+
+  <section class="panel walk">
+    <h2>Free play</h2>
+    <div class="actions" id="actions"></div>
+  </section>
+
+  <section class="panel walk">
+    <h2>Transition log</h2>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<script>
+// Portable prototype module: pure state + action -> next state.
+const Composition = (() => {
+  const initial = () => ({ phase:'Stopped', lock:'free', authority:'none', fans:'Firmware Auto', control:'absent', service:'not ready', fault:'none', shutdown:false, restorePossible:true, last:'Reset' });
+  const reject = (s, why) => ({...s, last:`Rejected: ${why}`});
+  function reduce(s, action) {
+    switch(action) {
+      case 'claim': return s.phase==='Stopped' ? {...s,phase:'Owned',lock:'held',last:'Exclusive ownership acquired'} : reject(s,'ownership starts once');
+      case 'confirmAuto': return s.lock==='held' ? {...s,fans:'Firmware Auto',phase:'Auto confirmed',last:'Both Auto readbacks confirmed'} : reject(s,'ownership required');
+      case 'admit': return s.phase==='Auto confirmed' ? {...s,authority:'AdmittedPolicyAuthority',phase:'Authority admitted',last:'Opaque authority receipt created'} : reject(s,'fresh Auto boundary required');
+      case 'rejectAdmission': return s.lock==='held' ? {...s,authority:'none',fans:'Firmware Auto',phase:'Admission rejected',last:'Admission rejected; core restored Auto'} : reject(s,'ownership required');
+      case 'sample1': return s.phase==='Authority admitted' ? {...s,phase:'Awaiting second sample',last:'First complete fresh sample captured'} : reject(s,'admitted authority required');
+      case 'sample2': return s.phase==='Awaiting second sample' ? {...s,phase:'Ready to arm',last:'Second consecutive sample minted arming capability'} : reject(s,'first sample required');
+      case 'arm': return s.phase==='Ready to arm' ? {...s,phase:'Custom control',fans:'Custom @ maximum',control:'TransientSensorControl',last:'ArmedFanControl consumed; live control created'} : reject(s,'arming receipt required');
+      case 'iterate': return s.phase==='Custom control'&&!s.shutdown ? {...s,fans:'Custom @ calculated demand',service:'READY + WATCHDOG',last:'Real bounded iteration completed before notification'} : reject(s,'healthy Custom control required');
+      case 'sensorFault': return s.phase==='Custom control' ? {...s,phase:'Firmware Auto recovery',fans:'Firmware Auto',fault:'sensor fault; recovering',last:'Fault stopped demand and restored Auto in-call'} : reject(s,'active control required');
+      case 'terminate': return s.lock==='held' ? {...s,shutdown:true,fault:'shutdown latched',last:'Shutdown permanently blocks normal control'} : reject(s,'active session required');
+      case 'restore': return s.lock==='held'&&s.restorePossible ? {...s,phase:'Safe to release',fans:'Firmware Auto',control:'invalidated',last:'Both Auto readbacks confirmed'} : reject(s,'restoration unavailable');
+      case 'breakRestore': return s.lock==='held' ? {...s,restorePossible:false,fans:'Custom @ maximum containment',phase:'Fault latched',fault:'Auto unconfirmed',last:'Restoration failed; maximum containment attempted'} : reject(s,'ownership required');
+      case 'release': return s.lock==='held'&&s.fans==='Firmware Auto' ? {...s,phase:'Stopped',lock:'free',authority:'none',control:'absent',last:'Runtime lock released after Auto'} : reject(s,'release requires confirmed Auto');
+      default: return reject(s,'unknown action');
+    }
+  }
+  return {initial,reduce};
+})();
+
+const labels = {
+  claim:'Acquire ownership', confirmAuto:'Confirm Firmware Auto', admit:'Admit policy authority', rejectAdmission:'Reject admission',
+  sample1:'Capture sample 1', sample2:'Capture sample 2', arm:'Arm both fans', iterate:'Complete control iteration',
+  sensorFault:'Inject sensor fault', terminate:'Request termination', restore:'Restore Firmware Auto', breakRestore:'Fail restoration', release:'Release ownership'
+};
+const scenarios = [
+  {name:'Healthy',desc:'Watch authority receipts move forward; readiness appears only after real control work.',steps:['claim','confirmAuto','admit','sample1','sample2','arm','iterate','terminate','restore','release']},
+  {name:'Rejected admission',desc:'No authority receipt exists. Core reconfirms Auto, so the lock may be released safely.',steps:['claim','confirmAuto','rejectAdmission','release']},
+  {name:'Mid-cycle fault',desc:'A sensor fault stops demand and restores Auto within the failed control call.',steps:['claim','confirmAuto','admit','sample1','sample2','arm','iterate','sensorFault','release']},
+  {name:'Termination',desc:'Shutdown is permanent. Cleanup must establish Auto before ownership can end.',steps:['claim','confirmAuto','admit','sample1','sample2','arm','iterate','terminate','restore','release']},
+  {name:'Restoration failure',desc:'Containment may reach maximum, but maximum is not Auto. The final rejected release is the PASS condition.',steps:['claim','breakRestore','release'],expectedRejections:['release'],stepLabels:{release:'Attempt release (expected rejection)'}}
+];
+
+let state = Composition.initial(), active=0, step=0, entries=[];
+const stateEl=document.querySelector('#state'), logEl=document.querySelector('#log'), stepsEl=document.querySelector('#steps');
+function dispatch(action){
+  state=Composition.reduce(state,action);
+  const rejected=state.last.startsWith('Rejected');
+  const expected=scenarios[active].steps[step]===action;
+  const expectedRejection=expected&&scenarios[active].expectedRejections?.includes(action);
+  entries.push(expectedRejection&&rejected ? `${labels[action]} → Expected rejection: ${state.last.replace('Rejected: ','')}` : `${labels[action]} → ${state.last}`);
+  if(expected&&(!rejected||expectedRejection)) step++;
+  render();
+}
+function reset(){ state=Composition.initial(); entries=[]; step=0; render(); }
+function render(){
+  stateEl.innerHTML=Object.entries({Phase:state.phase,Ownership:state.lock,Authority:state.authority,Fans:state.fans,Control:state.control,Service:state.service,Fault:state.fault,Shutdown:state.shutdown?'latched':'open','Last change':state.last}).map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('');
+  logEl.innerHTML=(entries.length?entries:['No actions yet.']).map((x,i)=>`<div class="${x.includes('Rejected')?'bad':i===entries.length-1?'good':''}">${x}</div>`).join('');
+  document.querySelector('#tabs').innerHTML=scenarios.map((s,i)=>`<button class="${i===active?'active':''}" data-tab="${i}">${s.name}</button>`).join('');
+  document.querySelector('#description').textContent=scenarios[active].desc;
+  stepsEl.innerHTML=scenarios[active].steps.map((a,i)=>`${i?'<span class="arrow">→</span>':''}<button class="${i<step?'done':''}" data-step="${a}">${scenarios[active].stepLabels?.[a]??labels[a]}</button>`).join('')+'<button class="reset" data-reset>Reset</button>';
+  document.querySelector('#actions').innerHTML=Object.entries(labels).map(([a,l])=>`<button data-action="${a}">${l}</button>`).join('')+'<button class="reset" data-reset>Reset</button>';
+  document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{active=+b.dataset.tab;reset()});
+  document.querySelectorAll('[data-step]').forEach(b=>b.onclick=()=>dispatch(b.dataset.step));
+  document.querySelectorAll('[data-action]').forEach(b=>b.onclick=()=>dispatch(b.dataset.action));
+  document.querySelectorAll('[data-reset]').forEach(b=>b.onclick=reset);
+}
+render();
+</script>
+</body>
+</html>
