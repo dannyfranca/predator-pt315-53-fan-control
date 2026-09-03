@@ -18,14 +18,21 @@ ExecStopPost=/usr/bin/pt31553-fan-restore --restore
 WatchdogSec=6s
 Restart=on-failure
 RestartSec=2s
-TimeoutStartSec=6s
+# Qualified startup may consume two full sample windows plus the bounded tachometer-response
+# window. Leave recovery margin so systemd does not kill a valid admission attempt.
+TimeoutStartSec=30s
 # Recovery owns the restart gate and retries until Firmware Auto is confirmed.
 TimeoutStopSec=infinity
 UMask=0077
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 PrivateTmp=yes
-PrivateDevices=yes
+# GPU temperature sampling needs the NVIDIA control and sole supported GPU nodes. Keep every
+# other device denied through the closed device policy.
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia0 rw
 ProtectSystem=strict
 ProtectHome=yes
 ProtectHostname=yes

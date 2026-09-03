@@ -153,11 +153,176 @@ struct PackagePromotionV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PackageArtifactV1 {
-    name: String,
-    version: String,
-    architecture: String,
-    sha256: String,
+pub struct PackageArtifactV1 {
+    pub name: String,
+    pub version: String,
+    pub architecture: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageProvenanceV1 {
+    pub schema_version: u32,
+    pub candidate: String,
+    pub build: PackageProvenanceBuildV1,
+    pub kernel: PackageProvenanceKernelV1,
+    pub modules: Vec<PackageProvenanceModuleV1>,
+    pub packages: Vec<PackageArtifactV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageProvenanceBuildV1 {
+    pub source_commit: String,
+    pub source_lock_sha256: String,
+    pub build_environment_sha256: String,
+    pub build_attestation_sha256: String,
+    pub pkgbuild_sha256: String,
+    pub package_set_srcinfo_sha256: String,
+    pub package_manifest_signature_sha256: Option<String>,
+    pub package_manifest_signer_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageProvenanceKernelV1 {
+    pub release: String,
+    pub package: String,
+    pub image_path: String,
+    pub image_sha256: String,
+    pub image_signer_fingerprint: String,
+    pub config_path: String,
+    pub config_sha256: String,
+    pub module_trust_certificate_path: String,
+    pub module_trust_certificate_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageProvenanceModuleV1 {
+    pub name: String,
+    pub path: String,
+    pub sha256: String,
+    pub signer_fingerprint: String,
+    pub vermagic: String,
+    pub provenance: String,
+    pub package: String,
+    pub source: PackageProvenanceModuleSourceV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageProvenanceModuleSourceV1 {
+    pub kind: String,
+    pub revision: String,
+}
+
+/// Parses package provenance only after enforcing the repository's canonical v1 schema.
+pub fn validate_package_provenance_v1(
+    source: &[u8],
+) -> Result<PackageProvenanceV1, PromotionValidationError> {
+    let value: Value =
+        serde_json::from_slice(source).map_err(|source| PromotionValidationError::Json {
+            artifact: "package provenance",
+            source,
+        })?;
+    validate_schema("package provenance", PACKAGE_PROVENANCE_SCHEMA, &value)?;
+    validate_provenance_identity(&value)?;
+    serde_json::from_value(value).map_err(|source| PromotionValidationError::Json {
+        artifact: "package provenance",
+        source,
+    })
+}
+
+/// Binds canonical provenance to the exact compatibility declaration used for admission.
+pub fn validate_package_provenance_compatibility_v1(
+    provenance: &PackageProvenanceV1,
+    declaration: &crate::CompatibilityDeclarationV1,
+) -> Result<(), PromotionValidationError> {
+    let kernel_package = provenance
+        .packages
+        .iter()
+        .find(|package| package.name == declaration.kernel.package)
+        .ok_or(PromotionValidationError::Invalid {
+            artifact: "package provenance",
+            field: "packages.kernel",
+        })?;
+    let expected_candidate = format!(
+        "linux-cachyos-pt31553-{}-package-set",
+        kernel_package.version
+    );
+    let acer = provenance
+        .modules
+        .iter()
+        .find(|module| module.name == "acer_wmi")
+        .ok_or(PromotionValidationError::Invalid {
+            artifact: "package provenance",
+            field: "modules.acer_wmi",
+        })?;
+    for (field, expected, actual) in [
+        (
+            "candidate",
+            expected_candidate.as_str(),
+            provenance.candidate.as_str(),
+        ),
+        (
+            "build.source_commit",
+            declaration.kernel.source_commit.as_str(),
+            provenance.build.source_commit.as_str(),
+        ),
+        (
+            "kernel.release",
+            declaration.kernel.release.as_str(),
+            provenance.kernel.release.as_str(),
+        ),
+        (
+            "kernel.package",
+            declaration.kernel.package.as_str(),
+            provenance.kernel.package.as_str(),
+        ),
+        (
+            "kernel.image_sha256",
+            declaration.kernel.image_sha256.as_str(),
+            provenance.kernel.image_sha256.as_str(),
+        ),
+        (
+            "kernel.image_signer_fingerprint",
+            declaration.kernel.image_signer_fingerprint.as_str(),
+            provenance.kernel.image_signer_fingerprint.as_str(),
+        ),
+        (
+            "kernel.module_trust_certificate_fingerprint",
+            declaration.module.signer_fingerprint.as_str(),
+            provenance
+                .kernel
+                .module_trust_certificate_fingerprint
+                .as_str(),
+        ),
+        (
+            "modules.acer_wmi.path",
+            declaration.module.path.as_str(),
+            acer.path.as_str(),
+        ),
+        (
+            "modules.acer_wmi.sha256",
+            declaration.module.sha256.as_str(),
+            acer.sha256.as_str(),
+        ),
+        (
+            "modules.acer_wmi.signer_fingerprint",
+            declaration.module.signer_fingerprint.as_str(),
+            acer.signer_fingerprint.as_str(),
+        ),
+        (
+            "modules.acer_wmi.vermagic",
+            declaration.module.vermagic.as_str(),
+            acer.vermagic.as_str(),
+        ),
+    ] {
+        require_equal(field, &expected, &actual)?;
+    }
+    Ok(())
 }
 
 pub fn sanitize_qualification_evidence_v1(
@@ -295,25 +460,18 @@ pub fn validate_promotion_manifest_v1(
         sanitized_evidence_source.as_bytes(),
     )?;
 
-    let provenance: Value =
-        serde_json::from_slice(package_provenance_source).map_err(|source| {
-            PromotionValidationError::Json {
-                artifact: "package provenance",
-                source,
-            }
-        })?;
-    validate_schema("package provenance", PACKAGE_PROVENANCE_SCHEMA, &provenance)?;
-    validate_provenance_identity(&provenance)?;
+    let provenance = validate_package_provenance_v1(package_provenance_source)?;
     let compatibility = record.compatibility();
-    require_json_string(
+    validate_package_provenance_compatibility_v1(&provenance, compatibility)?;
+    require_equal(
         "package provenance kernel.release",
-        &provenance["kernel"]["release"],
         &compatibility.kernel.release,
+        &provenance.kernel.release,
     )?;
-    require_json_string(
+    require_equal(
         "package provenance build.source_commit",
-        &provenance["build"]["source_commit"],
         &compatibility.kernel.source_commit,
+        &provenance.build.source_commit,
     )?;
     if !is_sha256(&manifest.packages.manifest_signer_fingerprint) {
         return Err(PromotionValidationError::Invalid {
@@ -321,37 +479,47 @@ pub fn validate_promotion_manifest_v1(
             field: "packages.manifest_signer_fingerprint",
         });
     }
-    require_json_string(
+    require_equal(
         "package provenance kernel.package",
-        &provenance["kernel"]["package"],
         &compatibility.kernel.package,
+        &provenance.kernel.package,
     )?;
-    require_json_string(
+    require_equal(
         "package provenance kernel.image_sha256",
-        &provenance["kernel"]["image_sha256"],
         &compatibility.kernel.image_sha256,
+        &provenance.kernel.image_sha256,
     )?;
-    require_json_string(
+    require_equal(
         "package provenance kernel.image_signer_fingerprint",
-        &provenance["kernel"]["image_signer_fingerprint"],
         &compatibility.kernel.image_signer_fingerprint,
+        &provenance.kernel.image_signer_fingerprint,
     )?;
-    let acer_module = provenance["modules"]
-        .as_array()
-        .and_then(|modules| modules.iter().find(|module| module["name"] == "acer_wmi"))
+    let acer_module = provenance
+        .modules
+        .iter()
+        .find(|module| module.name == "acer_wmi")
         .ok_or(PromotionValidationError::Invalid {
             artifact: "package provenance",
             field: "modules.acer_wmi",
         })?;
-    for (field, expected) in [
-        ("sha256", compatibility.module.sha256.as_str()),
+    for (field, expected, actual) in [
+        (
+            "sha256",
+            compatibility.module.sha256.as_str(),
+            acer_module.sha256.as_str(),
+        ),
         (
             "signer_fingerprint",
             compatibility.module.signer_fingerprint.as_str(),
+            acer_module.signer_fingerprint.as_str(),
         ),
-        ("vermagic", compatibility.module.vermagic.as_str()),
+        (
+            "vermagic",
+            compatibility.module.vermagic.as_str(),
+            acer_module.vermagic.as_str(),
+        ),
     ] {
-        require_json_string("package provenance acer_wmi", &acer_module[field], expected)?;
+        require_equal(field, &expected, &actual)?;
     }
 
     for (field, expected, actual) in [
@@ -383,23 +551,16 @@ pub fn validate_promotion_manifest_v1(
     ] {
         require_equal(field, &expected, &actual)?;
     }
-    require_json_string(
+    require_equal(
         "packages.manifest_signer_fingerprint",
-        &provenance["build"]["package_manifest_signer_fingerprint"],
         &manifest.packages.manifest_signer_fingerprint,
+        &provenance.build.package_manifest_signer_fingerprint,
     )?;
-    let provenance_packages: Vec<PackageArtifactV1> =
-        serde_json::from_value(provenance["packages"].clone()).map_err(|source| {
-            PromotionValidationError::Json {
-                artifact: "package provenance packages",
-                source,
-            }
-        })?;
-    validate_package_artifacts(&provenance_packages)?;
+    validate_package_artifacts(&provenance.packages)?;
     validate_package_artifacts(&manifest.packages.artifacts)?;
     require_equal(
         "packages.artifacts",
-        &provenance_packages,
+        &provenance.packages,
         &manifest.packages.artifacts,
     )?;
     Ok(())
@@ -532,20 +693,6 @@ fn validate_provenance_identity(provenance: &Value) -> Result<(), PromotionValid
         });
     }
     Ok(())
-}
-
-fn require_json_string(
-    field: &'static str,
-    value: &Value,
-    expected: &str,
-) -> Result<(), PromotionValidationError> {
-    match value.as_str() {
-        Some(actual) => require_equal(field, &expected, &actual),
-        None => Err(PromotionValidationError::Invalid {
-            artifact: "package provenance",
-            field,
-        }),
-    }
 }
 
 fn require_hash(

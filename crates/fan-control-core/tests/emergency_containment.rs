@@ -4,8 +4,9 @@ use std::{
 };
 
 use fan_control_core::{
-    BoundedFileAccess, Clock, EmergencyContainmentReport, EmergencyFanStatus, FakePlatform,
-    FakeRuntimeLock, FakeStep, FanModeFailure, FilePermissions, MaximumPwmReadback, PlatformError,
+    BoundedFileAccess, BoundedIdentityBoundFileAccess, Clock, EmergencyContainmentReport,
+    EmergencyFanStatus, FakePlatform, FakeRuntimeLock, FakeStep, FanModeFailure, FileAccess,
+    FileIdentity, FilePermissions, IdentityBoundFileAccess, MaximumPwmReadback, PlatformError,
     PlatformErrorKind, PlatformOperation, RuntimeLockAccess, RuntimeLockError, ServiceAccess,
     acquire_controller_ownership, discover_acer_hwmon,
 };
@@ -205,7 +206,7 @@ fn contain_custom_fans_at_maximum(
 
 fn recover_firmware_auto<P>(platform: &mut P, device: &fan_control_core::AcerHwmonDevice)
 where
-    P: BoundedFileAccess + Clock + RuntimeLockAccess + ServiceAccess + ?Sized,
+    P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess + ServiceAccess + ?Sized,
 {
     let mut ownership = acquire_controller_ownership(platform).unwrap();
     ownership.recover_firmware_auto(device);
@@ -253,6 +254,24 @@ impl AutoAttemptRecorder {
     }
 }
 
+impl FileAccess for AutoAttemptRecorder {
+    fn read(&mut self, path: &Path) -> Result<String, PlatformError> {
+        self.inner.read(path)
+    }
+
+    fn write(&mut self, path: &Path, contents: &str) -> Result<(), PlatformError> {
+        self.inner.write(path, contents)
+    }
+
+    fn list(&mut self, directory: &Path) -> Result<Vec<PathBuf>, PlatformError> {
+        self.inner.list(directory)
+    }
+
+    fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
+        self.inner.permissions(path)
+    }
+}
+
 impl BoundedFileAccess for AutoAttemptRecorder {
     fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError> {
         self.inner.read_before(path, deadline)
@@ -276,6 +295,107 @@ impl BoundedFileAccess for AutoAttemptRecorder {
             self.cpu_auto_write_times.push(self.inner.monotonic_now());
         }
         self.inner.write_before(path, contents, deadline)
+    }
+}
+
+impl IdentityBoundFileAccess for AutoAttemptRecorder {
+    fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
+        self.inner.identity(path)
+    }
+
+    fn read_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+        child: &str,
+    ) -> Result<String, PlatformError> {
+        self.inner.read_bound(directory, expected, child)
+    }
+
+    fn list_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        self.inner.list_bound(directory, expected)
+    }
+}
+
+impl BoundedIdentityBoundFileAccess for AutoAttemptRecorder {
+    fn identity_before(
+        &mut self,
+        path: &Path,
+        deadline: Duration,
+    ) -> Result<FileIdentity, PlatformError> {
+        self.inner.identity_before(path, deadline)
+    }
+
+    fn read_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<String, PlatformError> {
+        self.inner.read_bound_before(
+            directory,
+            expected_directory,
+            child,
+            expected_child,
+            deadline,
+        )
+    }
+
+    fn list_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        self.inner
+            .list_bound_before(directory, expected_directory, deadline)
+    }
+
+    fn permissions_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<FilePermissions, PlatformError> {
+        self.inner.permissions_bound_before(
+            directory,
+            expected_directory,
+            child,
+            expected_child,
+            deadline,
+        )
+    }
+
+    fn write_bound_if_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        expected_children: &[(&str, FileIdentity)],
+        guards: &[(&str, &str)],
+        target_child: &str,
+        contents: &str,
+        deadline: Duration,
+    ) -> Result<(), PlatformError> {
+        if target_child == "pwm1_enable" && contents == "2" {
+            self.cpu_auto_write_times.push(self.inner.monotonic_now());
+        }
+        self.inner.write_bound_if_before(
+            directory,
+            expected_directory,
+            expected_children,
+            guards,
+            target_child,
+            contents,
+            deadline,
+        )
     }
 }
 

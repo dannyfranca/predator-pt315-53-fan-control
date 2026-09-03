@@ -242,6 +242,32 @@ impl FreshSampleGate {
         self.last_successful_cycle_completed_at = None;
     }
 
+    pub(crate) fn wait_for_next_sample(&self, clock: &mut dyn Clock) -> Result<(), SampleSetError> {
+        let Some(previous_started_at) = self.last_successful_cycle_started_at else {
+            return Ok(());
+        };
+        let expected_at = previous_started_at
+            .checked_add(NORMAL_SAMPLE_CADENCE)
+            .ok_or(SampleSetError::DeadlineOverflow)?;
+        let observed_at = clock.monotonic_now();
+        if observed_at < previous_started_at {
+            return Err(SampleSetError::ClockWentBackwards);
+        }
+        let latest = expected_at
+            .checked_add(MAX_SAMPLE_CADENCE_JITTER)
+            .ok_or(SampleSetError::DeadlineOverflow)?;
+        if observed_at > latest {
+            return Err(SampleSetError::CadenceMissed {
+                expected_at,
+                observed_at,
+            });
+        }
+        if observed_at < expected_at {
+            clock.delay(expected_at - observed_at);
+        }
+        Ok(())
+    }
+
     pub fn sample(
         &mut self,
         sources: &mut dyn SampleSources,
@@ -545,4 +571,45 @@ fn validate_observation<T>(
         return Err(SampleSetError::Late { input });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestClock {
+        now: Duration,
+        delayed: Duration,
+    }
+
+    impl Clock for TestClock {
+        fn monotonic_now(&mut self) -> Duration {
+            self.now
+        }
+
+        fn delay(&mut self, duration: Duration) {
+            self.delayed += duration;
+            self.now += duration;
+        }
+    }
+
+    #[test]
+    fn next_sample_wait_is_measured_from_previous_cycle_start() {
+        let gate = FreshSampleGate {
+            gate_id: 1,
+            next_cycle_id: 1,
+            last_successful_cycle_started_at: Some(Duration::from_secs(1)),
+            last_successful_cycle_completed_at: Some(Duration::from_millis(1250)),
+        };
+        let mut clock = TestClock {
+            now: Duration::from_millis(1250),
+            delayed: Duration::ZERO,
+        };
+
+        gate.wait_for_next_sample(&mut clock).unwrap();
+
+        assert_eq!(clock.delayed, Duration::from_millis(1750));
+        assert_eq!(clock.now, Duration::from_secs(3));
+    }
 }

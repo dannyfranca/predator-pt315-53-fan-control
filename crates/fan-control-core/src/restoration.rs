@@ -1,9 +1,9 @@
 use std::{error::Error, fmt, time::Duration};
 
 use crate::{
-    AcerHwmonDevice, BoundedFileAccess, Clock, PlatformError, RestorationAttemptDiagnostic,
-    RestorationFanDiagnostic, RestorationReadback, RuntimeFault, emit_fault,
-    emit_restoration_attempt,
+    AcerHwmonDevice, BoundedIdentityBoundFileAccess, Clock, PlatformError,
+    RestorationAttemptDiagnostic, RestorationFanDiagnostic, RestorationReadback, RuntimeFault,
+    emit_fault, emit_restoration_attempt,
 };
 
 pub(crate) const FIRMWARE_AUTO: &str = "2";
@@ -129,7 +129,7 @@ pub(crate) fn restore_firmware_auto<P>(
     device: &AcerHwmonDevice,
 ) -> Result<(), FirmwareAutoRestorationError>
 where
-    P: BoundedFileAccess + Clock + ?Sized,
+    P: BoundedIdentityBoundFileAccess + Clock + ?Sized,
 {
     let started_at = platform.monotonic_now();
     let deadline = started_at.saturating_add(RESTORATION_WINDOW);
@@ -143,7 +143,7 @@ fn restore_firmware_auto_before<P>(
     deadline: Duration,
 ) -> Result<(), FirmwareAutoRestorationError>
 where
-    P: BoundedFileAccess + Clock + ?Sized,
+    P: BoundedIdentityBoundFileAccess + Clock + ?Sized,
 {
     let mut last_cpu = None;
     let mut last_gpu = None;
@@ -156,15 +156,37 @@ where
         }
         attempts = attempt;
 
-        let cpu_write_error = platform
-            .write_before(device.cpu().enable(), FIRMWARE_AUTO, deadline)
-            .err();
-        let gpu_write_error = platform
-            .write_before(device.gpu().enable(), FIRMWARE_AUTO, deadline)
-            .err();
+        let cpu_write_error = write_bound(
+            platform,
+            device,
+            device.cpu().enable(),
+            FIRMWARE_AUTO,
+            deadline,
+        )
+        .err();
+        let gpu_write_error = write_bound(
+            platform,
+            device,
+            device.gpu().enable(),
+            FIRMWARE_AUTO,
+            deadline,
+        )
+        .err();
 
-        let cpu = status(platform, device.cpu().enable(), cpu_write_error, deadline);
-        let gpu = status(platform, device.gpu().enable(), gpu_write_error, deadline);
+        let cpu = status(
+            platform,
+            device,
+            device.cpu().enable(),
+            cpu_write_error,
+            deadline,
+        );
+        let gpu = status(
+            platform,
+            device,
+            device.gpu().enable(),
+            gpu_write_error,
+            deadline,
+        );
         emit_attempt(attempt, &cpu, &gpu);
         now = platform.monotonic_now();
 
@@ -227,7 +249,7 @@ pub(crate) fn contain_custom_fans_at_maximum<P>(
     device: &AcerHwmonDevice,
 ) -> EmergencyContainmentReport
 where
-    P: BoundedFileAccess + Clock + ?Sized,
+    P: BoundedIdentityBoundFileAccess + Clock + ?Sized,
 {
     let started_at = platform.monotonic_now();
     contain_custom_fans_before(
@@ -245,17 +267,17 @@ fn contain_custom_fans_before<P>(
     gpu_deadline: Duration,
 ) -> EmergencyContainmentReport
 where
-    P: BoundedFileAccess + Clock + ?Sized,
+    P: BoundedIdentityBoundFileAccess + Clock + ?Sized,
 {
     EmergencyContainmentReport {
-        cpu: contain_fan(platform, device.cpu(), cpu_deadline),
-        gpu: contain_fan(platform, device.gpu(), gpu_deadline),
+        cpu: contain_fan(platform, device, device.cpu(), cpu_deadline),
+        gpu: contain_fan(platform, device, device.gpu(), gpu_deadline),
     }
 }
 
 pub(crate) fn recover_firmware_auto<P>(platform: &mut P, device: &AcerHwmonDevice)
 where
-    P: BoundedFileAccess + Clock + ?Sized,
+    P: BoundedIdentityBoundFileAccess + Clock + ?Sized,
 {
     loop {
         let cycle_started = platform.monotonic_now();
@@ -282,24 +304,24 @@ where
 
 fn contain_fan<P>(
     platform: &mut P,
+    device: &AcerHwmonDevice,
     fan: &crate::FanEndpoints,
     deadline: Duration,
 ) -> EmergencyFanStatus
 where
-    P: BoundedFileAccess + Clock + ?Sized,
+    P: BoundedIdentityBoundFileAccess + Clock + ?Sized,
 {
     let started_at = platform.monotonic_now();
     let operation_window = deadline.saturating_sub(started_at) / 3;
     let mode_deadline = started_at.saturating_add(operation_window);
     let write_deadline = mode_deadline.saturating_add(operation_window);
 
-    match platform.read_before(fan.enable(), mode_deadline) {
+    match read_bound(platform, device, fan.enable(), mode_deadline) {
         Ok(mode) if mode.trim() == FIRMWARE_AUTO => EmergencyFanStatus::FirmwareAuto,
         Ok(mode) if mode.trim() == CUSTOM_CONTROL => {
-            let write_error = platform
-                .write_before(fan.pwm(), MAXIMUM_PWM, write_deadline)
-                .err();
-            let readback = match platform.read_before(fan.pwm(), deadline) {
+            let write_error =
+                write_bound(platform, device, fan.pwm(), MAXIMUM_PWM, write_deadline).err();
+            let readback = match read_bound(platform, device, fan.pwm(), deadline) {
                 Ok(value) if value.trim() == MAXIMUM_PWM => MaximumPwmReadback::Confirmed,
                 Ok(value) => MaximumPwmReadback::Unexpected(value),
                 Err(error) => MaximumPwmReadback::Unreadable(error),
@@ -318,13 +340,14 @@ where
     }
 }
 
-fn status<F: BoundedFileAccess + ?Sized>(
+fn status<F: BoundedIdentityBoundFileAccess + ?Sized>(
     files: &mut F,
+    device: &AcerHwmonDevice,
     enable: &std::path::Path,
     write_error: Option<PlatformError>,
     deadline: Duration,
 ) -> FanRestorationStatus {
-    let readback = match files.read_before(enable, deadline) {
+    let readback = match read_bound(files, device, enable, deadline) {
         Ok(value) if value.trim() == FIRMWARE_AUTO => FirmwareAutoReadback::Confirmed,
         Ok(value) => FirmwareAutoReadback::NotAuto(value),
         Err(error) => FirmwareAutoReadback::Unreadable(error),
@@ -333,4 +356,49 @@ fn status<F: BoundedFileAccess + ?Sized>(
         write_error,
         readback,
     }
+}
+
+fn read_bound(
+    files: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
+    device: &AcerHwmonDevice,
+    path: &std::path::Path,
+    deadline: Duration,
+) -> Result<String, PlatformError> {
+    files.read_bound_before(
+        device.root(),
+        device.backing_identity(),
+        child_name(path),
+        endpoint_identity(device, path),
+        deadline,
+    )
+}
+
+fn write_bound(
+    files: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
+    device: &AcerHwmonDevice,
+    path: &std::path::Path,
+    contents: &str,
+    deadline: Duration,
+) -> Result<(), PlatformError> {
+    files.write_bound_if_before(
+        device.root(),
+        device.backing_identity(),
+        &[(child_name(path), endpoint_identity(device, path))],
+        &[],
+        child_name(path),
+        contents,
+        deadline,
+    )
+}
+
+fn endpoint_identity(device: &AcerHwmonDevice, path: &std::path::Path) -> crate::FileIdentity {
+    device
+        .endpoint_identity(path)
+        .expect("fan endpoint belongs to the discovered device")
+}
+
+fn child_name(path: &std::path::Path) -> &str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .expect("fan endpoint is a direct UTF-8 child")
 }
