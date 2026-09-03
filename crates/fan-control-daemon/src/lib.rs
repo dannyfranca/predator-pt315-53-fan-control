@@ -14,10 +14,10 @@ use fan_control_core::{
     parse_compatibility_v1, parse_config_v1, run_supervised_control_iteration, validate_config_v1,
 };
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "acceptance-fixture")]
 mod acceptance_fixture;
 mod system;
-#[cfg(debug_assertions)]
+#[cfg(feature = "acceptance-fixture")]
 pub use acceptance_fixture::run_acceptance_fixture;
 pub use system::{
     COMPATIBILITY_DECLARATION_PATH, EDITABLE_CONFIG_PATH, HWMON_ROOT, POWER_SUPPLY_ROOT,

@@ -32,7 +32,7 @@ const HWMON_ROOT: &str = "/sys/class/hwmon";
 const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
 const POLICY_TEMPLATE: &str = include_str!("../../../policy/qualified-envelope.example.toml");
 
-/// Debug-build subprocess fixture for exercising the production daemon entrypoint safely.
+/// Explicitly enabled subprocess fixture for exercising the production daemon entrypoint safely.
 ///
 /// It uses the same admission, signal, systemd notification, control, cleanup, and release code as
 /// production, but all fan I/O is confined to `FakePlatform`.
@@ -101,6 +101,9 @@ pub fn run_acceptance_fixture(
         },
         ready_barrier: (scenario == Scenario::NotificationTransportFailure)
             .then(|| std::env::var_os("PT31553_ACCEPTANCE_READY_ACK").map(PathBuf::from))
+            .flatten(),
+        watchdog_barrier: (scenario == Scenario::Signal)
+            .then(|| std::env::var_os("PT31553_ACCEPTANCE_WATCHDOG_ACK").map(PathBuf::from))
             .flatten(),
     };
     let result = run_production_control_loop(startup, sources, discovery, shutdown, notifier);
@@ -283,7 +286,6 @@ fn release_follows_both_auto_writes(platform: &FakePlatform) -> bool {
 enum Scenario {
     Normal,
     Signal,
-    SleepStop,
     Rediscovery,
     SampleFault,
     ActuatorFault,
@@ -305,7 +307,6 @@ impl Scenario {
         match value {
             "normal" => Ok(Self::Normal),
             "signal" => Ok(Self::Signal),
-            "sleep-stop" => Ok(Self::SleepStop),
             "rediscovery" => Ok(Self::Rediscovery),
             "sample-fault" => Ok(Self::SampleFault),
             "actuator-fault" => Ok(Self::ActuatorFault),
@@ -455,6 +456,7 @@ struct FixtureNotifier {
     completed_samples: Rc<Cell<usize>>,
     minimum_samples_before_ready: usize,
     ready_barrier: Option<PathBuf>,
+    watchdog_barrier: Option<PathBuf>,
 }
 
 impl ServiceNotifier for FixtureNotifier {
@@ -486,8 +488,19 @@ impl ServiceNotifier for FixtureNotifier {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        if !self.stop_after_watchdog && notification == ServiceNotification::Watchdog {
-            std::thread::sleep(Duration::from_millis(10));
+        if notification == ServiceNotification::Watchdog
+            && let Some(barrier) = &self.watchdog_barrier
+        {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !barrier.exists() {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "acceptance WATCHDOG barrier timed out",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
         if self.stop_after_watchdog && notification == ServiceNotification::Watchdog {
             self.shutdown.request();

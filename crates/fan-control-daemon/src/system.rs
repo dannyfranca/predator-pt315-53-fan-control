@@ -5,6 +5,7 @@ use std::{
     os::{fd::AsRawFd, unix::process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{OnceLock, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -567,7 +568,7 @@ impl SystemSensorSourceDiscovery<SystemSampleSources> {
 }
 
 impl<S> SystemSensorSourceDiscovery<S> {
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "acceptance-fixture")]
     pub(crate) fn injected(
         rediscover: impl FnMut(
             &mut dyn IdentityBoundReadAccess,
@@ -1760,7 +1761,7 @@ where
         .expect("piped command stdout must be present");
     let deadline = Instant::now() + timeout;
     if let Err(error) = set_nonblocking_fn(&stdout) {
-        kill_and_reap_until(&mut child, deadline);
+        kill_and_reap_until(child, deadline);
         return Err(format!("cannot bound {command_name} output: {error}"));
     }
     let cleanup_grace = std::cmp::min(timeout / 4, Duration::from_millis(50));
@@ -1768,13 +1769,13 @@ where
     let mut output = Vec::new();
     loop {
         if let Err(error) = drain_bounded_output(&mut stdout, &mut output, OUTPUT_LIMIT) {
-            kill_and_reap_until(&mut child, deadline);
+            kill_and_reap_until(child, deadline);
             return Err(format!("cannot read {command_name} output: {error}"));
         }
         let status = match try_wait_fn(&mut child) {
             Ok(status) => status,
             Err(error) => {
-                kill_and_reap_until(&mut child, deadline);
+                kill_and_reap_until(child, deadline);
                 return Err(format!("cannot wait for {command_name}: {error}"));
             }
         };
@@ -1791,7 +1792,7 @@ where
                 .map_err(|_| format!("{command_name} returned non-UTF-8 output"));
         }
         if Instant::now() >= execution_deadline {
-            kill_and_reap_until(&mut child, deadline);
+            kill_and_reap_until(child, deadline);
             return Err(format!("{command_name} exceeded its execution deadline"));
         }
         thread::sleep(Duration::from_millis(10));
@@ -1846,12 +1847,41 @@ fn kill_process_group(pid: u32) {
     }
 }
 
-fn kill_and_reap_until(child: &mut std::process::Child, deadline: Instant) {
+fn kill_and_reap_until(mut child: std::process::Child, deadline: Instant) {
     kill_process_group(child.id());
     while Instant::now() < deadline {
         match child.try_wait() {
             Ok(Some(_)) | Err(_) => return,
             Ok(None) => thread::sleep(Duration::from_millis(1)),
+        }
+    }
+    defer_child_reap(child);
+}
+
+fn defer_child_reap(child: std::process::Child) {
+    static REAPER: OnceLock<Option<mpsc::Sender<std::process::Child>>> = OnceLock::new();
+    let sender = REAPER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<std::process::Child>();
+        thread::Builder::new()
+            .name("pt31553-nvidia-reaper".into())
+            .spawn(move || {
+                for mut child in receiver {
+                    let _ = child.wait();
+                }
+            })
+            .ok()
+            .map(|_| sender)
+    });
+    match sender {
+        Some(sender) => {
+            if let Err(error) = sender.send(child) {
+                let mut child = error.0;
+                let _ = child.wait();
+            }
+        }
+        None => {
+            let mut child = child;
+            let _ = child.wait();
         }
     }
 }
@@ -2545,6 +2575,40 @@ mod tests {
             }
             assert!(!process_path.exists(), "{fault} child survived cleanup");
         }
+    }
+
+    #[test]
+    fn nvidia_process_runner_reaps_a_child_after_the_cleanup_deadline() {
+        let fixture = executable_script(
+            "#!/bin/sh\nprintf '%s' \"$$\" > \"$1\"\nwhile :; do sleep 1; done\n",
+        );
+        let pid_path = fixture.0.path().join("deferred.pid");
+        let mut command = Command::new(&fixture.1);
+        command.arg(pid_path.to_str().unwrap());
+        // SAFETY: setpgid is async-signal-safe and runs before the child executes the fixture.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().unwrap();
+        let pid_deadline = Instant::now() + Duration::from_millis(250);
+        while !pid_path.exists() && Instant::now() < pid_deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let pid = fs::read_to_string(&pid_path).unwrap();
+        let process_path = Path::new("/proc").join(pid.trim());
+
+        kill_and_reap_until(child, Instant::now());
+
+        let disappearance_deadline = Instant::now() + Duration::from_secs(1);
+        while process_path.exists() && Instant::now() < disappearance_deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!process_path.exists(), "deferred child remained unreaped");
     }
 
     #[test]

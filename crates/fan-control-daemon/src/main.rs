@@ -29,7 +29,7 @@ fn run() -> Result<(), DaemonError> {
                 report_unqualified_status();
                 return Ok(());
             }
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "acceptance-fixture")]
             [argument, scenario] if argument == "--acceptance-fixture" => Some(scenario.clone()),
             [] => None,
             _ => {
@@ -53,13 +53,13 @@ fn run() -> Result<(), DaemonError> {
     let _signal_handlers = TerminationSignalHandlers::install(shutdown_request.clone())
         .map_err(DaemonError::Supervision)?;
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "acceptance-fixture")]
     if let Some(scenario) = acceptance_scenario {
         return fan_control_daemon::run_acceptance_fixture(&scenario, notifier, &mut shutdown)
             .map_err(DaemonError::Supervision);
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "acceptance-fixture"))]
     let _ = acceptance_scenario;
 
     let mut discovery = discover_system_startup().map_err(DaemonError::Startup)?;

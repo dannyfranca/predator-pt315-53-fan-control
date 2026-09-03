@@ -1,5 +1,3 @@
-#![cfg(debug_assertions)]
-
 use std::{
     os::unix::net::UnixDatagram,
     process::{Child, Command, Output, Stdio},
@@ -42,6 +40,7 @@ fn production_binary_signals_restore_before_release() {
 
         assert_eq!(harness.notifications(2), ["READY=1", "WATCHDOG=1"]);
         assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
+        harness.release_watchdog_barrier();
         let output = wait_with_output_deadline(child);
 
         assert!(
@@ -51,26 +50,6 @@ fn production_binary_signals_restore_before_release() {
         );
         assert_state(&output, false, false, 1, 1, true, "ok");
     }
-}
-
-#[test]
-fn production_binary_systemd_stop_used_by_sleep_guard_restores_before_release() {
-    let harness = Harness::new("sleep-stop");
-    let child = harness
-        .command()
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-
-    assert_eq!(harness.notifications(2), ["READY=1", "WATCHDOG=1"]);
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
-    let output = wait_with_output_deadline(child);
-
-    assert!(output.status.success(), "{}", stderr(&output));
-    // The sleep guard's systemd transaction and fresh-resume gate are covered in sleep_guard.rs;
-    // this proves the production daemon side of its synchronous SIGTERM stop boundary.
-    assert_state(&output, false, false, 1, 1, true, "ok");
 }
 
 #[test]
@@ -100,6 +79,20 @@ fn production_binary_restores_on_real_notification_transport_failures() {
         "WATCHDOG transport unexpectedly succeeded"
     );
     assert_state(&output, false, false, 1, 1, true, "error");
+}
+
+#[test]
+fn production_binary_rejects_invalid_notification_setup_before_admission() {
+    let harness = Harness::new("normal");
+    let output = harness
+        .command()
+        .env("NOTIFY_SOCKET", "relative-notify.sock")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr(&output).contains("notification setup"));
 }
 
 #[test]
@@ -196,6 +189,7 @@ struct Harness {
     socket: UnixDatagram,
     socket_path: std::path::PathBuf,
     ready_ack: std::path::PathBuf,
+    watchdog_ack: std::path::PathBuf,
     scenario: &'static str,
 }
 
@@ -204,6 +198,7 @@ impl Harness {
         let directory = tempfile::tempdir().unwrap();
         let socket_path = directory.path().join("notify.sock");
         let ready_ack = directory.path().join("ready.ack");
+        let watchdog_ack = directory.path().join("watchdog.ack");
         let socket = UnixDatagram::bind(&socket_path).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(10)))
@@ -213,6 +208,7 @@ impl Harness {
             socket,
             socket_path,
             ready_ack,
+            watchdog_ack,
             scenario,
         }
     }
@@ -226,6 +222,9 @@ impl Harness {
             .env_remove("WATCHDOG_PID");
         if self.scenario == "notification-transport-failure" {
             command.env("PT31553_ACCEPTANCE_READY_ACK", &self.ready_ack);
+        }
+        if self.scenario == "signal" {
+            command.env("PT31553_ACCEPTANCE_WATCHDOG_ACK", &self.watchdog_ack);
         }
         command
     }
@@ -246,6 +245,10 @@ impl Harness {
 
     fn release_ready_barrier(&self) {
         std::fs::write(&self.ready_ack, b"continue\n").unwrap();
+    }
+
+    fn release_watchdog_barrier(&self) {
+        std::fs::write(&self.watchdog_ack, b"continue\n").unwrap();
     }
 
     fn notifications(&self, count: usize) -> Vec<String> {
