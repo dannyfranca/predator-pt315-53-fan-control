@@ -325,9 +325,6 @@ def parse_policy(path: pathlib.Path) -> dict:
             "module_vermagic",
             "kernel_source_commit",
             "nvidia_source_version",
-            "package_signer_sha256",
-            "module_signer_sha256",
-            "kernel_image_signer_sha256",
             "kernel_image_path",
             "kernel_config_path",
             "module_trust_certificate_path",
@@ -350,13 +347,6 @@ def parse_policy(path: pathlib.Path) -> dict:
             fail(f"invalid policy {field}")
     if not isinstance(policy["kernel_source_commit"], str) or not HEX_40.fullmatch(policy["kernel_source_commit"]):
         fail("invalid policy kernel_source_commit")
-    for field in (
-        "package_signer_sha256",
-        "module_signer_sha256",
-        "kernel_image_signer_sha256",
-    ):
-        if not isinstance(policy[field], str) or not HEX_64.fullmatch(policy[field]):
-            fail(f"invalid policy {field}")
     paths = [
         policy["kernel_image_path"],
         policy["kernel_config_path"],
@@ -424,10 +414,10 @@ def validate_schema_policy(path: pathlib.Path, policy: dict) -> None:
             "module_vermagic": definitions["module"]["properties"]["vermagic"]["const"],
             "kernel_source_commit": properties["build"]["properties"]["source_commit"]["const"],
             "nvidia_source_version": definitions["nvidia_module_template"]["allOf"][1]["properties"]["source"]["const"]["revision"],
-            "package_signer_sha256": properties["build"]["properties"]["package_manifest_signer_fingerprint"]["const"],
-            "module_signer_sha256": definitions["module"]["properties"]["signer_fingerprint"]["const"],
-            "module_trust_signer_sha256": properties["kernel"]["properties"]["module_trust_certificate_fingerprint"]["const"],
-            "kernel_image_signer_sha256": properties["kernel"]["properties"]["image_signer_fingerprint"]["const"],
+            "package_signer_schema": properties["build"]["properties"]["package_manifest_signer_fingerprint"],
+            "module_signer_schema": definitions["module"]["properties"]["signer_fingerprint"],
+            "module_trust_signer_schema": properties["kernel"]["properties"]["module_trust_certificate_fingerprint"],
+            "kernel_image_signer_schema": properties["kernel"]["properties"]["image_signer_fingerprint"],
             "kernel_image_path": properties["kernel"]["properties"]["image_path"]["const"].removeprefix("/"),
             "kernel_config_path": properties["kernel"]["properties"]["config_path"]["const"].removeprefix("/"),
             "module_trust_certificate_path": properties["kernel"]["properties"]["module_trust_certificate_path"]["const"].removeprefix("/"),
@@ -448,10 +438,10 @@ def validate_schema_policy(path: pathlib.Path, policy: dict) -> None:
         "module_vermagic": policy["module_vermagic"],
         "kernel_source_commit": policy["kernel_source_commit"],
         "nvidia_source_version": policy["nvidia_source_version"],
-        "package_signer_sha256": policy["package_signer_sha256"],
-        "module_signer_sha256": policy["module_signer_sha256"],
-        "module_trust_signer_sha256": policy["module_signer_sha256"],
-        "kernel_image_signer_sha256": policy["kernel_image_signer_sha256"],
+        "package_signer_schema": {"$ref": "#/$defs/sha256"},
+        "module_signer_schema": {"$ref": "#/$defs/sha256"},
+        "module_trust_signer_schema": {"$ref": "#/$defs/sha256"},
+        "kernel_image_signer_schema": {"$ref": "#/$defs/sha256"},
         "kernel_image_path": policy["kernel_image_path"],
         "kernel_config_path": policy["kernel_config_path"],
         "module_trust_certificate_path": policy["module_trust_certificate_path"],
@@ -471,10 +461,8 @@ def validate_compatibility_policy(compatibility: dict, policy: dict) -> None:
             "kernel_release": kernel["release"],
             "kernel_package": kernel["package"],
             "kernel_source_commit": kernel["source_commit"],
-            "kernel_image_signer_sha256": kernel["image_signer_fingerprint"],
             "module_name": module["name"],
             "module_path": module["path"].removeprefix("/"),
-            "module_signer_sha256": module["signer_fingerprint"],
             "module_vermagic": module["vermagic"],
         }
     except (KeyError, TypeError, AttributeError):
@@ -483,10 +471,8 @@ def validate_compatibility_policy(compatibility: dict, policy: dict) -> None:
         "kernel_release": policy["kernel_release"],
         "kernel_package": policy["packages_by_role"]["kernel"]["name"],
         "kernel_source_commit": policy["kernel_source_commit"],
-        "kernel_image_signer_sha256": policy["kernel_image_signer_sha256"],
         "module_name": "acer_wmi",
         "module_path": policy["acer_module_path"],
-        "module_signer_sha256": policy["module_signer_sha256"],
         "module_vermagic": policy["module_vermagic"],
     }
     if actual != expected:
@@ -2855,17 +2841,6 @@ def main() -> int:
         verify_expected_fingerprint(kernel_fingerprint, args.kernel_cert_sha256, "kernel certificate")
         if len({module_fingerprint, package_fingerprint, kernel_fingerprint}) != 3:
             fail("package, module, and kernel image signers must be distinct")
-        verify_expected_fingerprint(
-            package_fingerprint, policy["package_signer_sha256"], "policy package signer"
-        )
-        verify_expected_fingerprint(
-            module_fingerprint, policy["module_signer_sha256"], "policy module signer"
-        )
-        verify_expected_fingerprint(
-            kernel_fingerprint,
-            policy["kernel_image_signer_sha256"],
-            "policy kernel image signer",
-        )
         canonical_sensitive_artifact_inspection(
             script_root,
             root,
@@ -2958,6 +2933,7 @@ def main() -> int:
                 "build_attestation_sha256": attestation_hash,
                 "pkgbuild_sha256": packages[0]["pkgbuild_sha256"],
                 "package_set_srcinfo_sha256": srcinfo_hash,
+                "package_manifest_signature_sha256": sha256_file(manifest_signature),
                 "package_manifest_signer_fingerprint": package_fingerprint,
             },
             "kernel": {

@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dannyfranca/predator-pt315-53-fan-control/schemas/candidate-identity-v1.json",
+  "title": "PT315-53 unqualified source-built candidate identity v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "qualification_status", "candidate", "controller", "kernel", "package_set", "installation"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "qualification_status": { "const": "unqualified" },
+    "candidate": { "const": "linux-cachyos-pt31553-7.1.8-1-package-set" },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "architecture", "source_commit", "package_sha256", "signature_sha256", "signer_fingerprint", "compatibility_sha256"],
+      "properties": {
+        "name": { "const": "pt31553-fan-control" },
+        "version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+:-]*$" },
+        "architecture": { "const": "x86_64" },
+        "source_commit": { "$ref": "#/$defs/commit" },
+        "package_sha256": { "$ref": "#/$defs/sha256" },
+        "signature_sha256": { "$ref": "#/$defs/sha256" },
+        "signer_fingerprint": { "$ref": "#/$defs/openpgp_fingerprint" },
+        "compatibility_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "kernel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "source_commit", "image_sha256", "image_signer_fingerprint", "module_sha256", "module_signer_fingerprint"],
+      "properties": {
+        "release": { "const": "7.1.8-cachyos-pt31553" },
+        "source_commit": { "const": "7a84732fd5e4350c1312fd0ed0c72ffa139fb766" },
+        "image_sha256": { "$ref": "#/$defs/sha256" },
+        "image_signer_fingerprint": { "$ref": "#/$defs/sha256" },
+        "module_sha256": { "$ref": "#/$defs/sha256" },
+        "module_signer_fingerprint": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "package_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provenance_sha256", "manifest_signature_sha256", "manifest_signer_fingerprint", "artifacts"],
+      "properties": {
+        "provenance_sha256": { "$ref": "#/$defs/sha256" },
+        "manifest_signature_sha256": { "$ref": "#/$defs/sha256" },
+        "manifest_signer_fingerprint": { "$ref": "#/$defs/sha256" },
+        "artifacts": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            { "allOf": [{ "$ref": "#/$defs/artifact" }, { "properties": { "name": { "const": "linux-cachyos-pt31553" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/artifact" }, { "properties": { "name": { "const": "linux-cachyos-pt31553-headers" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/artifact" }, { "properties": { "name": { "const": "linux-cachyos-pt31553-nvidia-open" } } }] }
+          ],
+          "items": false
+        }
+      }
+    },
+    "installation": {
+      "const": {
+        "allowed_state": "disabled-only",
+        "candidate_default": false,
+        "recovery_kernel_package": "linux-cachyos-lts"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "not": { "enum": ["0000000000000000000000000000000000000000000000000000000000000000", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"] }
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "not": { "enum": ["0000000000000000000000000000000000000000", "ffffffffffffffffffffffffffffffffffffffff"] }
+    },
+    "openpgp_fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9A-F]{40}$",
+      "not": { "enum": ["0000000000000000000000000000000000000000", "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"] }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "architecture", "sha256"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "const": "7.1.8-1" },
+        "architecture": { "const": "x86_64" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

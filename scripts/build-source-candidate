@@ -1,0 +1,333 @@
+#!/usr/bin/bash -p
+set -euo pipefail
+
+PATH=/usr/bin
+export PATH
+
+usage() {
+    cat >&2 <<'EOF'
+usage: scripts/build-source-candidate \
+  --bundle DIR --kernel-signing-dir DIR \
+  --package-cert FILE --package-cert-sha256 SHA256 --package-key FILE \
+  --module-cert-sha256 SHA256 \
+  --kernel-cert FILE --kernel-cert-sha256 SHA256 \
+  --cargo-home DIR --controller-gnupg-home DIR \
+  --controller-key FINGERPRINT --output NEW_DIR
+
+Builds and records an unqualified, disabled-only source candidate. It never
+installs packages, changes a boot default, enables a unit, or runs GitHub Actions.
+EOF
+    exit 64
+}
+
+bundle=
+kernel_signing_dir=
+package_cert=
+package_cert_sha256=
+package_key=
+module_cert_sha256=
+kernel_cert=
+kernel_cert_sha256=
+cargo_home=
+controller_gnupg_home=
+controller_key=
+output=
+while (( $# )); do
+    case "$1" in
+        --bundle|--kernel-signing-dir|--package-cert|--package-cert-sha256|--package-key|--module-cert-sha256|--kernel-cert|--kernel-cert-sha256|--cargo-home|--controller-gnupg-home|--controller-key|--output)
+            (( $# >= 2 )) || usage
+            name=${1#--}
+            name=${name//-/_}
+            printf -v "$name" '%s' "$2"
+            shift 2
+            ;;
+        *) usage ;;
+    esac
+done
+for required in bundle kernel_signing_dir package_cert package_cert_sha256 \
+    package_key module_cert_sha256 kernel_cert kernel_cert_sha256 \
+    cargo_home controller_gnupg_home controller_key output; do
+    [[ -n "${!required}" ]] || usage
+done
+
+for unsafe_variable in BASH_ENV ENV OPENSSL_CONF OPENSSL_MODULES LD_PRELOAD \
+    LD_LIBRARY_PATH PYTHONPATH PYTHONHOME PERL5LIB RUBYLIB NODE_OPTIONS \
+    GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_DIR GIT_WORK_TREE \
+    GIT_OBJECT_DIRECTORY GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS MAKEPKG_CONF \
+    CARGO_HOME GNUPGHOME PKGDEST SRCDEST SRCPKGDEST LOGDEST BUILDDIR; do
+    [[ -z "${!unsafe_variable+x}" ]] || {
+        echo "unsafe inherited environment: $unsafe_variable" >&2
+        exit 2
+    }
+done
+for unsafe_variable in $(compgen -e); do
+    case "$unsafe_variable" in
+        GIT_CONFIG_KEY_*|GIT_CONFIG_VALUE_*)
+            echo "unsafe inherited environment: $unsafe_variable" >&2
+            exit 2
+            ;;
+    esac
+done
+
+script_root=$(/usr/bin/realpath --canonicalize-existing "${BASH_SOURCE[0]}")
+source_root=${script_root%/scripts/build-source-candidate}
+[[ "$source_root" != "$script_root" ]]
+for tool in \
+    /usr/bin/bash /usr/bin/bsdtar /usr/bin/cat /usr/bin/chmod /usr/bin/cmp \
+    /usr/bin/cp /usr/bin/cut /usr/bin/env /usr/bin/find /usr/bin/git \
+    /usr/bin/gpg /usr/bin/gzip \
+    /usr/bin/install /usr/bin/makepkg /usr/bin/mktemp /usr/bin/mv \
+    /usr/bin/openssl /usr/bin/pacman /usr/bin/pacman-key /usr/bin/python3 \
+    /usr/bin/realpath /usr/bin/rm /usr/bin/sed /usr/bin/sha256sum \
+    /usr/bin/stat; do
+    resolved_tool=$(/usr/bin/realpath --canonicalize-existing "$tool")
+    [[ "$resolved_tool" == /usr/bin/* && -f "$resolved_tool" && -x "$resolved_tool" ]]
+    mode=$(/usr/bin/stat -c %a "$resolved_tool")
+    [[ $(/usr/bin/stat -c %u "$resolved_tool") == 0 && $((8#$mode & 8#022)) == 0 ]]
+done
+
+[[ "$output" == /* && ! -e "$output" && ! -L "$output" ]] || {
+    echo "--output must be a new absolute path" >&2
+    exit 2
+}
+output_parent=${output%/*}
+[[ -d "$output_parent" && ! -L "$output_parent" ]]
+output_parent=$(/usr/bin/realpath --canonicalize-existing "$output_parent")
+output="$output_parent/${output##*/}"
+parent_mode=$(/usr/bin/stat -c %a "$output_parent")
+[[ $(/usr/bin/stat -c %u "$output_parent") == $EUID && $((8#$parent_mode & 8#022)) == 0 ]] || {
+    echo "output parent must be caller-owned and not group/other writable" >&2
+    exit 2
+}
+
+bundle=$(/usr/bin/realpath --canonicalize-existing --no-symlinks "$bundle")
+kernel_signing_dir=$(/usr/bin/realpath --canonicalize-existing --no-symlinks "$kernel_signing_dir")
+package_cert=$(/usr/bin/realpath --canonicalize-existing --no-symlinks "$package_cert")
+package_key=$(/usr/bin/realpath --canonicalize-existing --no-symlinks "$package_key")
+kernel_cert=$(/usr/bin/realpath --canonicalize-existing --no-symlinks "$kernel_cert")
+cargo_home=$(/usr/bin/realpath --canonicalize-existing --no-symlinks "$cargo_home")
+controller_gnupg_home=$(/usr/bin/realpath --canonicalize-existing --no-symlinks "$controller_gnupg_home")
+[[ -d "$bundle" && -d "$kernel_signing_dir" && -d "$cargo_home" && \
+    -d "$controller_gnupg_home" ]]
+for public_input in "$package_cert" "$kernel_cert"; do
+    [[ -f "$public_input" && ! -L "$public_input" ]]
+done
+[[ -f "$package_key" && ! -L "$package_key" ]]
+key_mode=$(/usr/bin/stat -c %a "$package_key")
+[[ $(/usr/bin/stat -c %u "$package_key") == $EUID && $((8#$key_mode & 8#077)) == 0 ]] || {
+    echo "package signing key must be caller-owned and private" >&2
+    exit 2
+}
+for private_directory in "$cargo_home" "$controller_gnupg_home"; do
+    private_mode=$(/usr/bin/stat -c %a "$private_directory")
+    [[ $(/usr/bin/stat -c %u "$private_directory") == $EUID && \
+        $((8#$private_mode & 8#077)) == 0 ]] || {
+        echo "private build directories must be caller-owned and private" >&2
+        exit 2
+    }
+done
+[[ "$controller_key" =~ ^[0-9A-Fa-f]{40}$ ]]
+controller_key=${controller_key^^}
+for expected_certificate in "$package_cert_sha256" "$module_cert_sha256" \
+    "$kernel_cert_sha256"; do
+    [[ "$expected_certificate" =~ ^[0-9a-f]{64}$ && \
+        "$expected_certificate" != 0000000000000000000000000000000000000000000000000000000000000000 && \
+        "$expected_certificate" != ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff ]]
+done
+[[ "$package_cert_sha256" != "$module_cert_sha256" && \
+    "$package_cert_sha256" != "$kernel_cert_sha256" && \
+    "$module_cert_sha256" != "$kernel_cert_sha256" ]]
+
+run_git() {
+    /usr/bin/env -i PATH=/usr/bin HOME=/nonexistent \
+        /usr/bin/git -c core.fsmonitor=false "$@"
+}
+revision=$(run_git -C "$source_root" rev-parse HEAD)
+[[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+index_entries=$(run_git -C "$source_root" ls-files -v)
+while IFS= read -r index_entry; do
+    [[ "${index_entry:0:2}" == 'H ' ]] || {
+        echo "nondefault Git index flag hides a tracked path: ${index_entry:2}" >&2
+        exit 2
+    }
+done <<<"$index_entries"
+[[ -z "$(run_git -C "$source_root" status --porcelain=v1 --untracked-files=all)" ]] || {
+    echo "candidate builds require a clean reviewed source checkout" >&2
+    exit 2
+}
+
+work=$(/usr/bin/mktemp -d "$output_parent/.source-candidate.XXXXXX")
+cleanup() {
+    /usr/bin/chmod -R u+rwX "$work" 2>/dev/null || true
+    /usr/bin/rm -rf -- "$work"
+}
+trap cleanup EXIT HUP INT TERM
+/usr/bin/chmod 0700 "$work"
+safe_home="$work/home"
+/usr/bin/install -d -m 0700 "$safe_home" "$safe_home/.config"
+payload="$work/payload"
+kernel_output="$payload/kernel"
+controller_output="$payload/controller"
+declarations="$payload/declarations"
+signatures="$payload/signatures"
+/usr/bin/install -d -m 0700 "$payload" "$kernel_output" "$controller_output" \
+    "$declarations" "$signatures"
+
+/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+SOURCE_LOCK_SIGNING_DIR="$kernel_signing_dir" \
+SOURCE_LOCK_OUTPUT="$kernel_output" \
+    "$source_root/scripts/verify-source-lock" --inputs "$bundle" --exec-verified
+
+package_manifest_signature="$signatures/package-set.p7s"
+/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+/usr/bin/openssl cms -sign -binary \
+    -in "$kernel_output/SHA256SUMS" \
+    -signer "$package_cert" -inkey "$package_key" \
+    -outform DER -out "$package_manifest_signature" \
+    -nocerts -noattr -md sha256
+[[ -s "$package_manifest_signature" ]]
+
+provenance="$declarations/package-provenance-v1.json"
+/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+"$source_root/scripts/verify-package-provenance" \
+    --artifacts "$kernel_output" \
+    --module-cert "$kernel_signing_dir/module-signing-certificate.der" \
+    --module-cert-sha256 "$module_cert_sha256" \
+    --package-cert "$package_cert" \
+    --package-cert-sha256 "$package_cert_sha256" \
+    --kernel-cert "$kernel_cert" \
+    --kernel-cert-sha256 "$kernel_cert_sha256" \
+    --package-manifest-signature "$package_manifest_signature" \
+    --output "$provenance"
+
+compatibility="$declarations/compatibility.toml"
+/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+"$source_root/scripts/generate-candidate-declarations" compatibility \
+    --provenance "$provenance" --output "$compatibility"
+
+controller_build="$work/controller-build"
+/usr/bin/install -d -m 0700 "$controller_build"
+/usr/bin/cp -a "$source_root/packaging/controller/." "$controller_build/"
+controller_source_commit=$(/usr/bin/sed -n \
+    "s/^_commit='\([0-9a-f]\{40\}\)'$/\1/p" \
+    "$controller_build/PKGBUILD")
+[[ "$controller_source_commit" =~ ^[0-9a-f]{40}$ ]]
+run_git -C "$source_root" cat-file -e "$controller_source_commit^{commit}"
+/usr/bin/install -m 0444 "$compatibility" \
+    "$controller_build/candidate-compatibility.toml"
+controller_archive="$controller_build/pt31553-fan-control-0.1.0.tar.gz"
+run_git -C "$source_root" archive --format=tar.gz \
+    --prefix="predator-pt315-53-fan-control-$controller_source_commit/" \
+    --output "$controller_archive" "$controller_source_commit"
+controller_archive_sha256=$(/usr/bin/sha256sum "$controller_archive" | \
+    /usr/bin/cut -d ' ' -f 1)
+printf '%s\n' "$controller_source_commit" >"$controller_build/controller-source-commit"
+controller_source_commit_sha256=$(/usr/bin/sha256sum \
+    "$controller_build/controller-source-commit" | /usr/bin/cut -d ' ' -f 1)
+compatibility_sha256=$(/usr/bin/sha256sum \
+    "$controller_build/candidate-compatibility.toml" | /usr/bin/cut -d ' ' -f 1)
+{
+    printf '\nsource=("pt31553-fan-control-0.1.0.tar.gz" "candidate-compatibility.toml" "controller-source-commit")\n'
+    printf 'sha256sums=("%s" "%s" "%s")\n' \
+        "$controller_archive_sha256" "$compatibility_sha256" \
+        "$controller_source_commit_sha256"
+    cat <<'RECIPE'
+eval "$(declare -f package | sed '1s/^package /_source_candidate_package /')"
+package() {
+  _source_candidate_package
+  install -Dm644 "$srcdir/candidate-compatibility.toml" \
+    "$pkgdir/usr/lib/pt31553-fan-control/compatibility.toml"
+  install -Dm644 "$srcdir/controller-source-commit" \
+    "$pkgdir/usr/share/pt31553-fan-control/source-commit"
+}
+RECIPE
+} >>"$controller_build/PKGBUILD"
+controller_signer_file="$work/controller-signer-fingerprint"
+(
+    cd "$controller_build"
+    run_controller_makepkg() {
+        /usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+        XDG_CONFIG_HOME="$safe_home/.config" CARGO_HOME="$cargo_home" \
+        GNUPGHOME="$controller_gnupg_home" CARGO_NET_OFFLINE=true \
+        SRCDEST="$controller_build" PKGDEST="$controller_build" \
+        BUILDDIR="$controller_build/build" \
+        /usr/bin/makepkg "$@"
+    }
+    mapfile -t packages < <(run_controller_makepkg --packagelist)
+    [[ "${#packages[@]}" -eq 1 ]]
+    [[ "${packages[0]}" == "$controller_build/"* ]]
+    [[ ! -e "${packages[0]}" && ! -L "${packages[0]}" && \
+        ! -e "${packages[0]}.sig" && ! -L "${packages[0]}.sig" ]]
+    run_controller_makepkg --cleanbuild --noconfirm --sign \
+        --key "$controller_key"
+    [[ -f "${packages[0]}" && ! -L "${packages[0]}" ]]
+    [[ -f "${packages[0]}.sig" && ! -L "${packages[0]}.sig" ]]
+    package_parent=$(/usr/bin/realpath --canonicalize-existing "${packages[0]%/*}")
+    [[ "$package_parent" == "$controller_build" ]]
+    /usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+        /usr/bin/pacman-key --verify "${packages[0]}.sig" "${packages[0]}"
+    controller_signature_status="$work/controller-signature.status"
+    /usr/bin/env -i PATH=/usr/bin HOME="$safe_home" LC_ALL=C \
+    /usr/bin/gpg --batch --no-options \
+        --homedir /etc/pacman.d/gnupg --status-fd 1 \
+        --verify "${packages[0]}.sig" "${packages[0]}" \
+        >"$controller_signature_status"
+    controller_signer=$(/usr/bin/python3 -I - "$controller_signature_status" <<'PY'
+import pathlib, re, sys
+
+fingerprints = []
+for line in pathlib.Path(sys.argv[1]).read_text(encoding="ascii").splitlines():
+    fields = line.split()
+    if len(fields) >= 3 and fields[:2] == ["[GNUPG:]", "VALIDSIG"]:
+        values = [value for value in fields[2:] if re.fullmatch(r"[0-9A-F]{40}", value)]
+        if values:
+            fingerprints.append(values[-1])
+if len(fingerprints) != 1:
+    raise SystemExit("expected exactly one valid controller signature")
+print(fingerprints[0])
+PY
+    )
+    [[ "$controller_signer" == "$controller_key" ]]
+    printf '%s\n' "$controller_signer" >"$controller_signer_file"
+    /usr/bin/bsdtar -xOf "${packages[0]}" \
+        usr/lib/pt31553-fan-control/compatibility.toml \
+        >"$work/packaged-compatibility.toml"
+    /usr/bin/cmp "$compatibility" "$work/packaged-compatibility.toml"
+    /usr/bin/bsdtar -xOf "${packages[0]}" \
+        usr/share/pt31553-fan-control/source-commit \
+        >"$work/packaged-controller-source-commit"
+    /usr/bin/cmp "$controller_build/controller-source-commit" \
+        "$work/packaged-controller-source-commit"
+    /usr/bin/install -m 0444 "${packages[0]}" "$controller_output/"
+    /usr/bin/install -m 0444 "${packages[0]}.sig" "$controller_output/"
+)
+controller_signer=$(/usr/bin/cat "$controller_signer_file")
+mapfile -t controller_packages < <(
+    /usr/bin/find "$controller_output" -mindepth 1 -maxdepth 1 -type f \
+        -name '*.pkg.tar.zst' -print
+)
+[[ "${#controller_packages[@]}" -eq 1 ]]
+controller_package=${controller_packages[0]}
+controller_signature="$controller_package.sig"
+/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+"$source_root/scripts/generate-candidate-declarations" manifest \
+    --provenance "$provenance" \
+    --compatibility "$compatibility" \
+    --controller-package "$controller_package" \
+    --controller-signature "$controller_signature" \
+    --controller-signer-fingerprint "$controller_signer" \
+    --package-manifest-signature "$package_manifest_signature" \
+    --output "$declarations/candidate-identity-v1.json"
+
+/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+/usr/bin/python3 -I "$source_root/scripts/check-sensitive-history" --tree "$payload" \
+    --allow-public-certificate "$package_cert" \
+    --allow-public-certificate "$kernel_cert" \
+    --allow-public-certificate "$kernel_signing_dir/module-signing-certificate.der"
+/usr/bin/chmod -R a-w "$payload"
+/usr/bin/chmod u+w "$payload"
+/usr/bin/mv -T "$payload" "$output"
+/usr/bin/chmod a-w "$output"
+trap - EXIT HUP INT TERM
+/usr/bin/rm -rf -- "$work"
+printf 'built unqualified source candidate: %s\n' "$output"
