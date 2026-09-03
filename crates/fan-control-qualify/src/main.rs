@@ -23,8 +23,8 @@ use fan_control_core::{
     BaselineCleanupAttestation, BaselineObservation, BaselineStartingConditions,
     CapturedBaselineStartingConditions, CapturedMatchedWorkloadStartingConditions,
     CompatibilityObservation, EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceTimestamp,
-    FanReadbackField, FanReadbackPhase, FileAccess, FirmwareAutoBaselineEnvironment,
-    FirmwareAutoBaselinePlan, MatchedWorkloadFanRestoration, MatchedWorkloadObservation,
+    FileAccess, FirmwareAutoBaselineEnvironment, FirmwareAutoBaselinePlan,
+    MatchedWorkloadFanRestoration, MatchedWorkloadObservation,
     MatchedWorkloadTachometerCalibrations, NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind,
     NvmlGpuSample, PlatformError, PlatformErrorKind, PreflightArtifact, PreflightEnvironment,
     PreflightInputs, PreflightRequirements, ProtectedFileRequirement, QUALIFICATION_RECORD_PATH,
@@ -34,10 +34,11 @@ use fan_control_core::{
     SupervisedEnduranceProcessStopConfirmation, SupervisedEnduranceSegment,
     SupervisedEnduranceSegmentConfirmation, SystemOwnershipPlatform, TelemetrySampleEvidence,
     WorkloadEvidence, discover_acer_hwmon, parse_compatibility_v1, parse_evidence_v2,
-    run_firmware_auto_baseline, run_read_only_preflight, run_supervised_endurance,
-    validate_firmware_auto_baseline_resume, validate_qualification_evidence_v2,
-    validate_root_owned_output_destination, validate_root_owned_protected_file,
-    write_qualification_record_after_endurance, write_root_owned_evidence_atomically,
+    path_has_extended_acl, run_firmware_auto_baseline, run_read_only_preflight,
+    run_supervised_endurance, validate_firmware_auto_baseline_resume,
+    validate_qualification_evidence_v2, validate_root_owned_output_destination,
+    validate_root_owned_protected_file, write_qualification_record_after_endurance,
+    write_root_owned_evidence_atomically,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -251,8 +252,9 @@ fn preflight_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> {
     println!("{report}");
     if !passed {
         return Err(format!(
-            "preflight failed; Firmware Auto remains required; evidence: {}",
-            output.display()
+            "preflight failed; evidence: {}; recovery: {}",
+            output.display(),
+            firmware_auto_recovery(record.outcome.final_firmware_auto_confirmed)
         )
         .into());
     }
@@ -285,11 +287,16 @@ fn firmware_auto_baselines_command(values: Vec<OsString>) -> Result<(), Box<dyn 
     let (current_preflight, current_report) = execute_read_only_preflight(&manifest, &harness)?;
     if current_preflight.outcome.status != RunOutcomeStatus::Passed {
         return Err(format!(
-            "baseline start aborted; live preflight no longer passes:\n{current_report}\nrecovery: keep both fans in Firmware Auto and repair every failed check"
+            "baseline start aborted; live preflight no longer passes:\n{current_report}\nrecovery: {}",
+            firmware_auto_recovery(current_preflight.outcome.final_firmware_auto_confirmed)
         )
         .into());
     }
-    require_same_final_auto_endpoints(&preflight, &current_preflight)?;
+    require_same_fan_endpoints(&preflight, &current_preflight)?;
+    let expected_fan_endpoint_identities = preflight
+        .fan_endpoint_identities
+        .clone()
+        .ok_or("complete fan endpoint identities are missing from preflight evidence")?;
 
     let mut platform = SystemOwnershipPlatform::new();
     for (index, spec) in required_baselines().iter().enumerate() {
@@ -313,6 +320,8 @@ fn firmware_auto_baselines_command(values: Vec<OsString>) -> Result<(), Box<dyn 
             hwmon_root: &manifest.hwmon_root,
             qualification_envelope: manifest.qualification_envelope.clone(),
             preflight_binding_sha256: preflight_binding_sha256.clone(),
+            nvidia_gpu_uuid: manifest.nvidia_gpu_uuid.clone(),
+            expected_fan_endpoint_identities: expected_fan_endpoint_identities.clone(),
             workload,
             samples_required: spec.samples,
         };
@@ -322,7 +331,7 @@ fn firmware_auto_baselines_command(values: Vec<OsString>) -> Result<(), Box<dyn 
             validate_firmware_auto_baseline_resume(&mut platform, &record, &plan).map_err(
                 |error| {
                     format!(
-                        "cannot resume {} from {}: {error}; recovery: preserve the rejected evidence and start a new protected evidence directory",
+                        "cannot resume {} from {}: {error}; recovery: preserve the rejected evidence; stop all qualification workloads, shut down immediately, and do not reboot into the candidate kernel until Firmware Auto is independently verified; then start a new protected evidence directory",
                         spec.workload_id,
                         output.display()
                     )
@@ -335,12 +344,13 @@ fn firmware_auto_baselines_command(values: Vec<OsString>) -> Result<(), Box<dyn 
         let (live_preflight, report) = execute_read_only_preflight(&manifest, &harness)?;
         if live_preflight.outcome.status != RunOutcomeStatus::Passed {
             return Err(format!(
-                "{} aborted before workload; live preflight failed:\n{report}\nrecovery: keep both fans in Firmware Auto and repair every failed check",
-                spec.workload_id
+                "{} aborted before workload; live preflight failed:\n{report}\nrecovery: {}",
+                spec.workload_id,
+                firmware_auto_recovery(live_preflight.outcome.final_firmware_auto_confirmed)
             )
             .into());
         }
-        require_same_final_auto_endpoints(&preflight, &live_preflight)?;
+        require_same_fan_endpoints(&preflight, &live_preflight)?;
         println!(
             "START {}: Firmware Auto; {} samples at 2 s",
             spec.workload_id, spec.samples
@@ -350,8 +360,9 @@ fn firmware_auto_baselines_command(values: Vec<OsString>) -> Result<(), Box<dyn 
         let record = report.into_record();
         write_root_owned_evidence_atomically(&output, &record)?;
         if !accepted {
+            let recovery = firmware_auto_recovery(record.outcome.final_firmware_auto_confirmed);
             return Err(format!(
-                "{} aborted: {}; workload stop/containment status recorded; final Firmware Auto confirmed={}; evidence: {}",
+                "{} aborted: {}; workload stop/containment status recorded; final Firmware Auto confirmed={}; evidence: {}; recovery: {recovery}",
                 spec.workload_id,
                 record.outcome.reason,
                 record.outcome.final_firmware_auto_confirmed,
@@ -366,6 +377,14 @@ fn firmware_auto_baselines_command(values: Vec<OsString>) -> Result<(), Box<dyn 
         manifest.evidence_root.display()
     );
     Ok(())
+}
+
+fn firmware_auto_recovery(confirmed: bool) -> &'static str {
+    if confirmed {
+        "keep both fans in Firmware Auto; stop and repair the failed prerequisite; start a new protected evidence directory"
+    } else {
+        "stop all qualification workloads, shut down immediately, and do not reboot into the candidate kernel until independent Firmware Auto recovery is verified"
+    }
 }
 
 fn require_root(command: &str) -> Result<(), Box<dyn Error>> {
@@ -407,11 +426,19 @@ fn parse_stage_arguments(values: Vec<OsString>) -> Result<StageArguments, Box<dy
 }
 
 fn read_stages_manifest(path: &Path) -> Result<QualificationStagesManifest, Box<dyn Error>> {
-    let manifest: QualificationStagesManifest = serde_json::from_str(&read_protected_file(path)?)?;
+    let mut manifest: QualificationStagesManifest =
+        serde_json::from_str(&read_protected_file(path)?)?;
     if !manifest.evidence_root.is_absolute() || !manifest.hwmon_root.is_absolute() {
         return Err("manifest hwmon_root and evidence_root must be absolute".into());
     }
+    canonicalize_manifest_gpu_uuid(&mut manifest.nvidia_gpu_uuid);
     Ok(manifest)
+}
+
+fn canonicalize_manifest_gpu_uuid(uuid: &mut String) {
+    if let Ok(selector) = NvidiaGpuSelector::uuid(&*uuid) {
+        *uuid = selector.value().to_owned();
+    }
 }
 
 fn execute_read_only_preflight(
@@ -507,6 +534,7 @@ fn execute_read_only_preflight(
     let completed_at = harness.timestamp_now();
     let record = report.into_evidence(
         manifest.qualification_envelope.clone(),
+        Some(manifest.nvidia_gpu_uuid.clone()),
         started_at,
         completed_at,
     )?;
@@ -521,8 +549,10 @@ fn validate_sandbox_fan_boundary(
     for endpoint in [
         device.cpu().pwm(),
         device.cpu().enable(),
+        device.cpu().tachometer(),
         device.gpu().pwm(),
         device.gpu().enable(),
+        device.gpu().tachometer(),
     ] {
         let permissions = platform.permissions(endpoint)?;
         if permissions.owner_uid() != 0
@@ -530,7 +560,7 @@ fn validate_sandbox_fan_boundary(
             || permissions.has_extended_acl()
         {
             return Err(format!(
-                "fan mode endpoint is writable by the harness sandbox: {}",
+                "fan endpoint is writable by the harness sandbox: {}",
                 endpoint.display()
             )
             .into());
@@ -550,6 +580,9 @@ fn failed_preflight_collection(
     let plain = report.to_string();
     let record = report.into_evidence(
         manifest.qualification_envelope.clone(),
+        NvidiaGpuSelector::uuid(&manifest.nvidia_gpu_uuid)
+            .ok()
+            .map(|selector| selector.value().to_owned()),
         started_at,
         completed_at,
     )?;
@@ -564,6 +597,7 @@ fn require_matching_recent_preflight(
 ) -> Result<(), Box<dyn Error>> {
     if record.stage != "preflight"
         || record.qualification_envelope != manifest.qualification_envelope
+        || record.nvidia_gpu_uuid.as_deref() != Some(manifest.nvidia_gpu_uuid.as_str())
         || record.outcome.status != RunOutcomeStatus::Passed
         || record.outcome.another_passing_run_required
     {
@@ -641,31 +675,17 @@ fn require_fresh_wall_time(timestamp: i64, label: &str) -> Result<(), Box<dyn Er
     Ok(())
 }
 
-fn require_same_final_auto_endpoints(
+fn require_same_fan_endpoints(
     expected: &EvidenceRecord,
     current: &EvidenceRecord,
 ) -> Result<(), Box<dyn Error>> {
-    for fan in [EvidenceFan::Cpu, EvidenceFan::Gpu] {
-        let identity = |record: &EvidenceRecord| {
-            record
-                .readbacks
-                .iter()
-                .rev()
-                .find(|readback| {
-                    readback.fan == fan
-                        && readback.field == FanReadbackField::Enable
-                        && readback.phase == Some(FanReadbackPhase::Final)
-                        && readback.value == Some(2)
-                        && readback.outcome == fan_control_core::ObservationOutcome::Confirmed
-                })
-                .map(|readback| readback.endpoint_identity.clone())
-        };
-        if identity(expected).is_none() || identity(expected) != identity(current) {
-            return Err(
-                "fan endpoint identity changed since preflight; start a new evidence session"
-                    .into(),
-            );
-        }
+    let Some(expected_identities) = &expected.fan_endpoint_identities else {
+        return Err("complete fan endpoint identities are missing from preflight evidence".into());
+    };
+    if current.fan_endpoint_identities.as_ref() != Some(expected_identities) {
+        return Err(
+            "fan endpoint identity changed since preflight; start a new evidence session".into(),
+        );
     }
     Ok(())
 }
@@ -902,6 +922,17 @@ impl HarnessEnvironment {
         system_timestamp()
     }
 
+    fn wait_until_deadline(&self, target: u64, deadline: u64) -> Result<(), String> {
+        let now = self.now_millis();
+        let delay = wait_delay_millis(now, target, deadline)?;
+        if delay > 0 {
+            thread::sleep(Duration::from_millis(delay));
+        }
+        (self.now_millis() <= deadline)
+            .then_some(())
+            .ok_or_else(|| "wait exceeded deadline".into())
+    }
+
     fn invoke<T: DeserializeOwned>(
         &self,
         operation: &str,
@@ -1040,6 +1071,16 @@ impl HarnessEnvironment {
             None => error,
         }
     }
+}
+
+fn wait_delay_millis(now: u64, target: u64, deadline: u64) -> Result<u64, String> {
+    if target > deadline {
+        return Err("wait target exceeds deadline".into());
+    }
+    if now > deadline {
+        return Err("wait exceeded deadline".into());
+    }
+    Ok(target.saturating_sub(now))
 }
 
 struct HarnessCgroup {
@@ -1289,15 +1330,22 @@ impl PreflightEnvironment for SystemPreflightEnvironment {
 }
 
 fn validate_root_owned_socket(path: &Path) -> Result<(), PlatformError> {
+    validate_owned_socket(path, 0)
+}
+
+fn validate_owned_socket(path: &Path, required_owner: u32) -> Result<(), PlatformError> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
         let metadata = std::fs::symlink_metadata(&current)
             .map_err(|error| platform_io_error(&current, error))?;
+        let has_extended_acl =
+            path_has_extended_acl(&current).map_err(|error| platform_io_error(&current, error))?;
         let leaf = current == path;
         if metadata.file_type().is_symlink()
-            || metadata.uid() != 0
+            || (metadata.uid() != 0 && metadata.uid() != required_owner)
             || (!leaf && metadata.permissions().mode() & 0o022 != 0)
+            || has_extended_acl
         {
             return Err(PlatformError::new(
                 PlatformErrorKind::PermissionDenied,
@@ -1368,16 +1416,7 @@ impl FirmwareAutoBaselineEnvironment for HarnessEnvironment {
         target_monotonic_millis: u64,
         deadline_monotonic_millis: u64,
     ) -> Result<(), String> {
-        if target_monotonic_millis > deadline_monotonic_millis {
-            return Err("wait target exceeds deadline".into());
-        }
-        let now = self.now_millis();
-        if target_monotonic_millis > now {
-            thread::sleep(Duration::from_millis(target_monotonic_millis - now));
-        }
-        (self.now_millis() <= deadline_monotonic_millis)
-            .then_some(())
-            .ok_or_else(|| "wait exceeded deadline".into())
+        self.wait_until_deadline(target_monotonic_millis, deadline_monotonic_millis)
     }
 
     fn capture_observation(
@@ -1476,16 +1515,7 @@ impl SupervisedEnduranceEnvironment for HarnessEnvironment {
     }
 
     fn wait_until(&mut self, target: u64, deadline: u64) -> Result<(), String> {
-        if target > deadline {
-            return Err("wait target exceeds deadline".into());
-        }
-        let now = self.now_millis();
-        if target > now {
-            thread::sleep(Duration::from_millis(target - now));
-        }
-        (self.now_millis() <= deadline)
-            .then_some(())
-            .ok_or_else(|| "wait exceeded deadline".into())
+        self.wait_until_deadline(target, deadline)
     }
 
     fn capture_observation(&mut self, deadline: u64) -> Result<MatchedWorkloadObservation, String> {
@@ -1549,14 +1579,72 @@ impl SupervisedEnduranceEnvironment for HarnessEnvironment {
 mod tests {
     use super::*;
     use std::{
+        ffi::CString,
         fs::{self, OpenOptions},
         io::Write,
-        os::unix::fs::PermissionsExt,
+        os::unix::{ffi::OsStrExt, fs::PermissionsExt, net::UnixListener},
         process,
         sync::atomic::{AtomicU64, Ordering},
     };
 
     static NEXT_HARNESS_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn set_default_acl(path: &Path) {
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let acl: [u8; 28] = [
+            2, 0, 0, 0, // version
+            1, 0, 7, 0, 255, 255, 255, 255, // user::rwx
+            4, 0, 5, 0, 255, 255, 255, 255, // group::r-x
+            32, 0, 5, 0, 255, 255, 255, 255, // other::r-x
+        ];
+        // SAFETY: both names are NUL-terminated and acl is valid for its byte length.
+        let result = unsafe {
+            libc::setxattr(
+                path.as_ptr(),
+                c"system.posix_acl_default".as_ptr(),
+                acl.as_ptr().cast(),
+                acl.len(),
+                0,
+            )
+        };
+        assert_eq!(
+            result,
+            0,
+            "cannot create default ACL: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    fn set_access_acl(path: &Path, named_uid: u32) {
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let mut acl = vec![
+            2, 0, 0, 0, // version
+            1, 0, 7, 0, 255, 255, 255, 255, // user::rwx
+            2, 0, 7, 0, // user:<uid>:rwx
+        ];
+        acl.extend(named_uid.to_le_bytes());
+        acl.extend([
+            4, 0, 5, 0, 255, 255, 255, 255, // group::r-x
+            16, 0, 7, 0, 255, 255, 255, 255, // mask::rwx
+            32, 0, 5, 0, 255, 255, 255, 255, // other::r-x
+        ]);
+        // SAFETY: both names are NUL-terminated and acl is valid for its byte length.
+        let result = unsafe {
+            libc::setxattr(
+                path.as_ptr(),
+                c"system.posix_acl_access".as_ptr(),
+                acl.as_ptr().cast(),
+                acl.len(),
+                0,
+            )
+        };
+        assert_eq!(
+            result,
+            0,
+            "cannot create access ACL: {}",
+            std::io::Error::last_os_error()
+        );
+    }
 
     struct TestHarness {
         root: PathBuf,
@@ -1590,6 +1678,46 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn manifest_gpu_uuid_is_canonicalized_before_stage_use() {
+        let mut uuid = "GPU-AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE".to_owned();
+        canonicalize_manifest_gpu_uuid(&mut uuid);
+        assert_eq!(uuid, "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    }
+
+    #[test]
+    fn unix_socket_validation_rejects_default_acl_ancestors() {
+        let owner = unsafe { libc::geteuid() };
+        let root = Path::new("target").join(format!(
+            "fc-socket-acl-{}-{}",
+            process::id(),
+            NEXT_HARNESS_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let socket = root.join("journal.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        set_default_acl(&root);
+
+        assert!(matches!(
+            validate_owned_socket(&socket, owner),
+            Err(error) if error.kind() == PlatformErrorKind::PermissionDenied
+        ));
+        let root_name = CString::new(root.as_os_str().as_bytes()).unwrap();
+        // SAFETY: both names are NUL-terminated.
+        assert_eq!(
+            unsafe { libc::removexattr(root_name.as_ptr(), c"system.posix_acl_default".as_ptr()) },
+            0
+        );
+        set_access_acl(&socket, owner);
+        assert!(matches!(
+            validate_owned_socket(&socket, owner),
+            Err(error) if error.kind() == PlatformErrorKind::PermissionDenied
+        ));
+
+        drop(listener);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1737,5 +1865,38 @@ printf '%s' '{"captured_at":{"monotonic_millis":1,"wall_unix_millis":1},"nvidia_
         let mut timestamps = Vec::new();
         collect_wall_timestamps(&value, &mut timestamps);
         assert_eq!(timestamps, vec![100, 999]);
+    }
+
+    #[test]
+    fn wait_deadline_boundaries_are_overflow_safe_for_both_stage_adapters() {
+        assert_eq!(wait_delay_millis(10, 10, 10), Ok(0));
+        assert_eq!(
+            wait_delay_millis(11, 10, 10),
+            Err("wait exceeded deadline".into())
+        );
+        assert_eq!(
+            wait_delay_millis(10, 12, 11),
+            Err("wait target exceeds deadline".into())
+        );
+        assert_eq!(wait_delay_millis(u64::MAX, u64::MAX, u64::MAX), Ok(0));
+
+        let mut baseline = HarnessEnvironment::new(PathBuf::from("/unused")).unwrap();
+        assert!(
+            FirmwareAutoBaselineEnvironment::wait_until(&mut baseline, u64::MAX, u64::MAX - 1)
+                .is_err()
+        );
+        let mut endurance = HarnessEnvironment::new(PathBuf::from("/unused")).unwrap();
+        assert!(
+            SupervisedEnduranceEnvironment::wait_until(&mut endurance, u64::MAX, u64::MAX - 1,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn firmware_auto_recovery_escalates_when_auto_is_unconfirmed() {
+        assert!(firmware_auto_recovery(true).contains("keep both fans in Firmware Auto"));
+        let unconfirmed = firmware_auto_recovery(false);
+        assert!(unconfirmed.contains("shut down immediately"));
+        assert!(unconfirmed.contains("do not reboot"));
     }
 }

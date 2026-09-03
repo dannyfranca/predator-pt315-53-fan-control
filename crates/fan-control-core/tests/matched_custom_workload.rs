@@ -14,7 +14,10 @@ use fan_control_core::{
     RunOutcomeStatus, SampleFreshness, TelemetrySampleEvidence, WorkloadEvidence,
     parse_evidence_v2, run_firmware_auto_baseline, run_matched_custom_workload,
 };
-use support::{PROTECTED_POLICY, compatibility_declaration, completed_calibration_record};
+use support::{
+    PROTECTED_POLICY, compatibility_declaration, completed_calibration_record,
+    fan_endpoint_identities,
+};
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const JSON_SCHEMA_V2: &str = include_str!(concat!(
@@ -1334,10 +1337,11 @@ fn passing_baseline_with_cadence(cadence_millis: u64) -> fan_control_core::Evide
             })
             .enumerate()
         {
-            readback.timestamp = timestamp((sample_index as u64 + 1) * cadence_millis);
+            readback.timestamp = timestamp((sample_index as u64 / 2 + 1) * cadence_millis);
         }
     }
     record.completed_at = record.samples.last().unwrap().timestamp;
+    align_baseline_cleanup_with_completion(&mut record);
     for readback in &mut record.readbacks {
         if readback.phase == Some(fan_control_core::FanReadbackPhase::Final) {
             readback.timestamp = record.completed_at;
@@ -1362,21 +1366,30 @@ fn valid_five_minute_baseline_below_matched_minimum() -> fan_control_core::Evide
             {
                 return true;
             }
-            if sample_index == sample_count {
+            if sample_index == sample_count * 2 {
                 return false;
             }
-            readback.timestamp = timestamp((sample_index as u64 + 1) * 2_100);
+            readback.timestamp = timestamp((sample_index as u64 / 2 + 1) * 2_100);
             sample_index += 1;
             true
         });
     }
     record.completed_at = record.samples.last().unwrap().timestamp;
+    align_baseline_cleanup_with_completion(&mut record);
     for readback in &mut record.readbacks {
         if readback.phase == Some(fan_control_core::FanReadbackPhase::Final) {
             readback.timestamp = record.completed_at;
         }
     }
     record
+}
+
+fn align_baseline_cleanup_with_completion(record: &mut fan_control_core::EvidenceRecord) {
+    if let Some(cleanup) = &mut record.firmware_auto_cleanup {
+        cleanup.workload_stop_requested_at = record.completed_at;
+        cleanup.workload_stop_confirmed_at = Some(record.completed_at);
+        cleanup.cleanup_completed_at = Some(record.completed_at);
+    }
 }
 
 fn passing_baseline_with_samples(samples_required: usize) -> fan_control_core::EvidenceRecord {
@@ -1463,6 +1476,8 @@ fn baseline_for_sample_count(
             hwmon_root: Path::new(HWMON_ROOT),
             qualification_envelope: envelope(),
             preflight_binding_sha256: "a".repeat(64),
+            nvidia_gpu_uuid: "GPU-11111111-2222-3333-4444-555555555555".into(),
+            expected_fan_endpoint_identities: fan_endpoint_identities(),
             workload,
             samples_required,
         },
@@ -1511,8 +1526,8 @@ fn sample(monotonic_millis: u64, cpu: i32, gpu: i32) -> TelemetrySampleEvidence 
         selected_profile: Some(EvidenceProfile::Ac),
         cpu_source_demand_basis_points: Some(5_000),
         gpu_source_demand_basis_points: Some(4_000),
-        cpu_utilization_basis_points: None,
-        gpu_utilization_basis_points: None,
+        cpu_utilization_basis_points: Some(6_000),
+        gpu_utilization_basis_points: Some(5_000),
         commanded_demand_basis_points: Some(5_000),
         cpu_thermal_throttling: Some(false),
         gpu_thermal_throttling: Some(false),

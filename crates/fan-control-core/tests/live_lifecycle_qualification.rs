@@ -564,6 +564,7 @@ fn schema_rejects_live_only_clock_fields_on_other_stages() {
     let validator = jsonschema::validator_for(&schema).unwrap();
     let mut value = serde_json::to_value(report.record()).unwrap();
     value["stage"] = "preflight".into();
+    value["nvidia_gpu_uuid"] = "GPU-11111111-2222-3333-4444-555555555555".into();
     value["samples"] = serde_json::json!([]);
     value["preflight_checks"] = serde_json::json!([{
         "timestamp": value["started_at"].clone(),

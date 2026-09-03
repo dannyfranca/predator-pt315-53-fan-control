@@ -3,10 +3,11 @@ use std::{error::Error, fmt, path::Path, time::Duration};
 use crate::{
     AcerHwmonDevice, AcerHwmonDiscoveryError, BoundedIdentityBoundFileAccess, Clock,
     EvidenceExternalPower, EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceTimestamp,
-    EvidenceValidationError, FanReadbackEvidence, FanReadbackField, FanReadbackPhase,
-    FaultEvidence, IdentityBoundReadAccess, ObservationOutcome, PlatformError,
-    QualificationEnvelopeIdentityV1, RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness,
-    TelemetrySampleEvidence, WorkloadEvidence, discover_acer_hwmon,
+    EvidenceValidationError, FanEndpointIdentitiesEvidence, FanReadbackEvidence, FanReadbackField,
+    FanReadbackPhase, FaultEvidence, FirmwareAutoCleanupEvidence, IdentityBoundReadAccess,
+    ObservationOutcome, PlatformError, QualificationEnvelopeIdentityV1, RunOutcomeEvidence,
+    RunOutcomeStatus, SampleFreshness, TelemetrySampleEvidence, WorkloadEvidence,
+    discover_acer_hwmon,
     evidence::{summarize_thermal_evidence, validate_identity, validate_workload},
     restoration::FIRMWARE_AUTO,
 };
@@ -20,7 +21,7 @@ const MAX_PLAUSIBLE_COMPONENT_TEMPERATURE_MILLICELSIUS: i32 = 150_000;
 const MAX_PLAUSIBLE_AMBIENT_MILLICELSIUS: i32 = 80_000;
 const MODE_CHECK_BUDGET: Duration = Duration::from_millis(100);
 const WORKLOAD_START_TIMEOUT_MILLIS: u64 = 10_000;
-const WORKLOAD_STOP_TIMEOUT_MILLIS: u64 = 5_000;
+pub(crate) const WORKLOAD_STOP_TIMEOUT_MILLIS: u64 = 5_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineObservation {
@@ -136,6 +137,8 @@ pub struct FirmwareAutoBaselinePlan<'a> {
     pub hwmon_root: &'a Path,
     pub qualification_envelope: QualificationEnvelopeIdentityV1,
     pub preflight_binding_sha256: String,
+    pub nvidia_gpu_uuid: String,
+    pub expected_fan_endpoint_identities: FanEndpointIdentitiesEvidence,
     pub workload: WorkloadEvidence,
     pub samples_required: usize,
 }
@@ -144,6 +147,7 @@ pub struct FirmwareAutoBaselinePlan<'a> {
 pub enum FirmwareAutoBaselinePlanError {
     InvalidQualificationEnvelope(EvidenceValidationError),
     InvalidPreflightBinding,
+    InvalidHardwareIdentity,
 }
 
 impl fmt::Display for FirmwareAutoBaselinePlanError {
@@ -155,6 +159,9 @@ impl fmt::Display for FirmwareAutoBaselinePlanError {
             Self::InvalidPreflightBinding => {
                 formatter.write_str("invalid preflight evidence binding")
             }
+            Self::InvalidHardwareIdentity => {
+                formatter.write_str("invalid baseline hardware identity")
+            }
         }
     }
 }
@@ -164,6 +171,7 @@ impl Error for FirmwareAutoBaselinePlanError {
         match self {
             Self::InvalidQualificationEnvelope(error) => Some(error),
             Self::InvalidPreflightBinding => None,
+            Self::InvalidHardwareIdentity => None,
         }
     }
 }
@@ -207,6 +215,8 @@ where
         || record.qualification_envelope != plan.qualification_envelope
         || record.preflight_binding_sha256.as_deref()
             != Some(plan.preflight_binding_sha256.as_str())
+        || record.nvidia_gpu_uuid.as_deref() != Some(plan.nvidia_gpu_uuid.as_str())
+        || record.fan_endpoint_identities.as_ref() != Some(&plan.expected_fan_endpoint_identities)
         || workload.workload_id != plan.workload.workload_id
         || workload.command != plan.workload.command
         || workload.version != plan.workload.version
@@ -235,6 +245,11 @@ where
 
     let device = discover_acer_hwmon(platform, plan.hwmon_root)
         .map_err(|error| FirmwareAutoBaselineResumeError(error.to_string()))?;
+    if !device_matches_expected_endpoints(&device, plan) {
+        return Err(FirmwareAutoBaselineResumeError(
+            "fan endpoint identity changed since preflight".into(),
+        ));
+    }
     let mut current = observe_firmware_auto(platform, Some(&device), FanReadbackPhase::Final);
     if let Some(error) = current.failure.take() {
         return Err(FirmwareAutoBaselineResumeError(error));
@@ -304,6 +319,11 @@ where
     {
         return Err(FirmwareAutoBaselinePlanError::InvalidPreflightBinding);
     }
+    if !crate::nvidia_gpu::is_nvidia_gpu_uuid(&plan.nvidia_gpu_uuid)
+        || !plan.expected_fan_endpoint_identities.is_valid()
+    {
+        return Err(FirmwareAutoBaselinePlanError::InvalidHardwareIdentity);
+    }
 
     let started_at = environment.timestamp();
     let mut samples = Vec::with_capacity(plan.samples_required);
@@ -315,8 +335,20 @@ where
     let mut workload = plan.workload.clone();
     let mut starting_conditions_valid = false;
     let mut starting_conditions_captured_at = None;
+    let mut firmware_auto_cleanup = None;
 
     let device = discover_acer_hwmon(platform, plan.hwmon_root).ok();
+    if device
+        .as_ref()
+        .is_some_and(|device| !device_matches_expected_endpoints(device, plan))
+    {
+        push_fault(
+            &mut faults,
+            started_at,
+            "fan-endpoint-identity",
+            "discovered fan endpoints do not match preflight evidence",
+        );
+    }
     let mut initial_modes =
         observe_firmware_auto(platform, device.as_ref(), FanReadbackPhase::Initial);
     let initial_modes_at = environment.timestamp();
@@ -606,27 +638,56 @@ where
         system_stable &= observation.system_stable;
         samples.push(observation.sample);
         if faults.is_empty() {
-            let mut modes =
-                observe_firmware_auto(platform, device.as_ref(), FanReadbackPhase::Sample);
+            let readback_deadline = platform.monotonic_now().checked_add(MODE_CHECK_BUDGET);
+            let mut modes = observe_firmware_auto_before(
+                platform,
+                device.as_ref(),
+                FanReadbackPhase::Sample,
+                readback_deadline,
+            );
             let mode_timestamp = environment.timestamp();
             modes.set_timestamp(mode_timestamp);
             readbacks.extend(modes.readbacks);
             if let Some(detail) = modes.failure {
                 push_fault(&mut faults, mode_timestamp, "firmware-auto-lost", detail);
+            } else {
+                let mut rpms = observe_firmware_rpm(
+                    platform,
+                    device.as_ref(),
+                    FanReadbackPhase::Sample,
+                    readback_deadline,
+                );
+                let rpm_timestamp = environment.timestamp();
+                rpms.set_timestamp(rpm_timestamp);
+                readbacks.extend(rpms.readbacks);
+                if let Some(detail) = rpms.failure {
+                    push_fault(&mut faults, rpm_timestamp, "tachometer", detail);
+                }
             }
         }
     }
 
     if workload_attempted {
-        let stop_deadline = environment
-            .timestamp()
+        let stop_requested_at = environment.timestamp();
+        let stop_deadline = stop_requested_at
             .monotonic_millis
             .saturating_add(WORKLOAD_STOP_TIMEOUT_MILLIS);
+        let mut cleanup_evidence = FirmwareAutoCleanupEvidence {
+            workload_stop_requested_at: stop_requested_at,
+            workload_stop_confirmed_at: None,
+            containment_required: false,
+            containment_confirmed: false,
+            containment_confirmed_at: None,
+            cleanup_completed_at: None,
+            fan_control_write_count: None,
+        };
         match environment.stop_workload(stop_deadline) {
             Ok(()) => {
                 let stopped_at = environment.timestamp();
+                cleanup_evidence.workload_stop_confirmed_at = Some(stopped_at);
                 let mut safe_to_cleanup = true;
                 if stopped_at.monotonic_millis > stop_deadline {
+                    cleanup_evidence.containment_required = true;
                     push_fault(
                         &mut faults,
                         stopped_at,
@@ -644,21 +705,41 @@ where
                             "workload-containment",
                             format!("cannot contain workload after late stop: {error}"),
                         );
+                    } else {
+                        let contained_at = environment.timestamp();
+                        if contained_at.monotonic_millis > containment_deadline {
+                            safe_to_cleanup = false;
+                            push_fault(
+                                &mut faults,
+                                contained_at,
+                                "workload-containment",
+                                "workload containment exceeded its deadline",
+                            );
+                        } else {
+                            cleanup_evidence.containment_confirmed = true;
+                            cleanup_evidence.containment_confirmed_at = Some(contained_at);
+                        }
                     }
                 }
                 match safe_to_cleanup.then(|| environment.cleanup_after_workload()) {
                     None => {}
                     Some(result) => match result {
-                        Ok(attestation) if attestation.fan_control_write_count > 0 => push_fault(
-                            &mut faults,
-                            environment.timestamp(),
-                            "cleanup-fan-control-write",
-                            format!(
-                                "post-workload cleanup attempted {} fan-control writes",
-                                attestation.fan_control_write_count
-                            ),
-                        ),
-                        Ok(_) => {}
+                        Ok(attestation) => {
+                            cleanup_evidence.fan_control_write_count =
+                                Some(attestation.fan_control_write_count);
+                            cleanup_evidence.cleanup_completed_at = Some(environment.timestamp());
+                            if attestation.fan_control_write_count > 0 {
+                                push_fault(
+                                    &mut faults,
+                                    environment.timestamp(),
+                                    "cleanup-fan-control-write",
+                                    format!(
+                                        "post-workload cleanup attempted {} fan-control writes",
+                                        attestation.fan_control_write_count
+                                    ),
+                                );
+                            }
+                        }
                         Err(error) => {
                             let cleanup_failed_at = environment.timestamp();
                             push_fault(
@@ -673,6 +754,7 @@ where
             }
             Err(error) => {
                 let stopped_at = environment.timestamp();
+                cleanup_evidence.containment_required = true;
                 push_fault(
                     &mut faults,
                     stopped_at,
@@ -683,24 +765,45 @@ where
                     .monotonic_millis
                     .saturating_add(WORKLOAD_STOP_TIMEOUT_MILLIS);
                 match environment.contain_workload(containment_deadline) {
-                    Ok(()) => match environment.cleanup_after_workload() {
-                        Ok(attestation) if attestation.fan_control_write_count > 0 => push_fault(
-                            &mut faults,
-                            environment.timestamp(),
-                            "cleanup-fan-control-write",
-                            format!(
-                                "post-containment cleanup attempted {} fan-control writes",
-                                attestation.fan_control_write_count
-                            ),
-                        ),
-                        Ok(_) => {}
-                        Err(error) => push_fault(
-                            &mut faults,
-                            environment.timestamp(),
-                            "cleanup",
-                            format!("post-containment cleanup failed: {error}"),
-                        ),
-                    },
+                    Ok(()) => {
+                        let contained_at = environment.timestamp();
+                        if contained_at.monotonic_millis > containment_deadline {
+                            push_fault(
+                                &mut faults,
+                                contained_at,
+                                "workload-containment",
+                                "workload containment exceeded its deadline",
+                            );
+                        } else {
+                            cleanup_evidence.containment_confirmed = true;
+                            cleanup_evidence.containment_confirmed_at = Some(contained_at);
+                            match environment.cleanup_after_workload() {
+                                Ok(attestation) => {
+                                    cleanup_evidence.fan_control_write_count =
+                                        Some(attestation.fan_control_write_count);
+                                    cleanup_evidence.cleanup_completed_at =
+                                        Some(environment.timestamp());
+                                    if attestation.fan_control_write_count > 0 {
+                                        push_fault(
+                                            &mut faults,
+                                            environment.timestamp(),
+                                            "cleanup-fan-control-write",
+                                            format!(
+                                                "post-containment cleanup attempted {} fan-control writes",
+                                                attestation.fan_control_write_count
+                                            ),
+                                        );
+                                    }
+                                }
+                                Err(error) => push_fault(
+                                    &mut faults,
+                                    environment.timestamp(),
+                                    "cleanup",
+                                    format!("post-containment cleanup failed: {error}"),
+                                ),
+                            }
+                        }
+                    }
                     Err(containment_error) => push_fault(
                         &mut faults,
                         environment.timestamp(),
@@ -712,6 +815,7 @@ where
                 }
             }
         }
+        firmware_auto_cleanup = Some(cleanup_evidence);
     }
 
     let mut final_modes = observe_firmware_auto(platform, device.as_ref(), FanReadbackPhase::Final);
@@ -768,6 +872,9 @@ where
     record.starting_conditions_captured_at = starting_conditions_captured_at;
     record.workload_started_at = workload_started_at;
     record.preflight_binding_sha256 = Some(plan.preflight_binding_sha256.clone());
+    record.nvidia_gpu_uuid = Some(plan.nvidia_gpu_uuid.clone());
+    record.fan_endpoint_identities = Some(plan.expected_fan_endpoint_identities.clone());
+    record.firmware_auto_cleanup = firmware_auto_cleanup;
     record.workload = workload_is_valid.then_some(workload);
     record.samples = samples;
     record.readbacks = readbacks;
@@ -804,6 +911,8 @@ fn validate_observation(
         && sample.selected_profile.is_some()
         && sample.cpu_source_demand_basis_points.is_some()
         && sample.gpu_source_demand_basis_points.is_some()
+        && sample.cpu_utilization_basis_points.is_some()
+        && sample.gpu_utilization_basis_points.is_some()
         && sample.commanded_demand_basis_points.is_some()
         && sample.cpu_thermal_throttling.is_some()
         && sample.gpu_thermal_throttling.is_some();
@@ -817,6 +926,8 @@ fn validate_observation(
         &mut sample.cpu_source_demand_basis_points,
         &mut sample.gpu_source_demand_basis_points,
         &mut sample.commanded_demand_basis_points,
+        &mut sample.cpu_utilization_basis_points,
+        &mut sample.gpu_utilization_basis_points,
     ]
     .into_iter()
     .fold(false, |invalid, demand| {
@@ -919,10 +1030,33 @@ impl ModeObservation {
     }
 }
 
+fn endpoint_evidence_identity(device: &AcerHwmonDevice, endpoint: &Path) -> String {
+    FanEndpointIdentitiesEvidence::endpoint_identity(device, endpoint)
+        .unwrap_or_else(|| "unbound-endpoint".to_owned())
+}
+
+fn device_matches_expected_endpoints(
+    device: &AcerHwmonDevice,
+    plan: &FirmwareAutoBaselinePlan<'_>,
+) -> bool {
+    FanEndpointIdentitiesEvidence::from_device(device).as_ref()
+        == Some(&plan.expected_fan_endpoint_identities)
+}
+
 fn observe_firmware_auto(
     platform: &mut impl FirmwareAutoBaselineAccess,
     device: Option<&AcerHwmonDevice>,
     phase: FanReadbackPhase,
+) -> ModeObservation {
+    let deadline = platform.monotonic_now().checked_add(MODE_CHECK_BUDGET);
+    observe_firmware_auto_before(platform, device, phase, deadline)
+}
+
+fn observe_firmware_auto_before(
+    platform: &mut impl FirmwareAutoBaselineAccess,
+    device: Option<&AcerHwmonDevice>,
+    phase: FanReadbackPhase,
+    deadline: Option<Duration>,
 ) -> ModeObservation {
     let unstamped = EvidenceTimestamp {
         monotonic_millis: 0,
@@ -934,7 +1068,7 @@ fn observe_firmware_auto(
             failure: Some("Acer hwmon device was not safely discovered".to_owned()),
         };
     };
-    let Some(deadline) = platform.monotonic_now().checked_add(MODE_CHECK_BUDGET) else {
+    let Some(deadline) = deadline else {
         return ModeObservation {
             readbacks: Vec::new(),
             failure: Some("Firmware Auto mode-check deadline overflowed".to_owned()),
@@ -967,10 +1101,7 @@ fn observe_firmware_auto(
             EvidenceFan::Cpu => "CPU",
             EvidenceFan::Gpu => "GPU",
         };
-        let endpoint_identity = device
-            .endpoint_identity(endpoint)
-            .map(|identity| format!("device-{}-inode-{}", identity.device(), identity.inode()))
-            .unwrap_or_else(|| "unbound-endpoint".to_owned());
+        let endpoint_identity = endpoint_evidence_identity(device, endpoint);
         let expected_endpoint = device
             .endpoint_identity(endpoint)
             .expect("discovery binds every fan endpoint");
@@ -1046,6 +1177,92 @@ fn observe_firmware_auto(
     } else {
         None
     };
+    ModeObservation { readbacks, failure }
+}
+
+fn observe_firmware_rpm(
+    platform: &mut impl FirmwareAutoBaselineAccess,
+    device: Option<&AcerHwmonDevice>,
+    phase: FanReadbackPhase,
+    deadline: Option<Duration>,
+) -> ModeObservation {
+    let unstamped = EvidenceTimestamp {
+        monotonic_millis: 0,
+        wall_unix_millis: 0,
+    };
+    let Some(device) = device else {
+        return ModeObservation {
+            readbacks: Vec::new(),
+            failure: Some("Acer hwmon device was not safely discovered".to_owned()),
+        };
+    };
+    let Some(deadline) = deadline else {
+        return ModeObservation {
+            readbacks: Vec::new(),
+            failure: Some("tachometer read deadline overflowed".to_owned()),
+        };
+    };
+    if !matches!(
+        platform.baseline_abi_is_current_before(device, deadline),
+        Ok(true)
+    ) {
+        return ModeObservation {
+            readbacks: Vec::new(),
+            failure: Some("Acer hwmon identity changed during tachometer capture".to_owned()),
+        };
+    }
+    let mut readbacks = Vec::with_capacity(2);
+    let mut failure = None;
+    for (fan, child, endpoint) in [
+        (EvidenceFan::Cpu, "fan1_input", device.cpu().tachometer()),
+        (EvidenceFan::Gpu, "fan2_input", device.gpu().tachometer()),
+    ] {
+        let endpoint_identity = endpoint_evidence_identity(device, endpoint);
+        let expected_endpoint = device
+            .endpoint_identity(endpoint)
+            .expect("discovery binds every fan endpoint");
+        let value = platform
+            .baseline_read_endpoint_before(device, child, expected_endpoint, deadline)
+            .ok()
+            .and_then(|payload| payload.trim().parse::<u32>().ok())
+            .filter(|rpm| {
+                (crate::tachometer::MINIMUM_PLAUSIBLE_RPM
+                    ..=crate::tachometer::MAXIMUM_PLAUSIBLE_RPM)
+                    .contains(rpm)
+            });
+        let outcome = if value.is_some() {
+            ObservationOutcome::Confirmed
+        } else {
+            failure.get_or_insert_with(|| {
+                format!(
+                    "{} fan tachometer is unreadable or implausible",
+                    match fan {
+                        EvidenceFan::Cpu => "CPU",
+                        EvidenceFan::Gpu => "GPU",
+                    }
+                )
+            });
+            ObservationOutcome::Unreadable
+        };
+        readbacks.push(FanReadbackEvidence {
+            timestamp: unstamped,
+            source_timestamp: None,
+            fresh: None,
+            boot_id: None,
+            fan,
+            field: FanReadbackField::Rpm,
+            value,
+            endpoint_identity,
+            outcome,
+            phase: Some(phase),
+        });
+    }
+    if !matches!(
+        platform.baseline_abi_is_current_before(device, deadline),
+        Ok(true)
+    ) {
+        failure = Some("Acer hwmon identity changed during tachometer capture".to_owned());
+    }
     ModeObservation { readbacks, failure }
 }
 

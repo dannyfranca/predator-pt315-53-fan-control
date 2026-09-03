@@ -3,11 +3,11 @@ use std::{fmt, path::Path};
 use crate::{
     AcerHwmonDevice, CPU_ABSOLUTE_ABORT_MILLICELSIUS, CompatibilityDeclarationV1,
     CompatibilityObservation, EvidenceFan, EvidenceRecord, EvidenceTimestamp,
-    EvidenceValidationError, FanReadbackEvidence, FanReadbackField, FanReadbackPhase,
-    FaultEvidence, GPU_ABSOLUTE_ABORT_MILLICELSIUS, IdentityBoundReadAccess, NvidiaGpuSampleError,
-    NvidiaGpuSelector, NvmlAccess, NvmlErrorKind, ObservationOutcome, PlatformError,
-    PlatformErrorKind, PreflightCheckEvidence, QualificationEnvelopeIdentityV1, RunOutcomeEvidence,
-    RunOutcomeStatus, ServiceAccess,
+    EvidenceValidationError, FanEndpointIdentitiesEvidence, FanReadbackEvidence, FanReadbackField,
+    FanReadbackPhase, FaultEvidence, GPU_ABSOLUTE_ABORT_MILLICELSIUS, IdentityBoundReadAccess,
+    NvidiaGpuSampleError, NvidiaGpuSelector, NvmlAccess, NvmlErrorKind, ObservationOutcome,
+    PlatformError, PlatformErrorKind, PreflightCheckEvidence, QualificationEnvelopeIdentityV1,
+    RunOutcomeEvidence, RunOutcomeStatus, ServiceAccess,
     authority::validate_policy_authority_sources,
     compatibility::{
         check_fan_abi_compatibility, check_platform_compatibility, check_trust_compatibility,
@@ -85,6 +85,7 @@ impl PreflightCheckResult {
 pub struct PreflightReport {
     checks: Vec<PreflightCheckResult>,
     firmware_auto_readbacks: Vec<FanReadbackEvidence>,
+    fan_endpoint_identities: Option<FanEndpointIdentitiesEvidence>,
 }
 
 impl PreflightReport {
@@ -97,6 +98,7 @@ impl PreflightReport {
                 timestamp,
             }],
             firmware_auto_readbacks: Vec::new(),
+            fan_endpoint_identities: None,
         }
     }
 
@@ -117,6 +119,7 @@ impl PreflightReport {
     pub fn into_evidence(
         self,
         qualification_envelope: QualificationEnvelopeIdentityV1,
+        nvidia_gpu_uuid: Option<String>,
         started_at: EvidenceTimestamp,
         completed_at: EvidenceTimestamp,
     ) -> Result<EvidenceRecord, EvidenceValidationError> {
@@ -168,6 +171,8 @@ impl PreflightReport {
             },
         );
         record.readbacks = self.firmware_auto_readbacks;
+        record.nvidia_gpu_uuid = nvidia_gpu_uuid;
+        record.fan_endpoint_identities = self.fan_endpoint_identities;
         record.faults = faults;
         record.preflight_checks = Some(
             self.checks
@@ -363,6 +368,7 @@ where
     PreflightReport {
         checks,
         firmware_auto_readbacks: firmware_auto.readbacks,
+        fan_endpoint_identities: firmware_auto.fan_endpoint_identities,
     }
 }
 
@@ -490,6 +496,7 @@ fn check_disk_space(
 struct FirmwareAutoCheck {
     result: Result<String, String>,
     readbacks: Vec<FanReadbackEvidence>,
+    fan_endpoint_identities: Option<FanEndpointIdentitiesEvidence>,
 }
 
 fn check_firmware_auto<P>(
@@ -506,13 +513,16 @@ where
             return FirmwareAutoCheck {
                 result: Err(error.to_string()),
                 readbacks: Vec::new(),
+                fan_endpoint_identities: None,
             };
         }
     };
+    let fan_endpoint_identities = fan_endpoint_identities(&before);
     if let Err(error) = check_fan_endpoint_sandbox_boundary(platform, &before) {
         return FirmwareAutoCheck {
             result: Err(error),
             readbacks: Vec::new(),
+            fan_endpoint_identities: None,
         };
     }
     let mut readbacks = Vec::with_capacity(2);
@@ -613,6 +623,7 @@ where
             return FirmwareAutoCheck {
                 result: Err(error.to_string()),
                 readbacks,
+                fan_endpoint_identities: None,
             };
         }
     };
@@ -624,6 +635,7 @@ where
         return FirmwareAutoCheck {
             result: Err("Acer hwmon identity changed while reading fan modes".to_owned()),
             readbacks,
+            fan_endpoint_identities: None,
         };
     }
     if let Err(error) = check_fan_endpoint_sandbox_boundary(platform, &after) {
@@ -634,6 +646,7 @@ where
         return FirmwareAutoCheck {
             result: Err(error),
             readbacks,
+            fan_endpoint_identities: None,
         };
     }
     if values.iter().any(|value| *value != Some(2)) {
@@ -658,12 +671,18 @@ where
                 error_detail
             )),
             readbacks,
+            fan_endpoint_identities: None,
         };
     }
     FirmwareAutoCheck {
         result: Ok("both fans are already in Firmware Auto".to_owned()),
         readbacks,
+        fan_endpoint_identities: Some(fan_endpoint_identities),
     }
+}
+
+fn fan_endpoint_identities(device: &AcerHwmonDevice) -> FanEndpointIdentitiesEvidence {
+    FanEndpointIdentitiesEvidence::from_device(device).expect("discovery binds every endpoint")
 }
 
 fn check_fan_endpoint_sandbox_boundary(
@@ -673,8 +692,10 @@ fn check_fan_endpoint_sandbox_boundary(
     for (child, endpoint) in [
         ("pwm1", device.cpu().pwm()),
         ("pwm1_enable", device.cpu().enable()),
+        ("fan1_input", device.cpu().tachometer()),
         ("pwm2", device.gpu().pwm()),
         ("pwm2_enable", device.gpu().enable()),
+        ("fan2_input", device.gpu().tachometer()),
     ] {
         let identity = device
             .endpoint_identity(endpoint)
@@ -687,7 +708,7 @@ fn check_fan_endpoint_sandbox_boundary(
             || permissions.has_extended_acl()
         {
             return Err(format!(
-                "fan mode endpoint is not root-owned, has group/world write bits, or has an extended ACL: {}",
+                "fan endpoint is not root-owned, has group/world write bits, or has an extended ACL: {}",
                 endpoint.display()
             ));
         }

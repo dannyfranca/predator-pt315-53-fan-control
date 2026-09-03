@@ -145,34 +145,34 @@ fn validate_owned_protected_file(
     Ok(())
 }
 
-pub(crate) fn path_has_extended_acl(path: &Path) -> io::Result<bool> {
+pub fn path_has_extended_acl(path: &Path) -> io::Result<bool> {
     let path_name = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("path contains an interior NUL: {}", path.display()),
         )
     })?;
-    let acl_name = c"system.posix_acl_access";
-    // SAFETY: both C strings are NUL-terminated and the null buffer with length zero only queries
-    // the attribute size. lgetxattr deliberately does not follow a final symlink.
-    let result = unsafe {
-        libc::lgetxattr(
-            path_name.as_ptr(),
-            acl_name.as_ptr(),
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if result >= 0 {
-        return Ok(true);
+    for acl_name in [c"system.posix_acl_access", c"system.posix_acl_default"] {
+        // SAFETY: both C strings are NUL-terminated and the null buffer with length zero only
+        // queries the attribute size. lgetxattr deliberately does not follow a final symlink.
+        let result = unsafe {
+            libc::lgetxattr(
+                path_name.as_ptr(),
+                acl_name.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if result >= 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if !matches!(error.raw_os_error(), Some(code) if code == libc::ENODATA || code == libc::ENOTSUP)
+        {
+            return Err(error);
+        }
     }
-    let error = io::Error::last_os_error();
-    if matches!(error.raw_os_error(), Some(code) if code == libc::ENODATA || code == libc::ENOTSUP)
-    {
-        Ok(false)
-    } else {
-        Err(error)
-    }
+    Ok(false)
 }
 
 fn verify_supervised_endurance_evidence_source(
@@ -2665,6 +2665,61 @@ mod tests {
         ));
 
         fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn production_acl_probe_rejects_default_directory_acls() {
+        let directory = env::current_dir().unwrap().join("target").join(format!(
+            "fan-control-default-acl-check-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("qualification-harness");
+        fs::write(&executable, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let owner = unsafe { libc::geteuid() };
+        let path = CString::new(directory.as_os_str().as_bytes()).unwrap();
+        // Linux POSIX ACL xattr: version 2 plus owner/group/other entries.
+        let acl: [u8; 28] = [
+            2, 0, 0, 0, // version
+            1, 0, 7, 0, 255, 255, 255, 255, // user::rwx
+            4, 0, 5, 0, 255, 255, 255, 255, // group::r-x
+            32, 0, 5, 0, 255, 255, 255, 255, // other::r-x
+        ];
+        // SAFETY: path and attribute name are NUL-terminated; acl is valid for its byte length.
+        let result = unsafe {
+            libc::setxattr(
+                path.as_ptr(),
+                c"system.posix_acl_default".as_ptr(),
+                acl.as_ptr().cast(),
+                acl.len(),
+                0,
+            )
+        };
+        assert_eq!(
+            result,
+            0,
+            "cannot create default ACL: {}",
+            io::Error::last_os_error()
+        );
+
+        assert!(path_has_extended_acl(&directory).unwrap());
+        assert!(matches!(
+            validate_owned_protected_file(
+                &executable,
+                ProtectedFileRequirement::Executable,
+                owner,
+            ),
+            Err(error) if error.kind() == PlatformErrorKind::PermissionDenied
+        ));
+        let mut platform = SystemOwnershipPlatform::new();
+        assert!(
+            FileAccess::permissions(&mut platform, &directory)
+                .unwrap()
+                .has_extended_acl()
+        );
+
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

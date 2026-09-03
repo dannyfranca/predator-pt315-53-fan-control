@@ -184,6 +184,7 @@ fn reports_every_required_check_and_passes_without_any_write_or_lock() {
                     .into(),
                 compatibility: declaration.clone(),
             },
+            Some("GPU-11111111-2222-3333-4444-555555555555".into()),
             EvidenceTimestamp {
                 monotonic_millis: 10,
                 wall_unix_millis: 100,
@@ -195,6 +196,22 @@ fn reports_every_required_check_and_passes_without_any_write_or_lock() {
         )
         .unwrap();
     assert_eq!(evidence.stage, "preflight");
+    assert_eq!(
+        evidence.nvidia_gpu_uuid.as_deref(),
+        Some("GPU-11111111-2222-3333-4444-555555555555")
+    );
+    assert_eq!(
+        evidence.fan_endpoint_identities.as_ref().unwrap().cpu_pwm,
+        "device-0-inode-7"
+    );
+    assert_eq!(
+        evidence
+            .fan_endpoint_identities
+            .as_ref()
+            .unwrap()
+            .gpu_tachometer,
+        "device-0-inode-12"
+    );
     assert_eq!(evidence.readbacks.len(), 2);
     let checks = evidence.preflight_checks.as_ref().unwrap();
     assert_eq!(checks.len(), 12);
@@ -222,6 +239,28 @@ fn reports_every_required_check_and_passes_without_any_write_or_lock() {
     let mut contradictory_check = evidence_json;
     contradictory_check["preflight_checks"][0]["passed"] = false.into();
     assert!(!validator.is_valid(&contradictory_check));
+    let mut missing_gpu_uuid = serde_json::to_value(&evidence).unwrap();
+    missing_gpu_uuid
+        .as_object_mut()
+        .unwrap()
+        .remove("nvidia_gpu_uuid");
+    assert!(!validator.is_valid(&missing_gpu_uuid));
+    let mut missing_endpoint_identities = serde_json::to_value(&evidence).unwrap();
+    missing_endpoint_identities
+        .as_object_mut()
+        .unwrap()
+        .remove("fan_endpoint_identities");
+    assert!(!validator.is_valid(&missing_endpoint_identities));
+    let mut semantically_missing_endpoint_identities = evidence.clone();
+    semantically_missing_endpoint_identities.fan_endpoint_identities = None;
+    assert!(semantically_missing_endpoint_identities.validate().is_err());
+    let mut invalid_endpoint_identities = evidence.clone();
+    invalid_endpoint_identities
+        .fan_endpoint_identities
+        .as_mut()
+        .unwrap()
+        .gpu_tachometer = "not an identity".into();
+    assert!(invalid_endpoint_identities.validate().is_err());
     let mut faultless_collection_failure = contradictory_check;
     faultless_collection_failure["preflight_checks"] = serde_json::json!([{
         "check": "evidence-collection",
@@ -520,6 +559,7 @@ fn failures_are_all_reported_instead_of_short_circuiting() {
                     .into(),
                 compatibility: declaration,
             },
+            Some("GPU-11111111-2222-3333-4444-555555555555".into()),
             EvidenceTimestamp {
                 monotonic_millis: 1,
                 wall_unix_millis: 1,
@@ -584,7 +624,14 @@ fn either_fan_outside_firmware_auto_blocks_preflight() {
 
 #[test]
 fn fan_mode_endpoints_writable_outside_root_block_the_sandbox() {
-    for endpoint in ["pwm1", "pwm1_enable", "pwm2", "pwm2_enable"] {
+    for endpoint in [
+        "pwm1",
+        "pwm1_enable",
+        "fan1_input",
+        "pwm2",
+        "pwm2_enable",
+        "fan2_input",
+    ] {
         for permissions in [
             FilePermissions::from_mode(0o664),
             FilePermissions::from_mode(0o644).with_extended_acl(),
@@ -739,6 +786,7 @@ fn malformed_fan_mode_becomes_identity_bound_unreadable_valid_failed_evidence() 
                     .into(),
                 compatibility: declaration,
             },
+            Some("GPU-11111111-2222-3333-4444-555555555555".into()),
             EvidenceTimestamp {
                 monotonic_millis: 1,
                 wall_unix_millis: 1,
@@ -757,6 +805,7 @@ fn malformed_fan_mode_becomes_identity_bound_unreadable_valid_failed_evidence() 
     assert_eq!(cpu.value, None);
     assert_eq!(cpu.outcome, ObservationOutcome::Unreadable);
     assert!(cpu.endpoint_identity.starts_with("device-"));
+    assert!(evidence.fan_endpoint_identities.is_none());
     assert!(evidence.validate().is_ok());
     let mut partial = evidence.clone();
     partial.preflight_checks.as_mut().unwrap().truncate(2);
@@ -817,6 +866,7 @@ fn fan_mode_reads_fail_closed_when_the_discovered_hwmon_identity_rebinds() {
                     .into(),
                 compatibility: declaration,
             },
+            Some("GPU-11111111-2222-3333-4444-555555555555".into()),
             EvidenceTimestamp {
                 monotonic_millis: 1,
                 wall_unix_millis: 1,
@@ -828,6 +878,7 @@ fn fan_mode_reads_fail_closed_when_the_discovered_hwmon_identity_rebinds() {
         )
         .unwrap();
     assert!(!evidence.outcome.final_firmware_auto_confirmed);
+    assert!(evidence.fan_endpoint_identities.is_none());
     assert_eq!(evidence.readbacks.len(), 2);
     assert_eq!(
         evidence
@@ -842,6 +893,46 @@ fn fan_mode_reads_fail_closed_when_the_discovered_hwmon_identity_rebinds() {
             .readbacks
             .iter()
             .all(|readback| readback.outcome == ObservationOutcome::Unreadable)
+    );
+}
+
+#[test]
+fn collection_failure_can_preserve_evidence_without_a_valid_gpu_identity() {
+    let report = fan_control_core::PreflightReport::collection_failure(
+        EvidenceTimestamp {
+            monotonic_millis: 2,
+            wall_unix_millis: 2,
+        },
+        "invalid protected GPU identity",
+    );
+    let evidence = report
+        .into_evidence(
+            QualificationEnvelopeIdentityV1 {
+                qualification_record_schema_version: 1,
+                qualification_id: "qualification-id".into(),
+                policy_version: "policy-v1".into(),
+                protected_policy_sha256: "a".repeat(64),
+                compatibility: compatibility_declaration(PROTECTED_POLICY),
+            },
+            None,
+            EvidenceTimestamp {
+                monotonic_millis: 1,
+                wall_unix_millis: 1,
+            },
+            EvidenceTimestamp {
+                monotonic_millis: 2,
+                wall_unix_millis: 2,
+            },
+        )
+        .unwrap();
+
+    assert!(evidence.nvidia_gpu_uuid.is_none());
+    assert!(evidence.validate().is_ok());
+    let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA_V2).unwrap();
+    assert!(
+        jsonschema::validator_for(&schema)
+            .unwrap()
+            .is_valid(&serde_json::to_value(&evidence).unwrap())
     );
 }
 

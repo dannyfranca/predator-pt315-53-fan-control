@@ -10,10 +10,10 @@ use fan_control_core::{
     CalibrationLevelObservation, CalibrationReadbackSample, CalibrationStep,
     CompatibilityDeclarationV1, CompatibilityObservation, ConservativeFanCalibration,
     EvidenceCompleteness, EvidenceFan, EvidenceRecord, EvidenceTimestamp, Fan,
-    FanCalibrationEvidence, FanCommandEvidence, FanControlField, FanHoldObservation,
-    FanWriteBackend, ObservedFanAbi, RestorationAttemptEvidence, RestorationOutcome,
-    RunOutcomeStatus, StateTransitionEvidence, ValidatedConfig, parse_compatibility_v1,
-    parse_config_v1, validate_config_v1,
+    FanCalibrationEvidence, FanCommandEvidence, FanControlField, FanEndpointIdentitiesEvidence,
+    FanHoldObservation, FanWriteBackend, ObservedFanAbi, RestorationAttemptEvidence,
+    RestorationOutcome, RunOutcomeStatus, StateTransitionEvidence, ValidatedConfig,
+    parse_compatibility_v1, parse_config_v1, validate_config_v1,
 };
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
@@ -22,6 +22,17 @@ use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
 static DIAGNOSTIC_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
 static DIAGNOSTIC_CAPTURE_SUBSCRIBER: Once = Once::new();
+
+pub fn fan_endpoint_identities() -> FanEndpointIdentitiesEvidence {
+    FanEndpointIdentitiesEvidence {
+        cpu_pwm: "device-0-inode-7".into(),
+        cpu_enable: "device-0-inode-8".into(),
+        cpu_tachometer: "device-0-inode-9".into(),
+        gpu_pwm: "device-0-inode-10".into(),
+        gpu_enable: "device-0-inode-11".into(),
+        gpu_tachometer: "device-0-inode-12".into(),
+    }
+}
 
 #[derive(Debug, Default)]
 struct DiagnosticFields(BTreeMap<String, String>);
@@ -386,6 +397,9 @@ pub fn completed_calibration_record(mut record: EvidenceRecord, fan: Fan) -> Evi
     record.stage = "fan-calibration".into();
     record.baseline_binding_sha256 = None;
     record.preflight_binding_sha256 = None;
+    record.nvidia_gpu_uuid = None;
+    record.fan_endpoint_identities = None;
+    record.firmware_auto_cleanup = None;
     record.preflight_checks = None;
     record.faults.clear();
     if let Some(summary) = &mut record.thermal_summary {
