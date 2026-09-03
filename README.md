@@ -1372,13 +1372,13 @@ the exact candidate identity and environmental limits before stage 2. Start
 each following stage only after the preceding evidence is complete, protected,
 and accepted. At every handoff, repeat the Auto boundary above.
 
-> **IMPLEMENTATION BLOCK:** this source revision packages no production stage
-> runner for preflight, baseline, calibration, matched workloads, or live
-> lifecycle, and packages no reviewed endurance harness. Therefore stages 2
-> through 7 describe the required evidence procedure but cannot be executed by
-> this revision. Stop here. Do not improvise commands, direct sysfs writes, or a
-> local harness. A later revision must add and package reviewed stage-oriented
-> entrypoints before an operator may follow the live steps below.
+> **IMPLEMENTATION BLOCK:** this source revision exposes preflight and the seven
+> Firmware Auto baselines through `pt31553-fan-qualify`, but does not yet package
+> their reviewed hardware harness. Calibration, matched workloads, and live
+> lifecycle also remain unavailable. Do not run live qualification until the
+> packaged harness and remaining stage entrypoints land. The implemented command
+> contract is documented in
+> [`qualification/preflight-baseline-harness.md`](qualification/preflight-baseline-harness.md).
 
 ### 2. Run read-only preflight
 
@@ -1389,12 +1389,12 @@ tool and unit identities, journal/storage health, recovery entries, and both
 enable readbacks. Reject unexpected devices, paths, identities, permissions,
 values, missing prerequisites, or a non-`2` enable readback.
 
-Publish the protected result as
-`/var/lib/pt31553-fan-control/evidence/preflight.json`. End by repeating the
-read-only preflight form of the Auto boundary. Because this revision does not
-expose a production preflight stage command, it cannot create qualifying
-preflight evidence; do not replace that missing entrypoint with ad-hoc shell
-writes or treat source tests as hardware evidence.
+Publish the protected result as `preflight.json` under the manifest's unique
+evidence session directory. The executable form is
+`pt31553-fan-qualify preflight --manifest FILE --harness FILE`. End by repeating
+the read-only preflight form of the Auto boundary. Until the reviewed harness is
+packaged, do not replace it with ad-hoc shell scripts or direct sysfs writes,
+or treat source tests as hardware evidence.
 
 ### 3. Record Firmware Auto baselines
 
@@ -1411,6 +1411,11 @@ for comparable starting conditions before continuing.
 Store the seven root-owned evidence records under
 `/var/lib/pt31553-fan-control/evidence/`. Their identities and paths become the
 ordered `baselines` array in the endurance plan.
+
+The executable form is `pt31553-fan-qualify firmware-auto-baselines --manifest
+FILE --harness FILE`. It fixes the durations and workload identities, checks the
+full read-only preflight again before every new workload, and resumes only exact,
+fresh, complete evidence with unchanged fan endpoint identities.
 
 ### 4. Calibrate one fan at a time
 

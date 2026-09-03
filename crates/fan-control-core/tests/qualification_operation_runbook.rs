@@ -76,10 +76,12 @@ fn qualification_ladder_and_abort_boundary_are_explicit_and_ordered() {
     let normalized = runbook.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(normalized.contains("If both fans cannot be confirmed in Auto immediately, shut down"));
     assert!(runbook.contains("IMPLEMENTATION BLOCK"));
-    assert!(runbook.contains("Therefore stages 2"));
-    assert!(runbook.contains("through 7 describe the required evidence procedure"));
-    assert!(runbook.contains("procedure but cannot be executed by"));
-    assert!(runbook.contains("this revision. Stop here. Do not improvise commands"));
+    assert!(runbook.contains("this source revision exposes preflight and the seven"));
+    assert!(runbook.contains("Firmware Auto baselines through `pt31553-fan-qualify`"));
+    assert!(runbook.contains("does not yet package"));
+    assert!(runbook.contains("Calibration, matched workloads, and live"));
+    assert!(runbook.contains("lifecycle also remain unavailable"));
+    assert!(runbook.contains("do not replace it with ad-hoc shell scripts"));
     assert!(runbook.contains("direct sysfs writes"));
     for limit in [
         "AC idle for 10 minutes",
