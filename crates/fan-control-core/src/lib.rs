@@ -40,7 +40,7 @@ mod validation;
 pub use acer_hwmon::{AcerHwmonDevice, AcerHwmonDiscoveryError, FanEndpoints, discover_acer_hwmon};
 pub use arming::{
     ArmedFanControl, FanArmingError, FanArmingFailure, FanArmingOperation, FanArmingReadback,
-    arm_both_fans_safely,
+    arm_both_fans_safely, arm_both_fans_safely_until,
 };
 pub use authority::{
     AdmittedPolicyAuthority, PolicyAuthorityAdmissionError, PolicyAuthorityError,

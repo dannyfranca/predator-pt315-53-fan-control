@@ -388,7 +388,7 @@ fn supervised_heartbeat_follows_a_real_normal_control_cycle() {
 }
 
 #[test]
-fn supervised_heartbeat_tracks_every_successful_recovery_transition_after_readiness() {
+fn supervised_heartbeat_waits_for_a_real_cycle_through_recovery() {
     let (mut platform, device) = fixture();
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (authority, armed) = arm_with_authority(&mut ownership, &device);
@@ -411,7 +411,7 @@ fn supervised_heartbeat_tracks_every_successful_recovery_transition_after_readin
         run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat).unwrap(),
         SensorControlStep::Completed(_)
     ));
-    let mut expected = vec![ServiceNotification::Ready, ServiceNotification::Watchdog];
+    let expected = vec![ServiceNotification::Ready, ServiceNotification::Watchdog];
 
     ownership.delay(Duration::from_secs(2));
     script.borrow_mut().fail_cpu = true;
@@ -419,7 +419,6 @@ fn supervised_heartbeat_tracks_every_successful_recovery_transition_after_readin
         run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat).unwrap(),
         SensorControlStep::FirmwareAutoRestored { .. }
     ));
-    expected.push(ServiceNotification::Watchdog);
     assert_eq!(*notifications.borrow(), expected);
 
     script.borrow_mut().fail_cpu = false;
@@ -428,22 +427,18 @@ fn supervised_heartbeat_tracks_every_successful_recovery_transition_after_readin
         run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat).unwrap(),
         SensorControlStep::AwaitingRediscovery(_)
     ));
-    expected.push(ServiceNotification::Watchdog);
     assert_eq!(*notifications.borrow(), expected);
 
     assert_eq!(
         run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat).unwrap(),
         SensorControlStep::AwaitingSecondSample
     );
-    expected.push(ServiceNotification::Watchdog);
     assert_eq!(*notifications.borrow(), expected);
 
-    ownership.delay(Duration::from_secs(2));
     assert_eq!(
         run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat).unwrap(),
         SensorControlStep::Rearmed
     );
-    expected.push(ServiceNotification::Watchdog);
     assert_eq!(*notifications.borrow(), expected);
 
     assert!(matches!(
@@ -454,10 +449,6 @@ fn supervised_heartbeat_tracks_every_successful_recovery_transition_after_readin
         *notifications.borrow(),
         [
             ServiceNotification::Ready,
-            ServiceNotification::Watchdog,
-            ServiceNotification::Watchdog,
-            ServiceNotification::Watchdog,
-            ServiceNotification::Watchdog,
             ServiceNotification::Watchdog,
             ServiceNotification::Watchdog,
         ]
@@ -2243,7 +2234,6 @@ fn transient_cpu_failure_restores_auto_then_rediscovers_and_fully_rearms() {
     assert_eq!(ownership.platform().file_contents(cpu_enable()), Some("2"));
     assert_eq!(ownership.platform().file_contents(gpu_enable()), Some("2"));
 
-    ownership.delay(Duration::from_secs(2));
     assert_eq!(
         control.step(&mut ownership).unwrap(),
         SensorControlStep::Rearmed
@@ -2300,7 +2290,6 @@ fn shutdown_after_recovery_sample_readiness_is_observable_before_rearming() {
         control.step(&mut ownership).unwrap(),
         SensorControlStep::AwaitingSecondSample
     );
-    ownership.delay(Duration::from_secs(2));
     script.borrow_mut().shutdown_after_sample = Some(shutdown);
 
     let (result, diagnostic_events) = record_diagnostics(|| control.step(&mut ownership));
@@ -2441,7 +2430,6 @@ fn failed_restoration_after_mode_drift_contains_and_retains_sensor_bindings() {
     let drop_observations = Rc::new(RefCell::new(Vec::new()));
     script.borrow_mut().source_drop_probe =
         Some((Rc::clone(&auto_confirmed), Rc::clone(&drop_observations)));
-    ownership.delay(Duration::from_secs(2));
     auto_confirmed.set(false);
     interference
         .set(RuntimeInterference::CpuModeBeforeRecoveryAutoCheckAndRestorationDeadlineCustom);
@@ -2515,7 +2503,6 @@ fn failed_rearming_restoration_retains_sensor_bindings() {
     let drop_observations = Rc::new(RefCell::new(Vec::new()));
     script.borrow_mut().source_drop_probe =
         Some((Rc::clone(&auto_confirmed), Rc::clone(&drop_observations)));
-    ownership.delay(Duration::from_secs(2));
     auto_confirmed.set(false);
     interference.set(RuntimeInterference::ArmingFailureAndRestorationUnavailable);
 
@@ -2569,7 +2556,6 @@ fn rejected_rearming_drops_sensor_bindings_and_permanently_latches() {
     let drop_observations = Rc::new(RefCell::new(Vec::new()));
     script.borrow_mut().source_drop_probe =
         Some((Rc::clone(&auto_confirmed), Rc::clone(&drop_observations)));
-    ownership.delay(Duration::from_secs(2));
     auto_confirmed.set(false);
     interference.set(RuntimeInterference::MakeEndpointWorldWritable);
     let marker = ownership.platform().operations().len();
@@ -2629,7 +2615,6 @@ fn a_recovery_sample_failure_discards_identity_and_sample_history() {
         control.step(&mut ownership).unwrap(),
         SensorControlStep::AwaitingSecondSample
     );
-    ownership.delay(Duration::from_secs(2));
     script.borrow_mut().fail_gpu = true;
     assert!(matches!(
         control.step(&mut ownership).unwrap(),
@@ -2649,7 +2634,6 @@ fn a_recovery_sample_failure_discards_identity_and_sample_history() {
     assert_eq!(script.borrow().rediscoveries, 2);
     assert_eq!(script.borrow().last_sample_binding, Some(2));
     assert_eq!(control.state(), SensorControlState::FirmwareAutoRecovery);
-    ownership.delay(Duration::from_secs(2));
     assert_eq!(
         control.step(&mut ownership).unwrap(),
         SensorControlStep::Rearmed

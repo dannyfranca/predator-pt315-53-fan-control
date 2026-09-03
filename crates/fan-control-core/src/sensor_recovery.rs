@@ -6,7 +6,7 @@ use crate::{
     FirmwareAutoRestorationError, FreshSampleGate, HealthyControl, HealthyControlCycleError,
     IdentityBoundReadAccess, OwnershipSampleReadiness, RequiredInput, RuntimeFault,
     RuntimeLockAccess, RuntimeState, RuntimeTransition, SampleSetError, SampleSourceError,
-    SampleSources, ShutdownRequest, ValidatedConfig, arm_both_fans_safely,
+    SampleSources, ShutdownRequest, ValidatedConfig, arm_both_fans_safely_until,
     diagnostics::sample_fault, emit_fault, emit_state_transition,
     ownership::FirmwareAutoSafingOutcome, run_healthy_control_cycle,
 };
@@ -325,6 +325,16 @@ where
                 );
                 match readiness {
                     Ok(OwnershipSampleReadiness::AwaitingSecondSample) => {
+                        if let Err(fault) = ownership.wait_for_next_fresh_sample(&gate) {
+                            let (fault_id, endpoint) = sample_fault(&fault);
+                            emit_fault(fault_id, endpoint);
+                            emit_state_transition(
+                                RuntimeState::FirmwareAuto,
+                                RuntimeState::Restoring,
+                                RuntimeTransition::ControlFault,
+                            );
+                            return self.latch_recovery_fault(ownership, device, fault, sources);
+                        }
                         self.state = Some(ControlState::Recovering(Box::new(RecoveryState {
                             config,
                             device,
@@ -346,12 +356,13 @@ where
                             });
                             return Err(TransientSensorControlError::ShutdownRequested);
                         }
-                        match arm_both_fans_safely(
+                        match arm_both_fans_safely_until(
                             ownership,
                             &device,
                             &self.authority,
                             &config,
                             sample,
+                            &self.shutdown,
                         ) {
                             Ok(armed) => {
                                 self.state = Some(ControlState::Custom {
@@ -363,6 +374,19 @@ where
                                         .expect("ready sample was captured from installed sources"),
                                 });
                                 Ok(SensorControlStep::Rearmed)
+                            }
+                            Err(error)
+                                if self.shutdown.is_requested()
+                                    && !matches!(
+                                        &error,
+                                        FanArmingError::RestorationFailed { .. }
+                                    ) =>
+                            {
+                                drop(sources);
+                                self.state = Some(ControlState::Faulted {
+                                    retained_sources: None,
+                                });
+                                Err(TransientSensorControlError::ShutdownRequested)
                             }
                             Err(error) => {
                                 if !matches!(&error, FanArmingError::RestorationFailed { .. }) {

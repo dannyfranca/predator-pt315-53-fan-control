@@ -1528,6 +1528,7 @@ pub enum FakeStep {
     Pass,
     Fail(PlatformError),
     Disappear(PathBuf),
+    ReplaceContents { path: PathBuf, contents: String },
     Advance(Duration),
 }
 
@@ -1589,6 +1590,7 @@ pub struct FakePlatform {
     delays: Vec<Duration>,
     steps: VecDeque<FakeStep>,
     file_steps: VecDeque<FakeStep>,
+    runtime_lock_steps: VecDeque<FakeStep>,
     operations: Vec<PlatformOperation>,
     bounded_write_attempts: Vec<PlatformOperation>,
 }
@@ -1703,6 +1705,11 @@ impl FakePlatform {
         self.file_steps.extend(steps);
     }
 
+    /// Queues failures scoped to runtime-lock acquire/release operations.
+    pub fn queue_runtime_lock_steps(&mut self, steps: impl IntoIterator<Item = FakeStep>) {
+        self.runtime_lock_steps.extend(steps);
+    }
+
     pub fn pending_steps(&self) -> usize {
         self.steps.len()
     }
@@ -1747,6 +1754,7 @@ impl FakePlatform {
                 self.remove_path(path);
                 Ok(())
             }
+            FakeStep::ReplaceContents { path, contents } => self.replace_contents(&path, contents),
             FakeStep::Advance(duration) => {
                 self.monotonic_time = self.monotonic_time.saturating_add(duration);
                 Ok(())
@@ -1765,6 +1773,26 @@ impl FakePlatform {
                 self.remove_path(path);
                 Ok(())
             }
+            FakeStep::ReplaceContents { path, contents } => self.replace_contents(&path, contents),
+            FakeStep::Advance(duration) => {
+                self.monotonic_time = self.monotonic_time.saturating_add(duration);
+                Ok(())
+            }
+        }
+    }
+
+    fn apply_next_runtime_lock_step(&mut self) -> Result<(), PlatformError> {
+        let Some(step) = self.runtime_lock_steps.pop_front() else {
+            return self.apply_next_step();
+        };
+        match step {
+            FakeStep::Pass => Ok(()),
+            FakeStep::Fail(error) => Err(error),
+            FakeStep::Disappear(path) => {
+                self.remove_path(path);
+                Ok(())
+            }
+            FakeStep::ReplaceContents { path, contents } => self.replace_contents(&path, contents),
             FakeStep::Advance(duration) => {
                 self.monotonic_time = self.monotonic_time.saturating_add(duration);
                 Ok(())
@@ -1823,6 +1851,7 @@ impl FakePlatform {
                 self.remove_path(path);
                 Ok(())
             }
+            FakeStep::ReplaceContents { path, contents } => self.replace_contents(&path, contents),
         }
     }
 
@@ -1856,7 +1885,17 @@ impl FakePlatform {
                 self.remove_path(path);
                 Ok(())
             }
+            FakeStep::ReplaceContents { path, contents } => self.replace_contents(&path, contents),
         }
+    }
+
+    fn replace_contents(&mut self, path: &Path, contents: String) -> Result<(), PlatformError> {
+        let file = self
+            .files
+            .get_mut(path)
+            .ok_or_else(|| Self::missing(path))?;
+        file.contents = contents;
+        Ok(())
     }
 
     fn read_file(&self, path: &Path) -> Result<String, PlatformError> {
@@ -2246,7 +2285,8 @@ impl RuntimeLockAccess for FakePlatform {
     ) -> Result<Self::RuntimeLock, RuntimeLockError> {
         self.operations
             .push(PlatformOperation::AcquireRuntimeLock(path.to_path_buf()));
-        self.apply_next_step().map_err(RuntimeLockError::Platform)?;
+        self.apply_next_runtime_lock_step()
+            .map_err(RuntimeLockError::Platform)?;
         let mut state = self.runtime_lock_backend.state.lock().map_err(|_| {
             RuntimeLockError::Platform(PlatformError::new(
                 PlatformErrorKind::Unavailable,
@@ -2276,7 +2316,7 @@ impl RuntimeLockAccess for FakePlatform {
     ) -> Result<(), (Self::RuntimeLock, PlatformError)> {
         self.operations
             .push(PlatformOperation::ReleaseRuntimeLock(lock.path.clone()));
-        if let Err(error) = self.apply_next_step() {
+        if let Err(error) = self.apply_next_runtime_lock_step() {
             return Err((lock, error));
         }
         if !Arc::ptr_eq(&lock.backend, &self.runtime_lock_backend.state) {

@@ -105,6 +105,13 @@ where
         self.platform
     }
 
+    /// Debug-build-only adapter access for the daemon subprocess acceptance fixture.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn acceptance_platform_mut(&mut self) -> &mut P {
+        self.platform
+    }
+
     /// Collects a fresh sample only after re-confirming both fans remain in Firmware Auto.
     pub fn collect_fresh_sample(
         &mut self,
