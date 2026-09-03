@@ -385,6 +385,8 @@ pub fn completed_calibration_record(mut record: EvidenceRecord, fan: Fan) -> Evi
     record.schema_version = 2;
     record.stage = "fan-calibration".into();
     record.baseline_binding_sha256 = None;
+    record.preflight_binding_sha256 = None;
+    record.preflight_checks = None;
     record.faults.clear();
     if let Some(summary) = &mut record.thermal_summary {
         summary.kernel_faults.clear();

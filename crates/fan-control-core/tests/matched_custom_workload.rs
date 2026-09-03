@@ -1462,6 +1462,7 @@ fn baseline_for_sample_count(
         &FirmwareAutoBaselinePlan {
             hwmon_root: Path::new(HWMON_ROOT),
             qualification_envelope: envelope(),
+            preflight_binding_sha256: "a".repeat(64),
             workload,
             samples_required,
         },

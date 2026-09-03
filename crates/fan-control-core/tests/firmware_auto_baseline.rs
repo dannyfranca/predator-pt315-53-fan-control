@@ -10,6 +10,7 @@ use fan_control_core::{
     FirmwareAutoBaselinePlan, IdentityBoundReadAccess, ObservationOutcome, PlatformError,
     PlatformOperation, RunOutcomeStatus, SampleFreshness, TelemetrySampleEvidence,
     WorkloadEvidence, parse_evidence_v1, parse_evidence_v2, run_firmware_auto_baseline,
+    validate_firmware_auto_baseline_resume,
 };
 use support::{PROTECTED_POLICY, compatibility_declaration};
 
@@ -36,6 +37,7 @@ fn passing_baseline_records_fixed_workload_conditions_telemetry_and_summary_with
         &FirmwareAutoBaselinePlan {
             hwmon_root: Path::new(HWMON_ROOT),
             qualification_envelope: envelope,
+            preflight_binding_sha256: "a".repeat(64),
             workload: workload.clone(),
             samples_required: 3,
         },
@@ -106,6 +108,74 @@ fn passing_baseline_records_fixed_workload_conditions_telemetry_and_summary_with
             .iter()
             .all(|operation| !matches!(operation, PlatformOperation::Write { .. }))
     );
+}
+
+#[test]
+fn resume_requires_the_exact_plan_and_current_endpoint_identities() {
+    let mut platform = auto_platform();
+    let mut environment = StubEnvironment::with_observations(vec![
+        observation(1_000, 42_000, 39_000),
+        observation(3_000, 65_000, 54_000),
+        observation(5_000, 67_000, 56_000),
+    ]);
+    let plan = FirmwareAutoBaselinePlan {
+        hwmon_root: Path::new(HWMON_ROOT),
+        qualification_envelope: envelope(),
+        preflight_binding_sha256: "a".repeat(64),
+        workload: workload(),
+        samples_required: 3,
+    };
+    let record = run_firmware_auto_baseline(&mut platform, &mut environment, &plan)
+        .unwrap()
+        .into_record();
+    assert!(validate_firmware_auto_baseline_resume(&mut platform, &record, &plan).is_ok());
+
+    let mut within_jitter = record.clone();
+    for sample in &mut within_jitter.samples {
+        sample.timestamp.monotonic_millis += 100;
+        sample.timestamp.wall_unix_millis += 100;
+    }
+    for readback in &mut within_jitter.readbacks {
+        if matches!(
+            readback.phase,
+            Some(FanReadbackPhase::Sample | FanReadbackPhase::Final)
+        ) {
+            readback.timestamp.monotonic_millis += 100;
+            readback.timestamp.wall_unix_millis += 100;
+        }
+    }
+    within_jitter.completed_at.monotonic_millis += 100;
+    within_jitter.completed_at.wall_unix_millis += 100;
+    validate_firmware_auto_baseline_resume(&mut platform, &within_jitter, &plan).unwrap();
+
+    let substituted_plan = FirmwareAutoBaselinePlan {
+        hwmon_root: Path::new(HWMON_ROOT),
+        qualification_envelope: envelope(),
+        preflight_binding_sha256: "a".repeat(64),
+        workload: WorkloadEvidence {
+            workload_id: "gpu-ac-v1".into(),
+            ..workload()
+        },
+        samples_required: 3,
+    };
+    assert!(
+        validate_firmware_auto_baseline_resume(&mut platform, &record, &substituted_plan).is_err()
+    );
+
+    let different_preflight = FirmwareAutoBaselinePlan {
+        hwmon_root: Path::new(HWMON_ROOT),
+        qualification_envelope: envelope(),
+        preflight_binding_sha256: "b".repeat(64),
+        workload: workload(),
+        samples_required: 3,
+    };
+    assert!(
+        validate_firmware_auto_baseline_resume(&mut platform, &record, &different_preflight)
+            .is_err()
+    );
+
+    platform.rebind_path_identity(Path::new(HWMON_ROOT).join("hwmon0/pwm1_enable"));
+    assert!(validate_firmware_auto_baseline_resume(&mut platform, &record, &plan).is_err());
 }
 
 #[test]
@@ -265,8 +335,18 @@ fn missed_two_second_cadence_and_workload_failures_are_evidence_not_panics() {
                 .any(|fault| fault.code == code)
         );
     }
-    assert_eq!(environment.events.last(), Some(&"stop"));
-    assert!(!environment.events.contains(&"cleanup"));
+    assert!(
+        environment
+            .events
+            .ends_with(&["stop", "contain", "cleanup"])
+    );
+    assert!(
+        report
+            .record()
+            .faults
+            .iter()
+            .any(|fault| fault.code == "cleanup")
+    );
     assert!(report.record().validate().is_ok());
 }
 
@@ -377,6 +457,7 @@ fn malformed_workload_and_out_of_range_telemetry_cannot_pass() {
         &FirmwareAutoBaselinePlan {
             hwmon_root: Path::new(HWMON_ROOT),
             qualification_envelope: envelope(),
+            preflight_binding_sha256: "a".repeat(64),
             workload: invalid_workload,
             samples_required: 1,
         },
@@ -423,6 +504,7 @@ fn invalid_qualification_envelope_is_rejected_before_any_baseline_action() {
         &FirmwareAutoBaselinePlan {
             hwmon_root: Path::new(HWMON_ROOT),
             qualification_envelope: invalid_envelope,
+            preflight_binding_sha256: "a".repeat(64),
             workload: workload(),
             samples_required: 2,
         },
@@ -847,6 +929,7 @@ fn run<P: FirmwareAutoBaselineAccess>(
         &FirmwareAutoBaselinePlan {
             hwmon_root: Path::new(HWMON_ROOT),
             qualification_envelope: envelope(),
+            preflight_binding_sha256: "a".repeat(64),
             workload: workload(),
             samples_required,
         },
@@ -930,6 +1013,7 @@ struct StubEnvironment {
     wait_drift_millis: u64,
     start_result: Result<(), String>,
     stop_result: Result<(), String>,
+    containment_result: Result<(), String>,
     cleanup_result: Result<(), String>,
     cleanup_fan_control_write_count: u64,
     running: Option<Rc<Cell<bool>>>,
@@ -950,6 +1034,7 @@ impl StubEnvironment {
             wait_drift_millis: 0,
             start_result: Ok(()),
             stop_result: Ok(()),
+            containment_result: Ok(()),
             cleanup_result: Ok(()),
             cleanup_fan_control_write_count: 0,
             running: None,
@@ -1030,6 +1115,16 @@ impl FirmwareAutoBaselineEnvironment for StubEnvironment {
             }
         }
         self.stop_result.clone()
+    }
+
+    fn contain_workload(&mut self, _deadline_monotonic_millis: u64) -> Result<(), String> {
+        self.events.push("contain");
+        if self.containment_result.is_ok() {
+            if let Some(running) = &self.running {
+                running.set(false);
+            }
+        }
+        self.containment_result.clone()
     }
 
     fn cleanup_after_workload(&mut self) -> Result<BaselineCleanupAttestation, String> {

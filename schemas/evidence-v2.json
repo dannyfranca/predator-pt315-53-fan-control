@@ -36,6 +36,16 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "preflight_binding_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "preflight_checks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": { "$ref": "#/$defs/preflightCheck" }
+    },
     "workload": {
       "anyOf": [
         { "$ref": "#/$defs/workload" },
@@ -203,6 +213,88 @@
           }
         },
         "not": { "required": ["live_lifecycle_cases"] }
+      }
+    },
+    {
+      "if": {
+        "properties": { "stage": { "const": "preflight" } },
+        "required": ["stage"]
+      },
+      "then": {
+        "oneOf": [
+          {
+            "properties": {
+              "preflight_checks": {
+                "minItems": 12,
+                "maxItems": 12,
+                "allOf": [
+                  { "contains": { "properties": { "check": { "const": "platform" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "trust" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "fan-abi" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "sensors" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "configuration" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "policy" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "recovery" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "stock-boot-fallback" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "tooling" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "disk-space" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "competing-services" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "firmware-auto" } }, "required": ["check"] } }
+                ]
+              }
+            },
+            "allOf": [{
+              "if": {
+                "properties": {
+                  "outcome": {
+                    "properties": { "status": { "const": "failed" } },
+                    "required": ["status"]
+                  }
+                },
+                "required": ["outcome"]
+              },
+              "then": {
+                "properties": {
+                  "preflight_checks": {
+                    "contains": {
+                      "properties": { "passed": { "const": false } },
+                      "required": ["passed"]
+                    }
+                  },
+                  "faults": { "minItems": 1 }
+                }
+              },
+              "else": {
+                "properties": {
+                  "preflight_checks": {
+                    "items": {
+                      "properties": { "passed": { "const": true } },
+                      "required": ["passed"]
+                    }
+                  }
+                }
+              }
+            }]
+          },
+          {
+            "properties": {
+              "faults": { "minItems": 1 },
+              "preflight_checks": {
+                "minItems": 1,
+                "maxItems": 1,
+                "items": {
+                  "properties": {
+                    "check": { "const": "evidence-collection" },
+                    "passed": { "const": false }
+                  }
+                }
+              },
+              "outcome": {
+                "properties": { "status": { "const": "failed" } }
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -408,6 +500,22 @@
     },
     {
       "if": {
+        "properties": { "stage": { "const": "firmware-auto-baseline" } },
+        "required": ["stage"]
+      },
+      "then": { "required": ["preflight_binding_sha256"] },
+      "else": { "not": { "required": ["preflight_binding_sha256"] } }
+    },
+    {
+      "if": {
+        "properties": { "stage": { "const": "preflight" } },
+        "required": ["stage"]
+      },
+      "then": { "required": ["preflight_checks"] },
+      "else": { "not": { "required": ["preflight_checks"] } }
+    },
+    {
+      "if": {
         "properties": {
           "stage": { "const": "matched-workload" },
           "outcome": {
@@ -485,12 +593,9 @@
             "properties": {
               "stage": { "const": "preflight" },
               "samples": {
-                "minItems": 1,
-                "contains": {
-                  "properties": { "freshness": { "const": "fresh" } },
-                  "required": ["freshness"]
-                }
+                "maxItems": 0
               },
+              "preflight_checks": { "minItems": 12, "maxItems": 12 },
               "workload": { "type": "null" },
               "thermal_summary": { "type": "null" },
               "commands": { "maxItems": 0 },
@@ -1144,6 +1249,17 @@
       "properties": {
         "monotonic_millis": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
         "wall_unix_millis": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 }
+      }
+    },
+    "preflightCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "check", "passed", "detail"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "check": { "$ref": "#/$defs/identifier" },
+        "passed": { "type": "boolean" },
+        "detail": { "type": "string", "minLength": 1 }
       }
     },
     "qualificationEnvelope": {

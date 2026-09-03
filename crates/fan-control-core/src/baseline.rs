@@ -79,6 +79,10 @@ pub trait FirmwareAutoBaselineEnvironment {
     /// Must confirm workload termination no later than the absolute deadline.
     fn stop_workload(&mut self, deadline_monotonic_millis: u64) -> Result<(), String>;
 
+    fn contain_workload(&mut self, deadline_monotonic_millis: u64) -> Result<(), String> {
+        self.stop_workload(deadline_monotonic_millis)
+    }
+
     /// Must report every attempted fan-control write. Any nonzero count blocks acceptance.
     fn cleanup_after_workload(&mut self) -> Result<BaselineCleanupAttestation, String>;
 }
@@ -131,6 +135,7 @@ where
 pub struct FirmwareAutoBaselinePlan<'a> {
     pub hwmon_root: &'a Path,
     pub qualification_envelope: QualificationEnvelopeIdentityV1,
+    pub preflight_binding_sha256: String,
     pub workload: WorkloadEvidence,
     pub samples_required: usize,
 }
@@ -138,6 +143,7 @@ pub struct FirmwareAutoBaselinePlan<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FirmwareAutoBaselinePlanError {
     InvalidQualificationEnvelope(EvidenceValidationError),
+    InvalidPreflightBinding,
 }
 
 impl fmt::Display for FirmwareAutoBaselinePlanError {
@@ -145,6 +151,9 @@ impl fmt::Display for FirmwareAutoBaselinePlanError {
         match self {
             Self::InvalidQualificationEnvelope(error) => {
                 write!(formatter, "invalid qualification envelope: {error}")
+            }
+            Self::InvalidPreflightBinding => {
+                formatter.write_str("invalid preflight evidence binding")
             }
         }
     }
@@ -154,6 +163,7 @@ impl Error for FirmwareAutoBaselinePlanError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidQualificationEnvelope(error) => Some(error),
+            Self::InvalidPreflightBinding => None,
         }
     }
 }
@@ -161,6 +171,104 @@ impl Error for FirmwareAutoBaselinePlanError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirmwareAutoBaselineReport {
     record: EvidenceRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirmwareAutoBaselineResumeError(String);
+
+impl fmt::Display for FirmwareAutoBaselineResumeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Error for FirmwareAutoBaselineResumeError {}
+
+/// Accepts an immutable prior baseline only when its complete transcript matches this exact plan
+/// and the currently discovered fan endpoint identities still read Firmware Auto.
+pub fn validate_firmware_auto_baseline_resume<P>(
+    platform: &mut P,
+    record: &EvidenceRecord,
+    plan: &FirmwareAutoBaselinePlan<'_>,
+) -> Result<(), FirmwareAutoBaselineResumeError>
+where
+    P: FirmwareAutoBaselineAccess,
+{
+    record
+        .validate()
+        .map_err(|error| FirmwareAutoBaselineResumeError(format!("invalid evidence: {error}")))?;
+    let workload = record
+        .workload
+        .as_ref()
+        .ok_or_else(|| FirmwareAutoBaselineResumeError("workload evidence is missing".into()))?;
+    if record.stage != "firmware-auto-baseline"
+        || record.outcome.status != RunOutcomeStatus::Passed
+        || record.outcome.another_passing_run_required
+        || record.qualification_envelope != plan.qualification_envelope
+        || record.preflight_binding_sha256.as_deref()
+            != Some(plan.preflight_binding_sha256.as_str())
+        || workload.workload_id != plan.workload.workload_id
+        || workload.command != plan.workload.command
+        || workload.version != plan.workload.version
+        || workload.power_profile != plan.workload.power_profile
+        || record.samples.len() != plan.samples_required
+    {
+        return Err(FirmwareAutoBaselineResumeError(
+            "evidence is incomplete or belongs to a different baseline plan".into(),
+        ));
+    }
+    let workload_started_at = record.workload_started_at.ok_or_else(|| {
+        FirmwareAutoBaselineResumeError("workload start evidence is missing".into())
+    })?;
+    if record.samples.iter().enumerate().any(|(index, sample)| {
+        workload_started_at
+            .monotonic_millis
+            .checked_add((index as u64 + 1).saturating_mul(SAMPLE_CADENCE_MILLIS))
+            .is_none_or(|expected| {
+                sample.timestamp.monotonic_millis.abs_diff(expected) > SAMPLE_CADENCE_JITTER_MILLIS
+            })
+    }) {
+        return Err(FirmwareAutoBaselineResumeError(
+            "evidence has a substituted telemetry cadence".into(),
+        ));
+    }
+
+    let device = discover_acer_hwmon(platform, plan.hwmon_root)
+        .map_err(|error| FirmwareAutoBaselineResumeError(error.to_string()))?;
+    let mut current = observe_firmware_auto(platform, Some(&device), FanReadbackPhase::Final);
+    if let Some(error) = current.failure.take() {
+        return Err(FirmwareAutoBaselineResumeError(error));
+    }
+    for fan in [EvidenceFan::Cpu, EvidenceFan::Gpu] {
+        let previous = record
+            .readbacks
+            .iter()
+            .rev()
+            .find(|readback| {
+                readback.fan == fan
+                    && readback.field == FanReadbackField::Enable
+                    && readback.phase == Some(FanReadbackPhase::Final)
+            })
+            .ok_or_else(|| {
+                FirmwareAutoBaselineResumeError("final fan endpoint evidence is missing".into())
+            })?;
+        let now = current
+            .readbacks
+            .iter()
+            .find(|readback| readback.fan == fan)
+            .ok_or_else(|| {
+                FirmwareAutoBaselineResumeError("current fan endpoint cannot be confirmed".into())
+            })?;
+        if previous.endpoint_identity != now.endpoint_identity
+            || now.value != Some(2)
+            || now.outcome != ObservationOutcome::Confirmed
+        {
+            return Err(FirmwareAutoBaselineResumeError(
+                "fan endpoint identity changed or is no longer Firmware Auto".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl FirmwareAutoBaselineReport {
@@ -188,6 +296,14 @@ where
 {
     validate_identity(&plan.qualification_envelope)
         .map_err(FirmwareAutoBaselinePlanError::InvalidQualificationEnvelope)?;
+    if plan.preflight_binding_sha256.len() != 64
+        || !plan
+            .preflight_binding_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(FirmwareAutoBaselinePlanError::InvalidPreflightBinding);
+    }
 
     let started_at = environment.timestamp();
     let mut samples = Vec::with_capacity(plan.samples_required);
@@ -231,7 +347,10 @@ where
             Ok(capture)
                 if capture.captured_at.monotonic_millis < initial_modes_at.monotonic_millis
                     || capture.captured_at.monotonic_millis
-                        > callback_completed_at.monotonic_millis =>
+                        > callback_completed_at.monotonic_millis
+                    || capture.captured_at.wall_unix_millis < initial_modes_at.wall_unix_millis
+                    || capture.captured_at.wall_unix_millis
+                        > callback_completed_at.wall_unix_millis =>
             {
                 push_fault(
                     &mut faults,
@@ -338,8 +457,11 @@ where
             Ok(source_started_at)
                 if source_started_at.monotonic_millis < start_requested_at.monotonic_millis
                     || source_started_at.monotonic_millis > timestamp.monotonic_millis
+                    || source_started_at.wall_unix_millis < start_requested_at.wall_unix_millis
+                    || source_started_at.wall_unix_millis > timestamp.wall_unix_millis
                     || start_gate_confirmed_at.is_some_and(|confirmed_at| {
                         source_started_at.monotonic_millis < confirmed_at.monotonic_millis
+                            || source_started_at.wall_unix_millis < confirmed_at.wall_unix_millis
                     }) =>
             {
                 push_fault(
@@ -446,6 +568,8 @@ where
         let source_timestamp = observation.sample.timestamp;
         if source_timestamp.monotonic_millis < started_at.monotonic_millis
             || source_timestamp.monotonic_millis > captured_at.monotonic_millis
+            || source_timestamp.wall_unix_millis < started_at.wall_unix_millis
+            || source_timestamp.wall_unix_millis > captured_at.wall_unix_millis
         {
             push_fault(
                 &mut faults,
@@ -501,6 +625,7 @@ where
         match environment.stop_workload(stop_deadline) {
             Ok(()) => {
                 let stopped_at = environment.timestamp();
+                let mut safe_to_cleanup = true;
                 if stopped_at.monotonic_millis > stop_deadline {
                     push_fault(
                         &mut faults,
@@ -508,27 +633,42 @@ where
                         "workload-stop",
                         "workload termination exceeded its deadline",
                     );
-                }
-                match environment.cleanup_after_workload() {
-                    Ok(attestation) if attestation.fan_control_write_count > 0 => push_fault(
-                        &mut faults,
-                        environment.timestamp(),
-                        "cleanup-fan-control-write",
-                        format!(
-                            "post-workload cleanup attempted {} fan-control writes",
-                            attestation.fan_control_write_count
-                        ),
-                    ),
-                    Ok(_) => {}
-                    Err(error) => {
-                        let cleanup_failed_at = environment.timestamp();
+                    let containment_deadline = stopped_at
+                        .monotonic_millis
+                        .saturating_add(WORKLOAD_STOP_TIMEOUT_MILLIS);
+                    if let Err(error) = environment.contain_workload(containment_deadline) {
+                        safe_to_cleanup = false;
                         push_fault(
                             &mut faults,
-                            cleanup_failed_at,
-                            "cleanup",
-                            format!("post-workload cleanup failed: {error}"),
+                            environment.timestamp(),
+                            "workload-containment",
+                            format!("cannot contain workload after late stop: {error}"),
                         );
                     }
+                }
+                match safe_to_cleanup.then(|| environment.cleanup_after_workload()) {
+                    None => {}
+                    Some(result) => match result {
+                        Ok(attestation) if attestation.fan_control_write_count > 0 => push_fault(
+                            &mut faults,
+                            environment.timestamp(),
+                            "cleanup-fan-control-write",
+                            format!(
+                                "post-workload cleanup attempted {} fan-control writes",
+                                attestation.fan_control_write_count
+                            ),
+                        ),
+                        Ok(_) => {}
+                        Err(error) => {
+                            let cleanup_failed_at = environment.timestamp();
+                            push_fault(
+                                &mut faults,
+                                cleanup_failed_at,
+                                "cleanup",
+                                format!("post-workload cleanup failed: {error}"),
+                            );
+                        }
+                    },
                 }
             }
             Err(error) => {
@@ -539,6 +679,37 @@ where
                     "workload-stop",
                     format!("cannot confirm fixed workload stopped: {error}"),
                 );
+                let containment_deadline = stopped_at
+                    .monotonic_millis
+                    .saturating_add(WORKLOAD_STOP_TIMEOUT_MILLIS);
+                match environment.contain_workload(containment_deadline) {
+                    Ok(()) => match environment.cleanup_after_workload() {
+                        Ok(attestation) if attestation.fan_control_write_count > 0 => push_fault(
+                            &mut faults,
+                            environment.timestamp(),
+                            "cleanup-fan-control-write",
+                            format!(
+                                "post-containment cleanup attempted {} fan-control writes",
+                                attestation.fan_control_write_count
+                            ),
+                        ),
+                        Ok(_) => {}
+                        Err(error) => push_fault(
+                            &mut faults,
+                            environment.timestamp(),
+                            "cleanup",
+                            format!("post-containment cleanup failed: {error}"),
+                        ),
+                    },
+                    Err(containment_error) => push_fault(
+                        &mut faults,
+                        environment.timestamp(),
+                        "workload-containment",
+                        format!(
+                            "cannot contain fixed workload after stop failure: {containment_error}"
+                        ),
+                    ),
+                }
             }
         }
     }
@@ -596,6 +767,7 @@ where
     );
     record.starting_conditions_captured_at = starting_conditions_captured_at;
     record.workload_started_at = workload_started_at;
+    record.preflight_binding_sha256 = Some(plan.preflight_binding_sha256.clone());
     record.workload = workload_is_valid.then_some(workload);
     record.samples = samples;
     record.readbacks = readbacks;

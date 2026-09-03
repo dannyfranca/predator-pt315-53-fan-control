@@ -23,6 +23,7 @@ use crate::{
         is_allowed_calibration_floor,
     },
     compatibility::validate_declaration,
+    platform::path_has_extended_acl,
 };
 
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
@@ -40,6 +41,8 @@ pub struct EvidenceRecord {
     pub starting_conditions_captured_at: Option<EvidenceTimestamp>,
     pub workload_started_at: Option<EvidenceTimestamp>,
     pub baseline_binding_sha256: Option<String>,
+    pub preflight_binding_sha256: Option<String>,
+    pub preflight_checks: Option<Vec<PreflightCheckEvidence>>,
     pub workload: Option<WorkloadEvidence>,
     pub samples: Vec<TelemetrySampleEvidence>,
     pub commands: Vec<FanCommandEvidence>,
@@ -71,6 +74,10 @@ struct EvidenceRecordWire {
     workload_started_at: Option<EvidenceTimestamp>,
     #[serde(default, deserialize_with = "deserialize_present_option")]
     baseline_binding_sha256: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    preflight_binding_sha256: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    preflight_checks: Option<Vec<PreflightCheckEvidence>>,
     #[serde(deserialize_with = "deserialize_required_option")]
     workload: Option<WorkloadEvidence>,
     samples: Vec<TelemetrySampleEvidence>,
@@ -105,6 +112,8 @@ impl TryFrom<EvidenceRecordWire> for EvidenceRecord {
             starting_conditions_captured_at: wire.starting_conditions_captured_at,
             workload_started_at: wire.workload_started_at,
             baseline_binding_sha256: wire.baseline_binding_sha256,
+            preflight_binding_sha256: wire.preflight_binding_sha256,
+            preflight_checks: wire.preflight_checks,
             workload: wire.workload,
             samples: wire.samples,
             commands: wire.commands,
@@ -135,6 +144,8 @@ impl Serialize for EvidenceRecord {
             16 + usize::from(self.starting_conditions_captured_at.is_some())
                 + usize::from(self.workload_started_at.is_some())
                 + usize::from(self.baseline_binding_sha256.is_some())
+                + usize::from(self.preflight_binding_sha256.is_some())
+                + usize::from(self.preflight_checks.is_some())
                 + usize::from(self.endurance_thermal_envelope.is_some())
                 + usize::from(self.live_lifecycle_cases.is_some())
                 + usize::from(!self.process_stops.is_empty()),
@@ -156,6 +167,12 @@ impl Serialize for EvidenceRecord {
         }
         if let Some(baseline_binding_sha256) = &self.baseline_binding_sha256 {
             record.serialize_field("baseline_binding_sha256", baseline_binding_sha256)?;
+        }
+        if let Some(preflight_binding_sha256) = &self.preflight_binding_sha256 {
+            record.serialize_field("preflight_binding_sha256", preflight_binding_sha256)?;
+        }
+        if let Some(preflight_checks) = &self.preflight_checks {
+            record.serialize_field("preflight_checks", preflight_checks)?;
         }
         record.serialize_field("workload", &self.workload)?;
         record.serialize_field("samples", &self.samples)?;
@@ -214,6 +231,15 @@ pub struct QualificationEnvelopeIdentityV1 {
 pub struct EvidenceTimestamp {
     pub monotonic_millis: u64,
     pub wall_unix_millis: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreflightCheckEvidence {
+    pub timestamp: EvidenceTimestamp,
+    pub check: String,
+    pub passed: bool,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -630,6 +656,8 @@ impl EvidenceRecord {
             starting_conditions_captured_at: None,
             workload_started_at: None,
             baseline_binding_sha256: None,
+            preflight_binding_sha256: None,
+            preflight_checks: None,
             workload: None,
             samples: Vec::new(),
             commands: Vec::new(),
@@ -667,6 +695,16 @@ impl EvidenceRecord {
             if self.baseline_binding_sha256.is_some() {
                 return Err(EvidenceValidationError::IncompatibleSchemaField {
                     field: "baseline_binding_sha256",
+                });
+            }
+            if self.preflight_binding_sha256.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "preflight_binding_sha256",
+                });
+            }
+            if self.preflight_checks.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "preflight_checks",
                 });
             }
             if self.live_lifecycle_cases.is_some() {
@@ -722,6 +760,36 @@ impl EvidenceRecord {
             (EVIDENCE_SCHEMA_VERSION_V2, "matched-workload", _) | (_, _, Some(_)) => {
                 return Err(EvidenceValidationError::InvalidValue {
                     field: "baseline_binding_sha256",
+                    index: 0,
+                });
+            }
+            (_, _, None) => {}
+        }
+        match (
+            self.schema_version,
+            self.stage.as_str(),
+            self.preflight_binding_sha256.as_deref(),
+        ) {
+            (EVIDENCE_SCHEMA_VERSION_V2, "firmware-auto-baseline", Some(binding))
+                if is_lower_hex(binding, 64) => {}
+            (EVIDENCE_SCHEMA_VERSION_V2, "firmware-auto-baseline", _) | (_, _, Some(_)) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "preflight_binding_sha256",
+                    index: 0,
+                });
+            }
+            (_, _, None) => {}
+        }
+        match (
+            self.schema_version,
+            self.stage.as_str(),
+            &self.preflight_checks,
+        ) {
+            (EVIDENCE_SCHEMA_VERSION_V2, "preflight", Some(checks))
+                if (1..=12).contains(&checks.len()) => {}
+            (EVIDENCE_SCHEMA_VERSION_V2, "preflight", _) | (_, _, Some(_)) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "preflight_checks",
                     index: 0,
                 });
             }
@@ -790,6 +858,90 @@ impl EvidenceRecord {
         }
         if let Some(workload) = &self.workload {
             validate_workload(workload)?;
+        }
+        if let Some(checks) = &self.preflight_checks {
+            let mut names = std::collections::HashSet::new();
+            for (index, check) in checks.iter().enumerate() {
+                validate_timestamp(self, check.timestamp, "preflight_checks", index)?;
+                if !is_identifier(&check.check)
+                    || check.detail.is_empty()
+                    || !names.insert(check.check.as_str())
+                {
+                    return Err(EvidenceValidationError::InvalidValue {
+                        field: "preflight_checks",
+                        index,
+                    });
+                }
+            }
+            const REQUIRED_PREFLIGHT_CHECKS: [&str; 12] = [
+                "platform",
+                "trust",
+                "fan-abi",
+                "sensors",
+                "configuration",
+                "policy",
+                "recovery",
+                "stock-boot-fallback",
+                "tooling",
+                "disk-space",
+                "competing-services",
+                "firmware-auto",
+            ];
+            let is_complete_execution = checks.len() == REQUIRED_PREFLIGHT_CHECKS.len()
+                && REQUIRED_PREFLIGHT_CHECKS
+                    .iter()
+                    .all(|required| names.contains(required));
+            let is_collection_failure = self.outcome.status == RunOutcomeStatus::Failed
+                && checks.len() == 1
+                && checks[0].check == "evidence-collection"
+                && !checks[0].passed;
+            let failed_checks_have_faults =
+                checks.iter().filter(|check| !check.passed).all(|check| {
+                    self.faults.iter().any(|fault| {
+                        fault.code == format!("preflight-{}", check.check)
+                            && fault.detail == check.detail
+                            && fault.timestamp == check.timestamp
+                    })
+                });
+            if !is_complete_execution && !is_collection_failure
+                || self.outcome.status == RunOutcomeStatus::Passed
+                    && checks.iter().any(|check| !check.passed)
+                || self.outcome.status == RunOutcomeStatus::Failed
+                    && (checks.iter().all(|check| check.passed) || !failed_checks_have_faults)
+            {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "preflight_checks.complete",
+                    index: checks.len(),
+                });
+            }
+        }
+        if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2
+            && self.stage == "preflight"
+            && self.outcome.status == RunOutcomeStatus::Passed
+        {
+            let readback_is_exact = |fan| {
+                let mut matching = self.readbacks.iter().filter(|readback| {
+                    readback.fan == fan
+                        && readback.field == FanReadbackField::Enable
+                        && readback.phase == Some(FanReadbackPhase::Final)
+                        && readback.value == Some(2)
+                        && readback.outcome == ObservationOutcome::Confirmed
+                        && readback.source_timestamp.is_none()
+                        && readback.fresh.is_none()
+                        && readback.boot_id.is_none()
+                });
+                matching.next().is_some() && matching.next().is_none()
+            };
+            if self.readbacks.len() != 2
+                || !readback_is_exact(EvidenceFan::Cpu)
+                || !readback_is_exact(EvidenceFan::Gpu)
+                || !self.outcome.final_firmware_auto_confirmed
+            {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "preflight.readbacks",
+                    index: self.readbacks.len(),
+                });
+            }
         }
 
         for (index, sample) in self.samples.iter().enumerate() {
@@ -1704,10 +1856,13 @@ fn validate_owned_ancestor_chain(
             .symlink_metadata()
             .map_err(|source| io_error("inspect qualification record ancestor", source))?;
         let owner_is_trusted = metadata.uid() == 0 || metadata.uid() == required_owner;
+        let has_extended_acl = path_has_extended_acl(ancestor)
+            .map_err(|source| io_error("inspect qualification record ancestor ACL", source))?;
         if metadata.file_type().is_symlink()
             || !metadata.is_dir()
             || !owner_is_trusted
             || metadata.permissions().mode() & 0o022 != 0
+            || has_extended_acl
         {
             return Err(io_error(
                 "validate qualification record ancestor ownership",
