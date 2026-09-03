@@ -105,13 +105,6 @@ where
         self.platform
     }
 
-    /// Debug-build-only adapter access for the daemon subprocess acceptance fixture.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn acceptance_platform_mut(&mut self) -> &mut P {
-        self.platform
-    }
-
     /// Collects a fresh sample only after re-confirming both fans remain in Firmware Auto.
     pub fn collect_fresh_sample(
         &mut self,
@@ -316,6 +309,17 @@ where
                 })
             }
         }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl ControllerOwnership<'_, crate::FakePlatform> {
+    /// Debug-build-only access to the in-memory acceptance platform.
+    ///
+    /// This specialization cannot expose a real platform or fan device to downstream callers.
+    #[doc(hidden)]
+    pub fn acceptance_platform_mut(&mut self) -> &mut crate::FakePlatform {
+        self.platform
     }
 }
 

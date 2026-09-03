@@ -1,4 +1,11 @@
-use std::{cell::Cell, io, path::Path, process::Command, rc::Rc, time::Duration};
+use std::{
+    cell::Cell,
+    io,
+    path::{Path, PathBuf},
+    process::Command,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use fan_control_core::{
     CompatibilityDeclarationV1, CompatibilityObservation, EmergencyFanStatus, EvidenceCompleteness,
@@ -72,6 +79,7 @@ pub fn run_acceptance_fixture(
         scenario,
         Scenario::CleanupContained
             | Scenario::CleanupCritical
+            | Scenario::CleanupCriticalReleaseFailure
             | Scenario::CleanupReadbackUnconfirmed
             | Scenario::ReleaseFailure
     ) {
@@ -83,7 +91,9 @@ pub fn run_acceptance_fixture(
         shutdown: request,
         stop_after_watchdog: matches!(scenario, Scenario::Normal | Scenario::Rediscovery),
         fail_watchdog: scenario == Scenario::WatchdogFailure,
-        pause_after_ready: scenario == Scenario::NotificationTransportFailure,
+        ready_barrier: (scenario == Scenario::NotificationTransportFailure)
+            .then(|| std::env::var_os("PT31553_ACCEPTANCE_READY_ACK").map(PathBuf::from))
+            .flatten(),
     };
     let (sources, discovery) = runtime_inputs(scenario);
     let result = run_production_control_loop(startup, sources, discovery, shutdown, notifier);
@@ -95,9 +105,21 @@ pub fn run_acceptance_fixture(
         .iter()
         .any(|operation| matches!(operation, PlatformOperation::ReleaseRuntimeLock(_)));
     let release_ordered = release_follows_both_auto_writes(&platform);
+    let cpu_custom_writes = platform
+        .operations()
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                PlatformOperation::Write { path, contents }
+                    if path.file_name().is_some_and(|name| name == "pwm1_enable")
+                        && contents == "1"
+            )
+        })
+        .count();
     let (cpu_max, gpu_max) = cleanup_maximum_confirmation(&result);
     println!(
-        "fixture-state cpu_auto={cpu_auto} gpu_auto={gpu_auto} cpu_max={cpu_max} gpu_max={gpu_max} release_attempted={release_attempted} release_ordered={release_ordered} result={}",
+        "fixture-state cpu_auto={cpu_auto} gpu_auto={gpu_auto} cpu_max={cpu_max} gpu_max={gpu_max} cpu_custom_writes={cpu_custom_writes} release_attempted={release_attempted} release_ordered={release_ordered} result={}",
         if result.is_ok() { "ok" } else { "error" }
     );
 
@@ -107,8 +129,13 @@ pub fn run_acceptance_fixture(
 fn cleanup_maximum_confirmation(
     result: &Result<(), ProductionControlLoopError<io::Error>>,
 ) -> (bool, bool) {
-    let Err(ProductionControlLoopError::Cleanup { cleanup, .. }) = result else {
-        return (false, false);
+    let cleanup = match result {
+        Err(ProductionControlLoopError::Cleanup { cleanup, .. }) => cleanup,
+        Err(ProductionControlLoopError::Release {
+            cleanup: Some(cleanup),
+            ..
+        }) => cleanup,
+        _ => return (false, false),
     };
     let containment = match cleanup {
         GracefulShutdownFailure::Contained { containment, .. }
@@ -245,6 +272,7 @@ enum Scenario {
     LostAuthority,
     CleanupContained,
     CleanupCritical,
+    CleanupCriticalReleaseFailure,
     CleanupReadbackUnconfirmed,
     ReleaseFailure,
 }
@@ -264,6 +292,7 @@ impl Scenario {
             "lost-authority" => Ok(Self::LostAuthority),
             "cleanup-contained" => Ok(Self::CleanupContained),
             "cleanup-critical" => Ok(Self::CleanupCritical),
+            "cleanup-critical-release-failure" => Ok(Self::CleanupCriticalReleaseFailure),
             "cleanup-readback-unconfirmed" => Ok(Self::CleanupReadbackUnconfirmed),
             "release-failure" => Ok(Self::ReleaseFailure),
             _ => Err(io::Error::new(
@@ -297,7 +326,7 @@ fn prepare_exit_fault(platform: &mut FakePlatform, scenario: Scenario) {
             }
             platform.queue_file_steps(steps);
         }
-        Scenario::CleanupCritical => {
+        Scenario::CleanupCritical | Scenario::CleanupCriticalReleaseFailure => {
             let mut steps = Vec::new();
             for _ in 0..3 {
                 steps.extend([
@@ -308,6 +337,9 @@ fn prepare_exit_fault(platform: &mut FakePlatform, scenario: Scenario) {
                 ]);
             }
             platform.queue_file_steps(steps);
+            if scenario == Scenario::CleanupCriticalReleaseFailure {
+                platform.queue_runtime_lock_steps([FakeStep::Fail(injected())]);
+            }
         }
         Scenario::CleanupReadbackUnconfirmed => {
             let cpu = Path::new(ACER_ROOT).join("pwm1_enable");
@@ -355,6 +387,7 @@ fn runtime_inputs(
         Scenario::ControlFault => RuntimeSources::power_failure(),
         Scenario::CleanupContained
         | Scenario::CleanupCritical
+        | Scenario::CleanupCriticalReleaseFailure
         | Scenario::CleanupReadbackUnconfirmed
         | Scenario::ReleaseFailure => RuntimeSources::healthy(),
         _ => RuntimeSources::healthy(),
@@ -368,7 +401,7 @@ struct FixtureNotifier {
     shutdown: fan_control_core::ShutdownRequest,
     stop_after_watchdog: bool,
     fail_watchdog: bool,
-    pause_after_ready: bool,
+    ready_barrier: Option<PathBuf>,
 }
 
 impl ServiceNotifier for FixtureNotifier {
@@ -379,8 +412,19 @@ impl ServiceNotifier for FixtureNotifier {
             return Err(io::Error::other("injected watchdog notification failure"));
         }
         self.inner.notify(notification)?;
-        if self.pause_after_ready && notification == ServiceNotification::Ready {
-            std::thread::sleep(Duration::from_millis(200));
+        if notification == ServiceNotification::Ready
+            && let Some(barrier) = &self.ready_barrier
+        {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !barrier.exists() {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "acceptance READY barrier timed out",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
         if !self.stop_after_watchdog && notification == ServiceNotification::Watchdog {
             std::thread::sleep(Duration::from_millis(10));

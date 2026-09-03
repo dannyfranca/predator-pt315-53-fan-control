@@ -84,10 +84,11 @@ fn run() -> Result<(), DaemonError> {
         Err(error) => return Err(DaemonError::Startup(error)),
     };
 
+    let runtime_discovery = SystemSensorSourceDiscovery::for_admitted_sources(&discovery.sources);
     run_production_control_loop(
         startup,
         discovery.sources,
-        SystemSensorSourceDiscovery::default(),
+        runtime_discovery,
         &mut shutdown,
         notifier,
     )

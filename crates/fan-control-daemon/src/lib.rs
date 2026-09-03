@@ -406,6 +406,7 @@ where
         let source = release.platform_error().cloned();
         return Err(ProductionControlLoopError::Release {
             iteration: iteration_failure,
+            cleanup: cleanup_failure,
             reason: release.to_string(),
             source,
         });
@@ -431,6 +432,7 @@ pub enum ProductionControlLoopError<N> {
     },
     Release {
         iteration: Option<Box<SupervisedControlIterationError<N>>>,
+        cleanup: Option<GracefulShutdownFailure>,
         reason: String,
         source: Option<PlatformError>,
     },
@@ -447,6 +449,10 @@ impl<N> ProductionControlLoopError<N> {
                 cleanup: GracefulShutdownFailure::Contained { .. },
                 ..
             } => "platform-operation-failed",
+            Self::Release {
+                cleanup: Some(GracefulShutdownFailure::Critical { .. }),
+                ..
+            } => "firmware-auto-unconfirmed",
             Self::Iteration(_) | Self::Release { .. } => "platform-operation-failed",
         }
     }
@@ -461,6 +467,10 @@ impl<N> ProductionControlLoopError<N> {
                 cleanup: GracefulShutdownFailure::Contained { .. },
                 ..
             } => RuntimeFault::PlatformOperation,
+            Self::Release {
+                cleanup: Some(GracefulShutdownFailure::Critical { .. }),
+                ..
+            } => RuntimeFault::FirmwareAutoUnconfirmed,
             Self::Iteration(_) | Self::Release { .. } => RuntimeFault::PlatformOperation,
         }
     }
@@ -481,13 +491,18 @@ where
                 }
             }
             Self::Release {
-                iteration, reason, ..
+                iteration,
+                cleanup,
+                reason,
+                ..
             } => {
                 if let Some(iteration) = iteration {
-                    write!(formatter, "{iteration}; ownership release failed: {reason}")
-                } else {
-                    write!(formatter, "ownership release failed: {reason}")
+                    write!(formatter, "{iteration}; ")?;
                 }
+                if let Some(cleanup) = cleanup {
+                    write!(formatter, "cleanup failed: {cleanup}; ")?;
+                }
+                write!(formatter, "ownership release failed: {reason}")
             }
         }
     }

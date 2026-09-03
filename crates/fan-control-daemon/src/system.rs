@@ -341,10 +341,13 @@ impl SystemSampleSources {
         &mut self.platform
     }
 
-    fn rediscover_with(files: &mut dyn IdentityBoundReadAccess) -> Result<Self, StartupError> {
+    fn rediscover_with(
+        files: &mut dyn IdentityBoundReadAccess,
+        expected_nvidia: &NvidiaGpuSelector,
+    ) -> Result<Self, StartupError> {
         let coretemp = discover_coretemp(files, Path::new(HWMON_ROOT))
             .map_err(|error| StartupError::Device(error.to_string()))?;
-        let nvidia = NvidiaSmi::discover()?;
+        let nvidia = NvidiaSmi::rediscover(expected_nvidia)?;
         let power = BoundExternalPower::discover_readonly(files, Path::new(POWER_SUPPLY_ROOT))?;
         Ok(Self {
             platform: SystemOwnershipPlatform::new(),
@@ -402,11 +405,12 @@ impl std::fmt::Debug for SystemSensorSourceDiscovery<SystemSampleSources> {
     }
 }
 
-impl Default for SystemSensorSourceDiscovery<SystemSampleSources> {
-    fn default() -> Self {
+impl SystemSensorSourceDiscovery<SystemSampleSources> {
+    pub fn for_admitted_sources(sources: &SystemSampleSources) -> Self {
+        let expected_nvidia = sources.nvidia.selector.clone();
         Self {
-            rediscover: Box::new(|files| {
-                SystemSampleSources::rediscover_with(files)
+            rediscover: Box::new(move |files| {
+                SystemSampleSources::rediscover_with(files, &expected_nvidia)
                     .map_err(|error| SampleSourceError::new(error.to_string()))
             }),
         }
@@ -480,7 +484,7 @@ impl BoundExternalPower {
                 .identity(&type_path)
                 .map_err(|error| StartupError::Device(error.to_string()))?;
             let kind = files
-                .read_bound(&path, identity, "type")
+                .read_child_bound(&path, identity, "type", type_identity)
                 .map_err(|error| StartupError::Device(error.to_string()))?;
             let online_identity = if kind == "Mains\n" {
                 Some(
@@ -705,6 +709,46 @@ impl NvidiaSmi {
         let selector = NvidiaGpuSelector::uuid(sample.uuid())
             .map_err(|error| StartupError::Device(error.to_string()))?;
         Ok(Self { selector })
+    }
+
+    fn rediscover(expected: &NvidiaGpuSelector) -> Result<Self, StartupError> {
+        let id = format!("--id={}", expected.value());
+        let output = run_nvidia_smi(&[
+            id.as_str(),
+            "--query-gpu=uuid,pci.bus_id,temperature.gpu",
+            "--format=csv,noheader,nounits",
+        ])
+        .map_err(StartupError::Device)?;
+        Self::from_rediscovery_output(&output, expected)
+    }
+
+    fn from_rediscovery_output(
+        output: &str,
+        expected: &NvidiaGpuSelector,
+    ) -> Result<Self, StartupError> {
+        let rows = output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        if rows.len() != 1 {
+            return Err(StartupError::Device(format!(
+                "identity-directed NVIDIA rediscovery returned {} rows",
+                rows.len()
+            )));
+        }
+        let sample = parse_nvidia_smi_row(rows[0])?;
+        let observed = NvidiaGpuSelector::uuid(sample.uuid())
+            .map_err(|error| StartupError::Device(error.to_string()))?;
+        if &observed != expected {
+            return Err(StartupError::Device(format!(
+                "NVIDIA GPU identity changed during rediscovery: expected {}, observed {}",
+                expected.value(),
+                observed.value()
+            )));
+        }
+        Ok(Self {
+            selector: expected.clone(),
+        })
     }
 }
 
@@ -1459,37 +1503,46 @@ fn run_command_bytes(command: &str, arguments: &[&str]) -> Result<Vec<u8>, Strin
 
 fn run_nvidia_smi(arguments: &[&str]) -> Result<String, String> {
     const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
-    let mut child = Command::new("nvidia-smi")
+    run_nvidia_smi_command(Path::new("nvidia-smi"), arguments, QUERY_TIMEOUT)
+}
+
+fn run_nvidia_smi_command(
+    command: &Path,
+    arguments: &[&str],
+    timeout: Duration,
+) -> Result<String, String> {
+    let command_name = command.display();
+    let mut child = Command::new(command)
         .args(arguments)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| format!("cannot execute nvidia-smi: {error}"))?;
-    let deadline = Instant::now() + QUERY_TIMEOUT;
+        .map_err(|error| format!("cannot execute {command_name}: {error}"))?;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child
             .try_wait()
-            .map_err(|error| format!("cannot wait for nvidia-smi: {error}"))?
+            .map_err(|error| format!("cannot wait for {command_name}: {error}"))?
         {
             break status;
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("nvidia-smi exceeded its one-second deadline".into());
+            return Err(format!("{command_name} exceeded its execution deadline"));
         }
         thread::sleep(Duration::from_millis(10));
     };
     if !status.success() {
-        return Err(format!("nvidia-smi exited with {status}"));
+        return Err(format!("{command_name} exited with {status}"));
     }
     let mut output = String::new();
     child
         .stdout
         .take()
-        .expect("piped nvidia-smi stdout must be present")
+        .expect("piped command stdout must be present")
         .read_to_string(&mut output)
-        .map_err(|error| format!("cannot read nvidia-smi output: {error}"))?;
+        .map_err(|error| format!("cannot read {command_name} output: {error}"))?;
     Ok(output)
 }
 
@@ -1504,7 +1557,8 @@ fn compatibility_error(path: &str, error: impl std::fmt::Display) -> StartupErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fan_control_core::{FakePlatform, FilePermissions};
+    use fan_control_core::{FakePlatform, FilePermissions, PlatformError};
+    use std::os::unix::fs::PermissionsExt;
 
     #[derive(Debug)]
     struct FixtureSources;
@@ -2077,6 +2131,50 @@ mod tests {
     }
 
     #[test]
+    fn nvidia_rediscovery_rejects_a_substituted_gpu() {
+        let expected = NvidiaGpuSelector::uuid("GPU-12345678-1234-1234-1234-123456789abc").unwrap();
+        let error = NvidiaSmi::from_rediscovery_output(
+            "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee, 00000000:02:00.0, 61",
+            &expected,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, StartupError::Device(message) if message.contains("identity changed"))
+        );
+    }
+
+    #[test]
+    fn nvidia_process_runner_reports_exit_and_kills_a_timed_out_child() {
+        let success = executable_script("#!/bin/sh\nprintf 'GPU-ok, pci, 61\\n'\n");
+        assert_eq!(
+            run_nvidia_smi_command(&success.1, &[], Duration::from_secs(1)).unwrap(),
+            "GPU-ok, pci, 61\n"
+        );
+
+        let failure = executable_script("#!/bin/sh\nexit 7\n");
+        assert!(
+            run_nvidia_smi_command(&failure.1, &[], Duration::from_secs(1))
+                .unwrap_err()
+                .contains("exit status: 7")
+        );
+
+        let timeout = executable_script("#!/bin/sh\necho $$ > \"$1\"\nwhile :; do :; done\n");
+        let pid_path = timeout.0.path().join("pid");
+        let started = Instant::now();
+        let error = run_nvidia_smi_command(
+            &timeout.1,
+            &[pid_path.to_str().unwrap()],
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+        assert!(error.contains("execution deadline"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let pid = fs::read_to_string(&pid_path).unwrap();
+        assert!(!Path::new("/proc").join(pid.trim()).exists());
+    }
+
+    #[test]
     fn signer_hashes_reject_placeholders() {
         assert!(valid_identity_hash(&"a".repeat(64)));
         assert!(!valid_identity_hash(&"0".repeat(64)));
@@ -2122,6 +2220,78 @@ mod tests {
 
         platform.rebind_path_identity(root.join("ACAD/online"));
         assert_eq!(power.observe(&mut platform), ExternalPower::Unknown);
+    }
+
+    #[test]
+    fn readonly_power_rediscovery_rejects_a_rebound_type_endpoint() {
+        let root = Path::new(POWER_SUPPLY_ROOT);
+        let mut platform = FakePlatform::new();
+        platform.insert_file(root.join("ACAD/type"), "Mains\n");
+        platform.insert_file(root.join("ACAD/online"), "1\n");
+        let mut access = RebindTypeOnRead {
+            inner: platform,
+            rebound: false,
+        };
+
+        let error = match BoundExternalPower::discover_readonly(&mut access, root) {
+            Ok(_) => panic!("rebound type endpoint was accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, StartupError::Device(message) if message.contains("identity changed"))
+        );
+    }
+
+    struct RebindTypeOnRead {
+        inner: FakePlatform,
+        rebound: bool,
+    }
+
+    impl IdentityBoundReadAccess for RebindTypeOnRead {
+        fn read(&mut self, path: &Path) -> Result<String, PlatformError> {
+            IdentityBoundReadAccess::read(&mut self.inner, path)
+        }
+
+        fn list(&mut self, directory: &Path) -> Result<Vec<PathBuf>, PlatformError> {
+            IdentityBoundReadAccess::list(&mut self.inner, directory)
+        }
+
+        fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
+            IdentityBoundReadAccess::permissions(&mut self.inner, path)
+        }
+
+        fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
+            IdentityBoundReadAccess::identity(&mut self.inner, path)
+        }
+
+        fn read_bound(
+            &mut self,
+            directory: &Path,
+            expected: FileIdentity,
+            child: &str,
+        ) -> Result<String, PlatformError> {
+            if child == "type" && !self.rebound {
+                self.inner.rebind_path_identity(directory.join(child));
+                self.rebound = true;
+            }
+            IdentityBoundReadAccess::read_bound(&mut self.inner, directory, expected, child)
+        }
+
+        fn list_bound(
+            &mut self,
+            directory: &Path,
+            expected: FileIdentity,
+        ) -> Result<Vec<PathBuf>, PlatformError> {
+            IdentityBoundReadAccess::list_bound(&mut self.inner, directory, expected)
+        }
+    }
+
+    fn executable_script(source: &str) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nvidia-smi-fixture");
+        fs::write(&path, source).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        (directory, path)
     }
 
     #[test]

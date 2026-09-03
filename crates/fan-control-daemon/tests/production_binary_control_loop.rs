@@ -1,8 +1,11 @@
 use std::{
     os::unix::net::UnixDatagram,
-    process::{Command, Output, Stdio},
-    time::Duration,
+    process::{Child, Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
+
+const CHILD_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[test]
 fn production_binary_runs_real_cycles_and_recovers_before_readiness() {
@@ -12,7 +15,14 @@ fn production_binary_runs_real_cycles_and_recovers_before_readiness() {
 
         assert!(output.status.success(), "{scenario}: {}", stderr(&output));
         assert_eq!(harness.notifications(2), ["READY=1", "WATCHDOG=1"]);
-        assert_state(&output, true, true, false, false, true, "ok");
+        assert_state(
+            &output,
+            false,
+            false,
+            if scenario == "rediscovery" { 2 } else { 1 },
+            true,
+            "ok",
+        );
     }
 }
 
@@ -29,19 +39,19 @@ fn production_binary_signals_restore_before_release() {
 
         assert_eq!(harness.notifications(2), ["READY=1", "WATCHDOG=1"]);
         assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
-        let output = child.wait_with_output().unwrap();
+        let output = wait_with_output_deadline(child);
 
         assert!(
             output.status.success(),
             "signal {signal}: {}",
             stderr(&output)
         );
-        assert_state(&output, true, true, false, false, true, "ok");
+        assert_state(&output, false, false, 1, true, "ok");
     }
 }
 
 #[test]
-fn production_binary_sleep_stop_restores_before_release() {
+fn production_binary_systemd_stop_used_by_sleep_guard_restores_before_release() {
     let harness = Harness::new("sleep-stop");
     let child = harness
         .command()
@@ -52,10 +62,12 @@ fn production_binary_sleep_stop_restores_before_release() {
 
     assert_eq!(harness.notifications(2), ["READY=1", "WATCHDOG=1"]);
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
-    let output = child.wait_with_output().unwrap();
+    let output = wait_with_output_deadline(child);
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_state(&output, true, true, false, false, true, "ok");
+    // The sleep guard's systemd transaction and fresh-resume gate are covered in sleep_guard.rs;
+    // this proves the production daemon side of its synchronous SIGTERM stop boundary.
+    assert_state(&output, false, false, 1, true, "ok");
 }
 
 #[test]
@@ -67,7 +79,7 @@ fn production_binary_restores_on_real_notification_transport_failures() {
         !output.status.success(),
         "initial READY unexpectedly succeeded"
     );
-    assert_state(&output, true, true, false, false, true, "error");
+    assert_state(&output, false, false, 1, true, "error");
 
     let watchdog = Harness::new("notification-transport-failure");
     let child = watchdog
@@ -78,12 +90,13 @@ fn production_binary_restores_on_real_notification_transport_failures() {
         .unwrap();
     assert_eq!(watchdog.notifications(1), ["READY=1"]);
     watchdog.remove_notify_socket();
-    let output = child.wait_with_output().unwrap();
+    watchdog.release_ready_barrier();
+    let output = wait_with_output_deadline(child);
     assert!(
         !output.status.success(),
         "WATCHDOG transport unexpectedly succeeded"
     );
-    assert_state(&output, true, true, false, false, true, "error");
+    assert_state(&output, false, false, 1, true, "error");
 }
 
 #[test]
@@ -101,7 +114,7 @@ fn production_binary_restores_on_control_notification_timeout_and_authority_faul
             !output.status.success(),
             "{scenario} unexpectedly succeeded"
         );
-        assert_state(&output, true, true, false, false, true, "error");
+        assert_state(&output, false, false, 1, true, "error");
         if scenario == "watchdog-failure" {
             assert_eq!(harness.notifications(1), ["READY=1"]);
         } else {
@@ -113,14 +126,15 @@ fn production_binary_restores_on_control_notification_timeout_and_authority_faul
 #[test]
 fn production_binary_preserves_containment_and_release_ordering() {
     let cases = [
-        ("cleanup-contained", true, true, false, true),
-        ("cleanup-critical", true, true, true, true),
-        ("cleanup-readback-unconfirmed", true, true, true, true),
-        ("device-change", true, true, false, true),
-        ("release-failure", true, true, false, true),
+        ("cleanup-contained", false, true),
+        ("cleanup-critical", true, true),
+        ("cleanup-critical-release-failure", true, true),
+        ("cleanup-readback-unconfirmed", true, true),
+        ("device-change", false, true),
+        ("release-failure", false, true),
     ];
 
-    for (scenario, cpu_auto, gpu_auto, maximum_containment, release_attempted) in cases {
+    for (scenario, maximum_containment, release_attempted) in cases {
         let output = Harness::new(scenario).run();
         assert!(
             !output.status.success(),
@@ -128,13 +142,23 @@ fn production_binary_preserves_containment_and_release_ordering() {
         );
         assert_state(
             &output,
-            cpu_auto,
-            gpu_auto,
             maximum_containment,
             maximum_containment,
+            1,
             release_attempted,
             "error",
         );
+        if scenario == "cleanup-critical-release-failure" {
+            let diagnostic = stderr(&output);
+            assert!(
+                diagnostic.contains("Firmware Auto unconfirmed"),
+                "{diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("ownership release failed"),
+                "{diagnostic}"
+            );
+        }
     }
 }
 
@@ -142,6 +166,7 @@ struct Harness {
     _directory: tempfile::TempDir,
     socket: UnixDatagram,
     socket_path: std::path::PathBuf,
+    ready_ack: std::path::PathBuf,
     scenario: &'static str,
 }
 
@@ -149,6 +174,7 @@ impl Harness {
     fn new(scenario: &'static str) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let socket_path = directory.path().join("notify.sock");
+        let ready_ack = directory.path().join("ready.ack");
         let socket = UnixDatagram::bind(&socket_path).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(10)))
@@ -157,6 +183,7 @@ impl Harness {
             _directory: directory,
             socket,
             socket_path,
+            ready_ack,
             scenario,
         }
     }
@@ -168,15 +195,28 @@ impl Harness {
             .env("NOTIFY_SOCKET", &self.socket_path)
             .env("WATCHDOG_USEC", "6000000")
             .env_remove("WATCHDOG_PID");
+        if self.scenario == "notification-transport-failure" {
+            command.env("PT31553_ACCEPTANCE_READY_ACK", &self.ready_ack);
+        }
         command
     }
 
     fn run(&self) -> Output {
-        self.command().output().unwrap()
+        let child = self
+            .command()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_with_output_deadline(child)
     }
 
     fn remove_notify_socket(&self) {
         std::fs::remove_file(&self.socket_path).unwrap();
+    }
+
+    fn release_ready_barrier(&self) {
+        std::fs::write(&self.ready_ack, b"continue\n").unwrap();
     }
 
     fn notifications(&self, count: usize) -> Vec<String> {
@@ -205,18 +245,32 @@ impl Harness {
 
 fn assert_state(
     output: &Output,
-    cpu_auto: bool,
-    gpu_auto: bool,
     cpu_max: bool,
     gpu_max: bool,
+    cpu_custom_writes: usize,
     release_attempted: bool,
     result: &str,
 ) {
     let stdout = String::from_utf8(output.stdout.clone()).unwrap();
     let expected = format!(
-        "fixture-state cpu_auto={cpu_auto} gpu_auto={gpu_auto} cpu_max={cpu_max} gpu_max={gpu_max} release_attempted={release_attempted} release_ordered=true result={result}\n"
+        "fixture-state cpu_auto=true gpu_auto=true cpu_max={cpu_max} gpu_max={gpu_max} cpu_custom_writes={cpu_custom_writes} release_attempted={release_attempted} release_ordered=true result={result}\n"
     );
     assert_eq!(stdout, expected, "stderr: {}", stderr(output));
+}
+
+fn wait_with_output_deadline(mut child: Child) -> Output {
+    let deadline = Instant::now() + CHILD_TIMEOUT;
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!("acceptance child timed out: {}", stderr(&output));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn stderr(output: &Output) -> String {
