@@ -401,6 +401,129 @@ where
     }
 }
 
+/// Read-only identity-bound access that rejects operations completing after a monotonic deadline.
+pub trait BoundedIdentityBoundReadAccess {
+    fn read_deadline_now(&mut self) -> Duration;
+
+    fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError>;
+
+    fn list_before(
+        &mut self,
+        directory: &Path,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError>;
+
+    fn identity_before(
+        &mut self,
+        path: &Path,
+        deadline: Duration,
+    ) -> Result<FileIdentity, PlatformError>;
+
+    fn read_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<String, PlatformError>;
+
+    fn list_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError>;
+
+    fn permissions_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<FilePermissions, PlatformError>;
+}
+
+impl<T> BoundedIdentityBoundReadAccess for T
+where
+    T: BoundedIdentityBoundFileAccess + Clock + ?Sized,
+{
+    fn read_deadline_now(&mut self) -> Duration {
+        Clock::monotonic_now(self)
+    }
+
+    fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError> {
+        BoundedFileAccess::read_before(self, path, deadline)
+    }
+
+    fn list_before(
+        &mut self,
+        directory: &Path,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        BoundedFileAccess::list_before(self, directory, deadline)
+    }
+
+    fn identity_before(
+        &mut self,
+        path: &Path,
+        deadline: Duration,
+    ) -> Result<FileIdentity, PlatformError> {
+        BoundedIdentityBoundFileAccess::identity_before(self, path, deadline)
+    }
+
+    fn read_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<String, PlatformError> {
+        BoundedIdentityBoundFileAccess::read_bound_before(
+            self,
+            directory,
+            expected_directory,
+            child,
+            expected_child,
+            deadline,
+        )
+    }
+
+    fn list_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        BoundedIdentityBoundFileAccess::list_bound_before(
+            self,
+            directory,
+            expected_directory,
+            deadline,
+        )
+    }
+
+    fn permissions_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<FilePermissions, PlatformError> {
+        BoundedIdentityBoundFileAccess::permissions_bound_before(
+            self,
+            directory,
+            expected_directory,
+            child,
+            expected_child,
+            deadline,
+        )
+    }
+}
+
 /// File access that rejects operations which complete at or after an absolute monotonic deadline.
 ///
 /// A production implementation must use local, nonblocking kernel interfaces. The deadline is an
@@ -915,20 +1038,274 @@ impl SystemOwnershipPlatform {
     }
 }
 
+const BOUNDED_READ_LIMIT: usize = 64 * 1024;
+
+/// Reads an already identity-pinned descriptor in an isolated process so a blocked kernel read
+/// cannot stall the controller or its watchdog beyond the caller's remaining budget.
+fn read_open_file_before(
+    file: &File,
+    path: &Path,
+    timeout: Duration,
+) -> Result<String, PlatformError> {
+    if timeout.is_zero() {
+        return Err(bounded_read_timeout(path));
+    }
+
+    let mut pipe_fds = [-1; 2];
+    // SAFETY: `pipe_fds` points to two writable integers and no descriptors escape on exec.
+    if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
+        return Err(io_platform_error(
+            &format!("cannot create bounded reader for {}", path.display()),
+            io::Error::last_os_error(),
+        ));
+    }
+
+    // SAFETY: the child performs only async-signal-safe syscalls before `_exit`.
+    let pid = unsafe { libc::fork() };
+    if pid == -1 {
+        close_fd(pipe_fds[0]);
+        close_fd(pipe_fds[1]);
+        return Err(io_platform_error(
+            &format!("cannot start bounded reader for {}", path.display()),
+            io::Error::last_os_error(),
+        ));
+    }
+    if pid == 0 {
+        close_fd(pipe_fds[0]);
+        bounded_read_child(file.as_raw_fd(), pipe_fds[1]);
+    }
+
+    close_fd(pipe_fds[1]);
+    // SAFETY: the parent uniquely owns the read descriptor after closing the write end.
+    let mut output_pipe = unsafe { File::from_raw_fd(pipe_fds[0]) };
+    if let Err(error) = set_fd_nonblocking(output_pipe.as_raw_fd()) {
+        terminate_and_reap_pid(pid);
+        return Err(io_platform_error(
+            &format!("cannot monitor bounded reader for {}", path.display()),
+            error,
+        ));
+    }
+
+    let deadline = Instant::now() + timeout;
+    let mut output = Vec::new();
+    loop {
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match output_pipe.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(length) if output.len().saturating_add(length) <= BOUNDED_READ_LIMIT => {
+                    output.extend_from_slice(&buffer[..length]);
+                }
+                Ok(_) => {
+                    terminate_and_reap_pid(pid);
+                    return Err(PlatformError::new(
+                        PlatformErrorKind::Unavailable,
+                        format!("bounded read exceeded 64 KiB: {}", path.display()),
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    terminate_and_reap_pid(pid);
+                    return Err(io_platform_error(
+                        &format!("cannot read {}", path.display()),
+                        error,
+                    ));
+                }
+            }
+        }
+
+        let mut status = 0;
+        // SAFETY: `pid` names this function's child and `status` is writable.
+        match unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } {
+            completed if completed == pid => {
+                if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+                    drain_completed_bounded_read(&mut output_pipe, &mut output, path)?;
+                    return String::from_utf8(output).map_err(|error| {
+                        io_platform_error(
+                            &format!("cannot decode {}", path.display()),
+                            io::Error::new(io::ErrorKind::InvalidData, error),
+                        )
+                    });
+                }
+                return Err(PlatformError::new(
+                    PlatformErrorKind::Unavailable,
+                    format!("bounded read worker failed: {}", path.display()),
+                ));
+            }
+            0 => {}
+            -1 => {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ECHILD) {
+                    terminate_and_reap_pid(pid);
+                }
+                return Err(io_platform_error(
+                    &format!("cannot wait for bounded reader of {}", path.display()),
+                    error,
+                ));
+            }
+            _ => unreachable!("waitpid returned an unrelated child"),
+        }
+
+        if Instant::now() >= deadline {
+            terminate_and_reap_pid(pid);
+            return Err(bounded_read_timeout(path));
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn drain_completed_bounded_read(
+    pipe: &mut File,
+    output: &mut Vec<u8>,
+    path: &Path,
+) -> Result<(), PlatformError> {
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match pipe.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(length) if output.len().saturating_add(length) <= BOUNDED_READ_LIMIT => {
+                output.extend_from_slice(&buffer[..length]);
+            }
+            Ok(_) => {
+                return Err(PlatformError::new(
+                    PlatformErrorKind::Unavailable,
+                    format!("bounded read exceeded 64 KiB: {}", path.display()),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                return Err(io_platform_error(
+                    &format!("cannot read {}", path.display()),
+                    error,
+                ));
+            }
+        }
+    }
+}
+
+fn bounded_read_timeout(path: &Path) -> PlatformError {
+    PlatformError::new(
+        PlatformErrorKind::TimedOut,
+        format!("bound read deadline exceeded: {}", path.display()),
+    )
+}
+
+fn set_fd_nonblocking(fd: libc::c_int) -> io::Result<()> {
+    // SAFETY: `fd` is a live descriptor and fcntl retains no pointers.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1
+        // SAFETY: the same descriptor remains live for this immediate flag update.
+        || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn close_fd(fd: libc::c_int) {
+    // SAFETY: callers transfer or relinquish ownership of this raw descriptor exactly once.
+    unsafe {
+        libc::close(fd);
+    }
+}
+
+fn bounded_read_child(input_fd: libc::c_int, output_fd: libc::c_int) -> ! {
+    let mut total = 0_usize;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        // SAFETY: both descriptors are inherited and the buffer is valid for its full length.
+        let length = unsafe {
+            libc::read(
+                input_fd,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as libc::size_t,
+            )
+        };
+        if length == 0 {
+            // SAFETY: `_exit` terminates only the fork child without running Rust destructors.
+            unsafe { libc::_exit(0) }
+        }
+        if length == -1 {
+            // SAFETY: errno is thread-local state for this fork child.
+            if unsafe { *libc::__errno_location() } == libc::EINTR {
+                continue;
+            }
+            // SAFETY: see the successful exit above.
+            unsafe { libc::_exit(1) }
+        }
+        let length = length as usize;
+        total = total.saturating_add(length);
+        if total > BOUNDED_READ_LIMIT {
+            // SAFETY: see the successful exit above.
+            unsafe { libc::_exit(2) }
+        }
+        let mut written = 0;
+        while written < length {
+            // SAFETY: `written..length` remains within the initialized portion of `buffer`.
+            let result = unsafe {
+                libc::write(
+                    output_fd,
+                    buffer[written..length].as_ptr().cast(),
+                    (length - written) as libc::size_t,
+                )
+            };
+            if result == -1 {
+                // SAFETY: errno is thread-local state for this fork child.
+                if unsafe { *libc::__errno_location() } == libc::EINTR {
+                    continue;
+                }
+                // SAFETY: see the successful exit above.
+                unsafe { libc::_exit(3) }
+            }
+            written += result as usize;
+        }
+    }
+}
+
+fn terminate_and_reap_pid(pid: libc::pid_t) {
+    // SAFETY: `pid` is the positive ID returned by this function's fork.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    let reaper = thread::Builder::new()
+        .name("pt31553-bounded-read-reaper".into())
+        .spawn(move || {
+            let mut status = 0;
+            loop {
+                // SAFETY: this thread is the sole remaining waiter for `pid`.
+                let result = unsafe { libc::waitpid(pid, &mut status, 0) };
+                if result == pid
+                    || (result == -1
+                        && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR))
+                {
+                    return;
+                }
+            }
+        });
+    if reaper.is_err() {
+        let mut status = 0;
+        // SAFETY: thread creation failed, so this remains the sole waiter for the killed child.
+        unsafe {
+            while libc::waitpid(pid, &mut status, 0) == -1
+                && *libc::__errno_location() == libc::EINTR
+            {}
+        }
+    }
+}
+
 impl BoundedFileAccess for SystemOwnershipPlatform {
     fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError> {
         self.require_deadline(deadline, path, "read")?;
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
             .map_err(|error| {
                 io_platform_error(&format!("cannot open {}", path.display()), error)
             })?;
-        let mut value = String::new();
-        file.read_to_string(&mut value).map_err(|error| {
-            io_platform_error(&format!("cannot read {}", path.display()), error)
-        })?;
+        let remaining = deadline.saturating_sub(self.started_at.elapsed());
+        let value = read_open_file_before(&file, path, remaining)?;
         self.require_deadline(deadline, path, "read")?;
         Ok(value)
     }
@@ -992,13 +1369,10 @@ impl BoundedIdentityBoundFileAccess for SystemOwnershipPlatform {
         let path = direct_bound_child(directory, child)?;
         self.require_deadline(deadline, &path, "bound read")?;
         let directory_handle = open_directory_bound(directory, expected_directory)?;
-        let mut file =
-            open_direct_child(&directory_handle, &path, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        let file = open_direct_child(&directory_handle, &path, libc::O_RDONLY | libc::O_NONBLOCK)?;
         require_open_file_identity(&file, &path, expected_child)?;
-        let mut value = String::new();
-        file.read_to_string(&mut value).map_err(|error| {
-            io_platform_error(&format!("cannot read {}", path.display()), error)
-        })?;
+        let remaining = deadline.saturating_sub(self.started_at.elapsed());
+        let value = read_open_file_before(&file, &path, remaining)?;
         self.require_deadline(deadline, &path, "bound read")?;
         Ok(value)
     }
@@ -1528,7 +1902,57 @@ pub enum FakeStep {
     Pass,
     Fail(PlatformError),
     Disappear(PathBuf),
+    ReplaceContents { path: PathBuf, contents: String },
     Advance(Duration),
+}
+
+#[cfg(feature = "acceptance-fixture")]
+#[derive(Debug)]
+enum FakePlatformControlAction {
+    InsertFile { path: PathBuf, contents: String },
+    RebindPathIdentity(PathBuf),
+    QueueFileSteps(Vec<FakeStep>),
+    QueueRuntimeLockSteps(Vec<FakeStep>),
+}
+
+/// Out-of-band controls owned by the dedicated acceptance-fixture process.
+#[cfg(feature = "acceptance-fixture")]
+#[derive(Debug, Clone)]
+pub struct FakePlatformControl {
+    actions: Arc<Mutex<VecDeque<FakePlatformControlAction>>>,
+}
+
+#[cfg(feature = "acceptance-fixture")]
+impl FakePlatformControl {
+    pub fn insert_file(&self, path: impl Into<PathBuf>, contents: impl Into<String>) {
+        self.push(FakePlatformControlAction::InsertFile {
+            path: path.into(),
+            contents: contents.into(),
+        });
+    }
+
+    pub fn rebind_path_identity(&self, path: impl Into<PathBuf>) {
+        self.push(FakePlatformControlAction::RebindPathIdentity(path.into()));
+    }
+
+    pub fn queue_file_steps(&self, steps: impl IntoIterator<Item = FakeStep>) {
+        self.push(FakePlatformControlAction::QueueFileSteps(
+            steps.into_iter().collect(),
+        ));
+    }
+
+    pub fn queue_runtime_lock_steps(&self, steps: impl IntoIterator<Item = FakeStep>) {
+        self.push(FakePlatformControlAction::QueueRuntimeLockSteps(
+            steps.into_iter().collect(),
+        ));
+    }
+
+    fn push(&self, action: FakePlatformControlAction) {
+        self.actions
+            .lock()
+            .expect("fake platform controls must not be poisoned")
+            .push_back(action);
+    }
 }
 
 #[derive(Debug)]
@@ -1589,8 +2013,11 @@ pub struct FakePlatform {
     delays: Vec<Duration>,
     steps: VecDeque<FakeStep>,
     file_steps: VecDeque<FakeStep>,
+    runtime_lock_steps: VecDeque<FakeStep>,
     operations: Vec<PlatformOperation>,
     bounded_write_attempts: Vec<PlatformOperation>,
+    #[cfg(feature = "acceptance-fixture")]
+    acceptance_actions: Arc<Mutex<VecDeque<FakePlatformControlAction>>>,
 }
 
 impl FakePlatform {
@@ -1607,6 +2034,13 @@ impl FakePlatform {
 
     pub fn runtime_lock_backend(&self) -> FakeRuntimeLockBackend {
         self.runtime_lock_backend.clone()
+    }
+
+    #[cfg(feature = "acceptance-fixture")]
+    pub fn acceptance_control(&self) -> FakePlatformControl {
+        FakePlatformControl {
+            actions: Arc::clone(&self.acceptance_actions),
+        }
     }
 
     pub fn insert_directory(&mut self, directory: impl Into<PathBuf>) {
@@ -1703,6 +2137,11 @@ impl FakePlatform {
         self.file_steps.extend(steps);
     }
 
+    /// Queues failures scoped to runtime-lock acquire/release operations.
+    pub fn queue_runtime_lock_steps(&mut self, steps: impl IntoIterator<Item = FakeStep>) {
+        self.runtime_lock_steps.extend(steps);
+    }
+
     pub fn pending_steps(&self) -> usize {
         self.steps.len()
     }
@@ -1740,6 +2179,7 @@ impl FakePlatform {
     }
 
     fn apply_next_step(&mut self) -> Result<(), PlatformError> {
+        self.apply_acceptance_actions();
         match self.steps.pop_front().unwrap_or(FakeStep::Pass) {
             FakeStep::Pass => Ok(()),
             FakeStep::Fail(error) => Err(error),
@@ -1747,6 +2187,7 @@ impl FakePlatform {
                 self.remove_path(path);
                 Ok(())
             }
+            FakeStep::ReplaceContents { path, contents } => self.replace_contents(&path, contents),
             FakeStep::Advance(duration) => {
                 self.monotonic_time = self.monotonic_time.saturating_add(duration);
                 Ok(())
@@ -1755,6 +2196,7 @@ impl FakePlatform {
     }
 
     fn apply_next_file_step(&mut self) -> Result<(), PlatformError> {
+        self.apply_acceptance_actions();
         let Some(step) = self.file_steps.pop_front() else {
             return self.apply_next_step();
         };
@@ -1765,6 +2207,27 @@ impl FakePlatform {
                 self.remove_path(path);
                 Ok(())
             }
+            FakeStep::ReplaceContents { path, contents } => self.replace_contents(&path, contents),
+            FakeStep::Advance(duration) => {
+                self.monotonic_time = self.monotonic_time.saturating_add(duration);
+                Ok(())
+            }
+        }
+    }
+
+    fn apply_next_runtime_lock_step(&mut self) -> Result<(), PlatformError> {
+        self.apply_acceptance_actions();
+        let Some(step) = self.runtime_lock_steps.pop_front() else {
+            return self.apply_next_step();
+        };
+        match step {
+            FakeStep::Pass => Ok(()),
+            FakeStep::Fail(error) => Err(error),
+            FakeStep::Disappear(path) => {
+                self.remove_path(path);
+                Ok(())
+            }
+            FakeStep::ReplaceContents { path, contents } => self.replace_contents(&path, contents),
             FakeStep::Advance(duration) => {
                 self.monotonic_time = self.monotonic_time.saturating_add(duration);
                 Ok(())
@@ -1802,6 +2265,7 @@ impl FakePlatform {
         operation: &str,
         deadline: Duration,
     ) -> Result<(), PlatformError> {
+        self.apply_acceptance_actions();
         if self.monotonic_time >= deadline {
             return Err(Self::timed_out(path, operation));
         }
@@ -1823,6 +2287,7 @@ impl FakePlatform {
                 self.remove_path(path);
                 Ok(())
             }
+            FakeStep::ReplaceContents { path, contents } => self.replace_contents(&path, contents),
         }
     }
 
@@ -1832,6 +2297,7 @@ impl FakePlatform {
         operation: &str,
         deadline: Duration,
     ) -> Result<(), PlatformError> {
+        self.apply_acceptance_actions();
         if self.file_steps.is_empty() {
             return self.apply_next_step_before(path, operation, deadline);
         }
@@ -1856,8 +2322,47 @@ impl FakePlatform {
                 self.remove_path(path);
                 Ok(())
             }
+            FakeStep::ReplaceContents { path, contents } => self.replace_contents(&path, contents),
         }
     }
+
+    fn replace_contents(&mut self, path: &Path, contents: String) -> Result<(), PlatformError> {
+        let file = self
+            .files
+            .get_mut(path)
+            .ok_or_else(|| Self::missing(path))?;
+        file.contents = contents;
+        Ok(())
+    }
+
+    #[cfg(feature = "acceptance-fixture")]
+    fn apply_acceptance_actions(&mut self) {
+        let actions = self
+            .acceptance_actions
+            .lock()
+            .expect("fake platform controls must not be poisoned")
+            .drain(..)
+            .collect::<Vec<_>>();
+        for action in actions {
+            match action {
+                FakePlatformControlAction::InsertFile { path, contents } => {
+                    self.insert_file(path, contents);
+                }
+                FakePlatformControlAction::RebindPathIdentity(path) => {
+                    self.rebind_path_identity(path);
+                }
+                FakePlatformControlAction::QueueFileSteps(steps) => {
+                    self.queue_file_steps(steps);
+                }
+                FakePlatformControlAction::QueueRuntimeLockSteps(steps) => {
+                    self.queue_runtime_lock_steps(steps);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "acceptance-fixture"))]
+    fn apply_acceptance_actions(&mut self) {}
 
     fn read_file(&self, path: &Path) -> Result<String, PlatformError> {
         let file = self.files.get(path).ok_or_else(|| Self::missing(path))?;
@@ -2246,7 +2751,8 @@ impl RuntimeLockAccess for FakePlatform {
     ) -> Result<Self::RuntimeLock, RuntimeLockError> {
         self.operations
             .push(PlatformOperation::AcquireRuntimeLock(path.to_path_buf()));
-        self.apply_next_step().map_err(RuntimeLockError::Platform)?;
+        self.apply_next_runtime_lock_step()
+            .map_err(RuntimeLockError::Platform)?;
         let mut state = self.runtime_lock_backend.state.lock().map_err(|_| {
             RuntimeLockError::Platform(PlatformError::new(
                 PlatformErrorKind::Unavailable,
@@ -2276,7 +2782,7 @@ impl RuntimeLockAccess for FakePlatform {
     ) -> Result<(), (Self::RuntimeLock, PlatformError)> {
         self.operations
             .push(PlatformOperation::ReleaseRuntimeLock(lock.path.clone()));
-        if let Err(error) = self.apply_next_step() {
+        if let Err(error) = self.apply_next_runtime_lock_step() {
             return Err((lock, error));
         }
         if !Arc::ptr_eq(&lock.backend, &self.runtime_lock_backend.state) {
@@ -2321,11 +2827,13 @@ impl RuntimeLockAccess for FakePlatform {
 
 impl Clock for FakePlatform {
     fn monotonic_now(&mut self) -> Duration {
+        self.apply_acceptance_actions();
         self.operations.push(PlatformOperation::MonotonicNow);
         self.monotonic_time
     }
 
     fn delay(&mut self, duration: Duration) {
+        self.apply_acceptance_actions();
         self.operations.push(PlatformOperation::Delay(duration));
         self.delays.push(duration);
         self.monotonic_time = self.monotonic_time.saturating_add(duration);
@@ -2349,6 +2857,32 @@ mod tests {
 
     const CHILD_LOCK_PATH: &str = "FAN_CONTROL_TEST_LOCK_PATH";
     const CHILD_EXPECTATION: &str = "FAN_CONTROL_TEST_LOCK_EXPECTATION";
+
+    #[test]
+    fn bounded_reader_returns_at_deadline_when_the_underlying_read_blocks() {
+        let mut pipe_fds = [-1; 2];
+        // SAFETY: `pipe_fds` points to two writable integers.
+        assert_eq!(
+            unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        // SAFETY: this test takes unique ownership of both new descriptors.
+        let blocked_reader = unsafe { File::from_raw_fd(pipe_fds[0]) };
+        // Keep the write end open without sending data so the child blocks instead of seeing EOF.
+        // SAFETY: this test takes unique ownership of the second new descriptor.
+        let _open_writer = unsafe { File::from_raw_fd(pipe_fds[1]) };
+        let started = Instant::now();
+
+        let error = read_open_file_before(
+            &blocked_reader,
+            Path::new("/test/blocked-sysfs-read"),
+            Duration::from_millis(25),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), PlatformErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
 
     #[test]
     fn protected_file_validation_rejects_symlinks_hardlinks_and_special_files() {

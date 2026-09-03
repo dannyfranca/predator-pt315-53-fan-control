@@ -7,9 +7,9 @@ use std::{
 
 use crate::{
     AcerHwmonDevice, AcerHwmonDiscoveryError, BoundedIdentityBoundFileAccess, Clock,
-    CompleteSampleSet, EmergencyContainmentReport, FirmwareAutoRestorationError, FreshSampleGate,
-    IdentityBoundFileAccess, PlatformError, PlatformErrorKind, RuntimeLockAccess, RuntimeLockError,
-    SampleReadiness, SampleSetError, SampleSources, ServiceAccess,
+    CompleteSampleSet, EmergencyContainmentReport, FileIdentity, FirmwareAutoRestorationError,
+    FreshSampleGate, IdentityBoundFileAccess, PlatformError, PlatformErrorKind, RuntimeLockAccess,
+    RuntimeLockError, SampleReadiness, SampleSetError, SampleSources, ServiceAccess,
     restoration::{
         FIRMWARE_AUTO, contain_custom_fans_at_maximum, recover_firmware_auto, restore_firmware_auto,
     },
@@ -77,6 +77,7 @@ where
     platform: &'a mut P,
     lock: Option<P::RuntimeLock>,
     ownership_id: u64,
+    controlled_device: Option<FileIdentity>,
     restoration_confirmed: bool,
     sampling_epoch_started: bool,
     sampling_epoch: u64,
@@ -89,7 +90,6 @@ where
     pub fn platform(&self) -> &P {
         self.platform
     }
-
     /// Discovers the exact fan device while this process holds exclusive controller ownership.
     pub fn discover_acer_hwmon(
         &mut self,
@@ -161,7 +161,8 @@ where
         gate.wait_for_next_sample(self.platform)
     }
 
-    pub(crate) fn begin_custom_transition(&mut self) -> (&mut P, u64) {
+    pub(crate) fn begin_custom_transition(&mut self, device: &AcerHwmonDevice) -> (&mut P, u64) {
+        self.controlled_device = Some(device.backing_identity());
         self.restoration_confirmed = false;
         self.reset_sampling_epoch();
         (self.platform, self.sampling_epoch)
@@ -194,6 +195,13 @@ where
         P: BoundedIdentityBoundFileAccess + Clock,
     {
         if !self.restoration_confirmed {
+            return false;
+        }
+        if self
+            .controlled_device
+            .is_some_and(|identity| identity != device.backing_identity())
+        {
+            self.invalidate_firmware_auto_epoch();
             return false;
         }
         let deadline = self
@@ -237,6 +245,14 @@ where
         self.restoration_confirmed = false;
         self.reset_sampling_epoch();
         restore_firmware_auto(self.platform, device)?;
+        if let Some(admitted) = self.controlled_device
+            && admitted != device.backing_identity()
+        {
+            return Err(FirmwareAutoRestorationError::DifferentController {
+                admitted,
+                restored: device.backing_identity(),
+            });
+        }
         self.restoration_confirmed = true;
         Ok(())
     }
@@ -251,7 +267,10 @@ where
         self.restoration_confirmed = false;
         self.reset_sampling_epoch();
         let report = contain_custom_fans_at_maximum(self.platform, device);
-        self.restoration_confirmed = report.restoration_confirmed();
+        self.restoration_confirmed = report.restoration_confirmed()
+            && self
+                .controlled_device
+                .is_none_or(|identity| identity == device.backing_identity());
         report
     }
 
@@ -266,7 +285,7 @@ where
             Ok(()) => FirmwareAutoSafingOutcome::Restored,
             Err(restoration) => {
                 let containment = self.contain_custom_fans_at_maximum(device);
-                if containment.restoration_confirmed() {
+                if containment.restoration_confirmed() && self.restoration_confirmed {
                     FirmwareAutoSafingOutcome::Contained {
                         restoration,
                         containment,
@@ -288,7 +307,9 @@ where
         self.restoration_confirmed = false;
         self.reset_sampling_epoch();
         recover_firmware_auto(self.platform, device);
-        self.restoration_confirmed = true;
+        self.restoration_confirmed = self
+            .controlled_device
+            .is_none_or(|identity| identity == device.backing_identity());
     }
 
     pub fn release(mut self) -> Result<(), ControllerReleaseError<'a, P>> {
@@ -441,6 +462,7 @@ where
         ownership_id: NEXT_OWNERSHIP_ID
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .expect("controller ownership ID space exhausted"),
+        controlled_device: None,
         restoration_confirmed: false,
         sampling_epoch_started: false,
         sampling_epoch: 0,
@@ -458,7 +480,10 @@ impl ControllerOwnership<'_, crate::SystemOwnershipPlatform> {
     ) -> Result<SystemFirmwareAutoRecovery, PlatformError> {
         self.restoration_confirmed = false;
         let outcome = self.platform.restore_firmware_auto_cycle(device)?;
-        self.restoration_confirmed = outcome == SystemFirmwareAutoRecovery::Restored;
+        self.restoration_confirmed = outcome == SystemFirmwareAutoRecovery::Restored
+            && self
+                .controlled_device
+                .is_none_or(|identity| identity == device.backing_identity());
         Ok(outcome)
     }
 }
@@ -489,4 +514,65 @@ fn child_name(path: &Path) -> &str {
     path.file_name()
         .and_then(|name| name.to_str())
         .expect("fan endpoint is a direct UTF-8 child")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{FakePlatform, FilePermissions, PlatformOperation};
+
+    const HWMON_ROOT: &str = "/sys/class/hwmon";
+    const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
+
+    #[test]
+    fn restoring_a_replacement_controller_cannot_authorize_lock_release() {
+        let root = Path::new(ACER_ROOT);
+        let mut platform = FakePlatform::new();
+        platform.insert_file_with_permissions(
+            root.join("name"),
+            "acer\n",
+            FilePermissions::READ_ONLY,
+        );
+        for channel in 1..=2 {
+            platform.insert_file_with_permissions(
+                root.join(format!("pwm{channel}")),
+                "128\n",
+                FilePermissions::READ_WRITE,
+            );
+            platform.insert_file_with_permissions(
+                root.join(format!("pwm{channel}_enable")),
+                "1\n",
+                FilePermissions::READ_WRITE,
+            );
+            platform.insert_file_with_permissions(
+                root.join(format!("fan{channel}_input")),
+                "2400\n",
+                FilePermissions::READ_ONLY,
+            );
+        }
+        let original = crate::discover_acer_hwmon(&mut platform, Path::new(HWMON_ROOT)).unwrap();
+        let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+        let _ = ownership.begin_custom_transition(&original);
+
+        ownership.platform_mut().rebind_path_identity(root);
+        let replacement = ownership
+            .discover_acer_hwmon(Path::new(HWMON_ROOT))
+            .unwrap();
+        assert_ne!(original.backing_identity(), replacement.backing_identity());
+
+        assert!(matches!(
+            ownership.restore_firmware_auto(&replacement),
+            Err(FirmwareAutoRestorationError::DifferentController { admitted, restored })
+                if admitted == original.backing_identity()
+                    && restored == replacement.backing_identity()
+        ));
+        let ownership = ownership.release().unwrap_err().into_ownership();
+        assert!(
+            !ownership
+                .platform()
+                .operations()
+                .iter()
+                .any(|operation| { matches!(operation, PlatformOperation::ReleaseRuntimeLock(_)) })
+        );
+    }
 }

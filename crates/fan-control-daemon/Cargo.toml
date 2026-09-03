@@ -6,8 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+acceptance-fixture = ["fan-control-core/acceptance-fixture"]
+
 [dependencies]
 fan-control-core = { path = "../fan-control-core" }
+libc = "0.2"
 object = { version = "0.36.7", default-features = false, features = ["read", "std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -22,3 +26,17 @@ sha2 = "0.10"
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+[[bin]]
+name = "fan-control-daemon"
+path = "src/main.rs"
+
+[[bin]]
+name = "fan-control-acceptance-fixture"
+path = "src/bin/fan-control-acceptance-fixture.rs"
+required-features = ["acceptance-fixture"]
+
+[[test]]
+name = "production_binary_control_loop"
+path = "tests/production_binary_control_loop.rs"
+required-features = ["acceptance-fixture"]

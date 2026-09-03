@@ -1,15 +1,17 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 
 use crate::{
-    AcerHwmonDevice, AdmittedPolicyAuthority, BoundedIdentityBoundFileAccess, Clock,
-    CompletedControlCycle, ControllerOwnership, EmergencyContainmentReport, FanArmingError,
-    FirmwareAutoRestorationError, FreshSampleGate, HealthyControl, HealthyControlCycleError,
-    IdentityBoundReadAccess, OwnershipSampleReadiness, RequiredInput, RuntimeFault,
-    RuntimeLockAccess, RuntimeState, RuntimeTransition, SampleSetError, SampleSourceError,
-    SampleSources, ShutdownRequest, ValidatedConfig, arm_both_fans_safely,
+    AcerHwmonDevice, AdmittedPolicyAuthority, BoundedIdentityBoundFileAccess,
+    BoundedIdentityBoundReadAccess, Clock, CompletedControlCycle, ControllerOwnership,
+    EmergencyContainmentReport, FanArmingError, FirmwareAutoRestorationError, FreshSampleGate,
+    HealthyControl, HealthyControlCycleError, OwnershipSampleReadiness, RequiredInput,
+    RuntimeFault, RuntimeLockAccess, RuntimeState, RuntimeTransition, SampleSetError,
+    SampleSourceError, SampleSources, ShutdownRequest, ValidatedConfig, arm_both_fans_safely_until,
     diagnostics::sample_fault, emit_fault, emit_state_transition,
     ownership::FirmwareAutoSafingOutcome, run_healthy_control_cycle,
 };
+
+pub const SENSOR_REDISCOVERY_WINDOW: Duration = Duration::from_secs(1);
 
 /// Creates replacement CPU/GPU source bindings while Firmware Auto owns both fans.
 ///
@@ -21,7 +23,8 @@ pub trait SensorSourceDiscovery {
 
     fn rediscover(
         &mut self,
-        files: &mut dyn IdentityBoundReadAccess,
+        files: &mut dyn BoundedIdentityBoundReadAccess,
+        deadline: Duration,
     ) -> Result<Self::Sources, SampleSourceError>;
 }
 
@@ -298,7 +301,14 @@ where
                     );
                 }
                 if sources.is_none() {
-                    match self.discovery.rediscover(ownership.platform_mut()) {
+                    let deadline = ownership
+                        .platform_mut()
+                        .monotonic_now()
+                        .saturating_add(SENSOR_REDISCOVERY_WINDOW);
+                    match self
+                        .discovery
+                        .rediscover(ownership.platform_mut(), deadline)
+                    {
                         Ok(rediscovered) => {
                             gate.reset();
                             sources = Some(rediscovered);
@@ -325,6 +335,16 @@ where
                 );
                 match readiness {
                     Ok(OwnershipSampleReadiness::AwaitingSecondSample) => {
+                        if let Err(fault) = ownership.wait_for_next_fresh_sample(&gate) {
+                            let (fault_id, endpoint) = sample_fault(&fault);
+                            emit_fault(fault_id, endpoint);
+                            emit_state_transition(
+                                RuntimeState::FirmwareAuto,
+                                RuntimeState::Restoring,
+                                RuntimeTransition::ControlFault,
+                            );
+                            return self.latch_recovery_fault(ownership, device, fault, sources);
+                        }
                         self.state = Some(ControlState::Recovering(Box::new(RecoveryState {
                             config,
                             device,
@@ -346,12 +366,13 @@ where
                             });
                             return Err(TransientSensorControlError::ShutdownRequested);
                         }
-                        match arm_both_fans_safely(
+                        match arm_both_fans_safely_until(
                             ownership,
                             &device,
                             &self.authority,
                             &config,
                             sample,
+                            &self.shutdown,
                         ) {
                             Ok(armed) => {
                                 self.state = Some(ControlState::Custom {
@@ -363,6 +384,19 @@ where
                                         .expect("ready sample was captured from installed sources"),
                                 });
                                 Ok(SensorControlStep::Rearmed)
+                            }
+                            Err(error)
+                                if self.shutdown.is_requested()
+                                    && !matches!(
+                                        &error,
+                                        FanArmingError::RestorationFailed { .. }
+                                    ) =>
+                            {
+                                drop(sources);
+                                self.state = Some(ControlState::Faulted {
+                                    retained_sources: None,
+                                });
+                                Err(TransientSensorControlError::ShutdownRequested)
                             }
                             Err(error) => {
                                 if !matches!(&error, FanArmingError::RestorationFailed { .. }) {

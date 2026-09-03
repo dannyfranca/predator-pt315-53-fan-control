@@ -14,8 +14,8 @@ const HWMON_ROOT: &str = "/sys/class/hwmon";
 const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
 
 #[test]
-fn sigterm_and_sigint_permanently_request_shutdown() {
-    for signal in [libc::SIGTERM, libc::SIGINT] {
+fn termination_and_watchdog_signals_permanently_request_shutdown() {
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGABRT] {
         let status = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "termination_signal_child"])
             .env("FAN_CONTROL_TEST_SIGNAL", signal.to_string())

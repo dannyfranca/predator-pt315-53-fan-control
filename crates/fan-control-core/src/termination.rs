@@ -9,7 +9,7 @@ use std::{
 
 use signal_hook::{
     SigId,
-    consts::{SIGINT, SIGTERM},
+    consts::{SIGABRT, SIGINT, SIGTERM},
 };
 
 use crate::{
@@ -162,7 +162,7 @@ impl Error for GracefulShutdownFailure {
     }
 }
 
-/// Process-lifetime SIGTERM/SIGINT registrations that only set the shutdown latch.
+/// Process-lifetime SIGTERM/SIGINT/SIGABRT registrations that only set the shutdown latch.
 ///
 /// Dropping this value intentionally leaves the actions registered. `signal-hook` cannot safely
 /// restore a replaced default disposition, so unregistering the last action could make a process
@@ -170,15 +170,16 @@ impl Error for GracefulShutdownFailure {
 /// successful action while returning the second registration error.
 #[derive(Debug)]
 pub struct TerminationSignalHandlers {
-    _registrations: [SigId; 2],
+    _registrations: [SigId; 3],
 }
 
 impl TerminationSignalHandlers {
     pub fn install(request: ShutdownRequest) -> io::Result<Self> {
         let term = signal_hook::flag::register(SIGTERM, Arc::clone(&request.requested))?;
-        let interrupt = signal_hook::flag::register(SIGINT, request.requested)?;
+        let interrupt = signal_hook::flag::register(SIGINT, Arc::clone(&request.requested))?;
+        let watchdog = signal_hook::flag::register(SIGABRT, request.requested)?;
         Ok(Self {
-            _registrations: [term, interrupt],
+            _registrations: [term, interrupt, watchdog],
         })
     }
 }

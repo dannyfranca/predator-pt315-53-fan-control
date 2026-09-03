@@ -5,7 +5,7 @@ use crate::{
     BoundedIdentityBoundFileAccess, Clock, CompleteSampleSet, ControllerOwnership,
     EmergencyContainmentReport, EnvelopeValidationError, Fan, FanEndpoints,
     FirmwareAutoRestorationError, PlatformError, RuntimeFault, RuntimeLockAccess, RuntimeState,
-    RuntimeTransition, ValidatedConfig, emit_fault, emit_state_transition,
+    RuntimeTransition, ShutdownRequest, ValidatedConfig, emit_fault, emit_state_transition,
     ownership::FirmwareAutoSafingOutcome,
     restoration::FIRMWARE_AUTO,
     tachometer::{MAXIMUM_PLAUSIBLE_RPM, MINIMUM_PLAUSIBLE_RPM, QualifiedTachometerCalibrations},
@@ -143,6 +143,7 @@ pub enum FanArmingFailure {
     DeviceIdentity(PlatformError),
     DeviceAbi(AcerHwmonDiscoveryError),
     DeviceChanged,
+    ShutdownRequested,
     DeadlineOverflow,
     Platform {
         fan: Fan,
@@ -187,6 +188,7 @@ impl fmt::Display for FanArmingFailure {
             Self::DeviceIdentity(error) => write!(formatter, "fan device identity check: {error}"),
             Self::DeviceAbi(error) => write!(formatter, "fan device ABI check: {error}"),
             Self::DeviceChanged => formatter.write_str("fan device identity changed during arming"),
+            Self::ShutdownRequested => formatter.write_str("shutdown requested during fan arming"),
             Self::DeadlineOverflow => formatter.write_str("fan arming deadline overflowed"),
             Self::Platform {
                 fan,
@@ -284,6 +286,28 @@ pub fn arm_both_fans_safely<P>(
 where
     P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
 {
+    arm_both_fans_safely_until(
+        ownership,
+        device,
+        authority,
+        candidate,
+        ready_sample,
+        &ShutdownRequest::new(),
+    )
+}
+
+/// Performs the Auto-to-Custom handover while honoring permanent cancellation throughout it.
+pub fn arm_both_fans_safely_until<P>(
+    ownership: &mut ControllerOwnership<'_, P>,
+    device: &AcerHwmonDevice,
+    authority: &AdmittedPolicyAuthority,
+    candidate: &ValidatedConfig,
+    ready_sample: ArmingReadySample,
+    shutdown: &ShutdownRequest,
+) -> Result<ArmedFanControl, FanArmingError>
+where
+    P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
+{
     let (sample, sample_ownership_id, sample_epoch) = ready_sample.into_parts();
     let mut entered_arming = false;
     let result = if authority.belongs_to_ownership(ownership.ownership_id()) {
@@ -294,6 +318,7 @@ where
         Err(FanArmingFailure::ForeignOwnershipAuthority)
     }
     .and_then(|()| {
+        ensure_arming_running(shutdown)?;
         if sample_ownership_id != ownership.ownership_id() {
             return Err(FanArmingFailure::ForeignOwnershipSample);
         }
@@ -307,15 +332,15 @@ where
         );
         entered_arming = true;
         let ownership_id = ownership.ownership_id();
-        let (platform, custom_epoch) = ownership.begin_custom_transition();
+        let (platform, custom_epoch) = ownership.begin_custom_transition(device);
         arm(
             platform,
             device,
             sample,
             candidate.clone(),
             authority.tachometer_calibrations(),
-            ownership_id,
-            custom_epoch,
+            (ownership_id, custom_epoch),
+            shutdown,
         )
     });
 
@@ -446,6 +471,7 @@ fn arming_failure_endpoint(reason: &FanArmingFailure) -> Option<crate::RuntimeEn
         | FanArmingFailure::DeviceIdentity(_)
         | FanArmingFailure::DeviceAbi(_)
         | FanArmingFailure::DeviceChanged
+        | FanArmingFailure::ShutdownRequested
         | FanArmingFailure::DeadlineOverflow => None,
     }
 }
@@ -456,12 +482,14 @@ fn arm<P>(
     sample: CompleteSampleSet,
     config: ValidatedConfig,
     calibration: QualifiedTachometerCalibrations,
-    ownership_id: u64,
-    custom_epoch: u64,
+    ownership: (u64, u64),
+    shutdown: &ShutdownRequest,
 ) -> Result<ArmedFanControl, FanArmingFailure>
 where
     P: BoundedIdentityBoundFileAccess + Clock,
 {
+    let (ownership_id, custom_epoch) = ownership;
+    ensure_arming_running(shutdown)?;
     let started_at = platform.monotonic_now();
     let sample_age = started_at
         .checked_sub(sample.completed_at())
@@ -494,6 +522,7 @@ where
         platform,
         handover_deadline,
     )?;
+    ensure_arming_running(shutdown)?;
 
     write(
         device,
@@ -508,6 +537,7 @@ where
         platform,
         handover_deadline,
     )?;
+    ensure_arming_running(shutdown)?;
     write(
         device,
         device.gpu().pwm(),
@@ -521,6 +551,7 @@ where
         platform,
         handover_deadline,
     )?;
+    ensure_arming_running(shutdown)?;
     confirm(
         device,
         device.cpu().pwm(),
@@ -541,6 +572,7 @@ where
         platform,
         handover_deadline,
     )?;
+    ensure_arming_running(shutdown)?;
 
     write(
         device,
@@ -555,6 +587,7 @@ where
         platform,
         handover_deadline,
     )?;
+    ensure_arming_running(shutdown)?;
     write(
         device,
         device.gpu().enable(),
@@ -568,6 +601,7 @@ where
         platform,
         handover_deadline,
     )?;
+    ensure_arming_running(shutdown)?;
 
     let (cpu_custom_confirmed_at, gpu_custom_confirmed_at) = confirm_custom_at_maximum(
         platform,
@@ -575,20 +609,24 @@ where
         handover_deadline,
         FanArmingOperation::ConfirmCustom,
     )?;
-    let (_, _, response_deadline) = await_tachometer_response(platform, device)?;
+    ensure_arming_running(shutdown)?;
+    let (_, _, response_deadline) = await_tachometer_response(platform, device, shutdown)?;
     confirm_custom_at_maximum(
         platform,
         device,
         response_deadline,
         FanArmingOperation::FinalConfirmCustom,
     )?;
-    let (cpu_rpm, gpu_rpm) = await_tachometer_response_before(platform, device, response_deadline)?;
+    ensure_arming_running(shutdown)?;
+    let (cpu_rpm, gpu_rpm) =
+        await_tachometer_response_before(platform, device, response_deadline, shutdown)?;
     confirm_custom_at_maximum(
         platform,
         device,
         response_deadline,
         FanArmingOperation::FinalConfirmCustom,
     )?;
+    ensure_arming_running(shutdown)?;
     Ok(ArmedFanControl {
         ownership_id,
         custom_epoch,
@@ -662,6 +700,7 @@ fn confirm_fan_at_maximum(
 fn await_tachometer_response<P>(
     platform: &mut P,
     device: &AcerHwmonDevice,
+    shutdown: &ShutdownRequest,
 ) -> Result<(u32, u32, Duration), FanArmingFailure>
 where
     P: BoundedIdentityBoundFileAccess + Clock + ?Sized,
@@ -670,7 +709,8 @@ where
         .monotonic_now()
         .checked_add(ARMING_TACHOMETER_RESPONSE_WINDOW)
         .ok_or(FanArmingFailure::DeadlineOverflow)?;
-    let (cpu_rpm, gpu_rpm) = await_tachometer_response_before(platform, device, deadline)?;
+    let (cpu_rpm, gpu_rpm) =
+        await_tachometer_response_before(platform, device, deadline, shutdown)?;
     Ok((cpu_rpm, gpu_rpm, deadline))
 }
 
@@ -678,6 +718,7 @@ fn await_tachometer_response_before<P>(
     platform: &mut P,
     device: &AcerHwmonDevice,
     deadline: Duration,
+    shutdown: &ShutdownRequest,
 ) -> Result<(u32, u32), FanArmingFailure>
 where
     P: BoundedIdentityBoundFileAccess + Clock + ?Sized,
@@ -686,6 +727,7 @@ where
     let mut last_gpu_rpm = None;
 
     loop {
+        ensure_arming_running(shutdown)?;
         let now = platform.monotonic_now();
         if now >= deadline {
             return Err(FanArmingFailure::TachometerTimeout {
@@ -695,6 +737,7 @@ where
         }
         let cpu_rpm = read_tachometer(platform, device, device.cpu(), Fan::Cpu, deadline)?;
         let gpu_rpm = read_tachometer(platform, device, device.gpu(), Fan::Gpu, deadline)?;
+        ensure_arming_running(shutdown)?;
         if let (Some(cpu_rpm), Some(gpu_rpm)) = (cpu_rpm, gpu_rpm) {
             return Ok((cpu_rpm, gpu_rpm));
         }
@@ -709,6 +752,14 @@ where
             });
         }
         platform.delay(TACHOMETER_POLL_INTERVAL.min(deadline - now));
+    }
+}
+
+fn ensure_arming_running(shutdown: &ShutdownRequest) -> Result<(), FanArmingFailure> {
+    if shutdown.is_requested() {
+        Err(FanArmingFailure::ShutdownRequested)
+    } else {
+        Ok(())
     }
 }
 

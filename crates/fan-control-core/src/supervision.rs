@@ -51,10 +51,7 @@ where
         }
     }
 
-    fn completed_control_work(&mut self, establishes_readiness: bool) -> Result<(), N::Error> {
-        if !self.ready && !establishes_readiness {
-            return Ok(());
-        }
+    fn completed_control_cycle(&mut self) -> Result<(), N::Error> {
         if !self.ready {
             self.notifier.notify(ServiceNotification::Ready)?;
             self.ready = true;
@@ -79,8 +76,8 @@ where
 /// readiness or the watchdog from a timer, helper thread, or Firmware Auto-only placeholder loop.
 /// In Custom state, [`TransientSensorControl::step`] samples every required input, calculates fan
 /// demand, performs bounded PWM writes and readbacks, and validates tachometer response before
-/// readiness is emitted. Once ready, successful bounded recovery work also advances the watchdog
-/// so normal recovery cannot be mistaken for a blocked loop.
+/// readiness or the watchdog is emitted. Firmware Auto recovery work never advances the watchdog:
+/// a daemon that cannot return to a successful real control cycle must eventually be restarted.
 pub fn run_supervised_control_iteration<D, P, N>(
     control: &mut TransientSensorControl<D>,
     ownership: &mut ControllerOwnership<'_, P>,
@@ -94,9 +91,11 @@ where
     let step = control
         .step(ownership)
         .map_err(SupervisedControlIterationError::Control)?;
-    heartbeat
-        .completed_control_work(matches!(step, SensorControlStep::Completed(_)))
-        .map_err(SupervisedControlIterationError::Notification)?;
+    if matches!(step, SensorControlStep::Completed(_)) {
+        heartbeat
+            .completed_control_cycle()
+            .map_err(SupervisedControlIterationError::Notification)?;
+    }
     Ok(step)
 }
 
@@ -166,9 +165,11 @@ impl SystemdNotifier {
     /// Unix datagram sockets without mutating process-global environment variables.
     pub fn connect(notify_socket: &OsStr, watchdog_enabled: bool) -> io::Result<Self> {
         let address = parse_notify_socket(notify_socket)?;
+        let socket = UnixDatagram::unbound()?;
+        socket.set_nonblocking(true)?;
         Ok(Self {
             transport: Some(SystemdNotificationTransport {
-                socket: UnixDatagram::unbound()?,
+                socket,
                 address,
                 watchdog_enabled,
             }),
@@ -278,8 +279,8 @@ mod tests {
     fn readiness_and_watchdog_share_the_completed_iteration_boundary() {
         let mut heartbeat = ControlLoopHeartbeat::new(RecordingNotifier::default());
 
-        heartbeat.completed_control_work(true).unwrap();
-        heartbeat.completed_control_work(true).unwrap();
+        heartbeat.completed_control_cycle().unwrap();
+        heartbeat.completed_control_cycle().unwrap();
 
         assert!(heartbeat.is_ready());
         assert_eq!(
@@ -300,7 +301,7 @@ mod tests {
         };
         let mut heartbeat = ControlLoopHeartbeat::new(notifier);
 
-        assert_eq!(heartbeat.completed_control_work(true), Err("ready failed"));
+        assert_eq!(heartbeat.completed_control_cycle(), Err("ready failed"));
         assert!(!heartbeat.is_ready());
         assert_eq!(
             heartbeat.into_notifier().notifications,
@@ -316,12 +317,9 @@ mod tests {
         };
         let mut heartbeat = ControlLoopHeartbeat::new(notifier);
 
-        assert_eq!(
-            heartbeat.completed_control_work(true),
-            Err("watchdog failed")
-        );
+        assert_eq!(heartbeat.completed_control_cycle(), Err("watchdog failed"));
         assert!(heartbeat.is_ready());
-        assert_eq!(heartbeat.completed_control_work(false), Err("still failed"));
+        assert_eq!(heartbeat.completed_control_cycle(), Err("still failed"));
         assert_eq!(
             heartbeat.into_notifier().notifications,
             [
@@ -333,24 +331,11 @@ mod tests {
     }
 
     #[test]
-    fn recovery_work_advances_watchdog_only_after_readiness() {
-        let mut heartbeat = ControlLoopHeartbeat::new(RecordingNotifier::default());
+    fn a_new_heartbeat_is_silent_until_a_completed_cycle() {
+        let heartbeat = ControlLoopHeartbeat::new(RecordingNotifier::default());
 
-        heartbeat.completed_control_work(false).unwrap();
         assert!(!heartbeat.is_ready());
         assert!(heartbeat.into_notifier().notifications.is_empty());
-
-        let mut heartbeat = ControlLoopHeartbeat::new(RecordingNotifier::default());
-        heartbeat.completed_control_work(true).unwrap();
-        heartbeat.completed_control_work(false).unwrap();
-        assert_eq!(
-            heartbeat.into_notifier().notifications,
-            [
-                ServiceNotification::Ready,
-                ServiceNotification::Watchdog,
-                ServiceNotification::Watchdog,
-            ]
-        );
     }
 
     #[test]

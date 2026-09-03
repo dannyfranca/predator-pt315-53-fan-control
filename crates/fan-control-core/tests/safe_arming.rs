@@ -12,9 +12,9 @@ use fan_control_core::{
     PlatformErrorKind, PlatformOperation, QUALIFICATION_RECORD_PATH,
     RootOwnedQualificationRecordAccess, RuntimeLockAccess, RuntimeLockError,
     SUPERVISED_ENDURANCE_EVIDENCE_PATH, SampleCapture, SampleSetError, SampleSourceError,
-    SampleSources, ServiceAccess, TemperatureCelsius, ValidatedConfig,
+    SampleSources, ServiceAccess, ShutdownRequest, TemperatureCelsius, ValidatedConfig,
     acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
-    discover_acer_hwmon,
+    arm_both_fans_safely_until, discover_acer_hwmon,
 };
 
 mod support;
@@ -216,6 +216,45 @@ fn admitted_two_sample_handover_reaches_verified_maximum_without_normal_demand()
 
     ownership.restore_firmware_auto(&device).unwrap();
     assert!(!armed.is_current_for(&ownership));
+    ownership.release().unwrap();
+}
+
+#[test]
+fn shutdown_during_custom_handover_restores_auto_before_returning() {
+    let (platform, device) = fixture("2400\n", "2600\n");
+    let shutdown = ShutdownRequest::new();
+    let mut platform = PathAwarePlatform::with_shutdown(
+        platform,
+        InjectedFault::RequestShutdownAfterCpuCustom,
+        shutdown.clone(),
+    );
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, candidate, sample) = admit_and_sample(&mut ownership, &device);
+
+    let error = arm_both_fans_safely_until(
+        &mut ownership,
+        &device,
+        &authority,
+        &candidate,
+        sample,
+        &shutdown,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        FanArmingError::Rejected(FanArmingFailure::ShutdownRequested)
+    ));
+    assert!(ownership.platform().cpu_custom_written);
+    assert!(!ownership.platform().gpu_custom_attempted);
+    assert_eq!(
+        ownership.platform().inner.file_contents(cpu_enable()),
+        Some("2")
+    );
+    assert_eq!(
+        ownership.platform().inner.file_contents(gpu_enable()),
+        Some("2")
+    );
     ownership.release().unwrap();
 }
 
@@ -1027,6 +1066,7 @@ enum InjectedFault {
     RebindCpuTachBeforeRead,
     RebindGpuTachBeforeRead,
     AddAmbiguousAcerDevice,
+    RequestShutdownAfterCpuCustom,
 }
 
 #[derive(Debug)]
@@ -1045,6 +1085,7 @@ struct PathAwarePlatform {
     cpu_final_duty_seen: bool,
     auto_mode_reads_after_sampling_delay: u8,
     completed_tachometer_snapshots: u8,
+    shutdown: Option<ShutdownRequest>,
 }
 
 impl PathAwarePlatform {
@@ -1064,6 +1105,14 @@ impl PathAwarePlatform {
             cpu_final_duty_seen: false,
             auto_mode_reads_after_sampling_delay: 0,
             completed_tachometer_snapshots: 0,
+            shutdown: None,
+        }
+    }
+
+    fn with_shutdown(inner: FakePlatform, fault: InjectedFault, shutdown: ShutdownRequest) -> Self {
+        Self {
+            shutdown: Some(shutdown),
+            ..Self::new(inner, fault)
         }
     }
 
@@ -1313,6 +1362,12 @@ impl BoundedFileAccess for PathAwarePlatform {
             let result = self.inner.write_before(path, contents, deadline);
             if result.is_ok() {
                 self.cpu_custom_written = true;
+                if self.fault == InjectedFault::RequestShutdownAfterCpuCustom {
+                    self.shutdown
+                        .as_ref()
+                        .expect("shutdown injection requires a request handle")
+                        .request();
+                }
             }
             return result;
         }

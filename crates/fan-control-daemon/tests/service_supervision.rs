@@ -31,6 +31,7 @@ fn daemon_unit_encodes_the_watchdog_cleanup_and_bounded_crash_contract() {
     assert_eq!(directives["Service"]["Type"], "notify");
     assert_eq!(directives["Service"]["NotifyAccess"], "main");
     assert_eq!(directives["Service"]["WatchdogSec"], "6s");
+    assert_eq!(directives["Service"]["TimeoutAbortSec"], "5s");
     assert_eq!(directives["Service"]["Restart"], "on-failure");
     assert_eq!(directives["Service"]["RestartSec"], "2s");
     assert_eq!(directives["Service"]["TimeoutStartSec"], "30s");
