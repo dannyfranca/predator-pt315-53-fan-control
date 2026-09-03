@@ -66,7 +66,7 @@ fn source_metadata_is_exact_and_reproducible() {
     assert!(pkgbuild.contains(&format!("_commit='{SOURCE_COMMIT}'")));
     assert!(pkgbuild.contains(SOURCE_SHA256));
     assert!(pkgbuild.contains(
-        "depends=('bash' 'coreutils' 'gcc-libs' 'glibc' 'glmark2' 'stress-ng' 'systemd')"
+        "depends=('bash' 'coreutils' 'gcc-libs' 'glibc' 'glmark2' 'kmod' 'nvidia-utils' 'openssl' 'pacman' 'sbsigntools' 'stress-ng' 'systemd')"
     ));
     assert!(!pkgbuild.contains("SKIP"));
     assert!(!pkgbuild.contains("pkgver()"));
@@ -108,6 +108,11 @@ fn source_metadata_is_exact_and_reproducible() {
             "gcc-libs",
             "glibc",
             "glmark2",
+            "kmod",
+            "nvidia-utils",
+            "openssl",
+            "pacman",
+            "sbsigntools",
             "stress-ng",
             "systemd"
         ]

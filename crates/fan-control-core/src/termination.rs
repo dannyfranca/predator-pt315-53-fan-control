@@ -13,8 +13,9 @@ use signal_hook::{
 };
 
 use crate::{
-    AcerHwmonDevice, BoundedFileAccess, Clock, ControllerOwnership, EmergencyContainmentReport,
-    FirmwareAutoRestorationError, RuntimeLockAccess, ownership::FirmwareAutoSafingOutcome,
+    AcerHwmonDevice, BoundedIdentityBoundFileAccess, Clock, ControllerOwnership,
+    EmergencyContainmentReport, FirmwareAutoRestorationError, RuntimeLockAccess,
+    ownership::FirmwareAutoSafingOutcome,
 };
 
 /// A cloneable, async-signal-safe latch that permanently cancels normal control.
@@ -89,7 +90,7 @@ impl ShutdownController {
         device: &AcerHwmonDevice,
     ) -> Result<(), GracefulShutdownFailure>
     where
-        P: BoundedFileAccess + Clock + RuntimeLockAccess + ?Sized,
+        P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess + ?Sized,
     {
         self.request();
         if let Some(result) = &self.cleanup {

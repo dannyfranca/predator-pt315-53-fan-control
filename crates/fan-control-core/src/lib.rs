@@ -153,6 +153,11 @@ pub use preflight::{
     PreflightReport, PreflightRequirements, run_read_only_preflight,
 };
 pub use promotion::{
+    PackageArtifactV1, PackageProvenanceBuildV1, PackageProvenanceKernelV1,
+    PackageProvenanceModuleSourceV1, PackageProvenanceModuleV1, PackageProvenanceV1,
+    validate_package_provenance_compatibility_v1, validate_package_provenance_v1,
+};
+pub use promotion::{
     PromotionInputs, PromotionValidationError, sanitize_qualification_evidence_v1,
     validate_promotion_manifest_v1,
 };

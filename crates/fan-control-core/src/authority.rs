@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, de};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AcerHwmonDevice, BoundedFileAccess, Clock, CompatibilityAdmissionError,
+    AcerHwmonDevice, BoundedIdentityBoundFileAccess, Clock, CompatibilityAdmissionError,
     CompatibilityDeclarationV1, CompatibilityObservation, ConfigV1, ConfigValidationError,
     ControllerOwnership, EnvelopeValidationError, FirmwareAutoRestorationError,
     QualificationEnvelopeIdentityV1, QualificationRecordV2, RootOwnedQualificationRecordAccess,
@@ -316,7 +316,11 @@ pub fn admit_policy_authority<P>(
     compatibility_observations: &[CompatibilityObservation],
 ) -> Result<AdmittedPolicyAuthority, PolicyAuthorityAdmissionError>
 where
-    P: BoundedFileAccess + Clock + RootOwnedQualificationRecordAccess + RuntimeLockAccess + ?Sized,
+    P: BoundedIdentityBoundFileAccess
+        + Clock
+        + RootOwnedQualificationRecordAccess
+        + RuntimeLockAccess
+        + ?Sized,
 {
     let result = if ownership.refresh_firmware_auto_confirmation(device) {
         let qualification_record_source = ownership

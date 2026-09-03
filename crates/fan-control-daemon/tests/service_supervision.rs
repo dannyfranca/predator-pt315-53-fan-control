@@ -33,7 +33,7 @@ fn daemon_unit_encodes_the_watchdog_cleanup_and_bounded_crash_contract() {
     assert_eq!(directives["Service"]["WatchdogSec"], "6s");
     assert_eq!(directives["Service"]["Restart"], "on-failure");
     assert_eq!(directives["Service"]["RestartSec"], "2s");
-    assert_eq!(directives["Service"]["TimeoutStartSec"], "6s");
+    assert_eq!(directives["Service"]["TimeoutStartSec"], "30s");
     assert_eq!(directives["Service"]["TimeoutStopSec"], "infinity");
     assert_eq!(
         directives["Service"]["RuntimeDirectory"],
@@ -45,7 +45,10 @@ fn daemon_unit_encodes_the_watchdog_cleanup_and_bounded_crash_contract() {
     assert_eq!(directives["Service"]["NoNewPrivileges"], "yes");
     assert_eq!(directives["Service"]["CapabilityBoundingSet"], "");
     assert_eq!(directives["Service"]["PrivateTmp"], "yes");
-    assert_eq!(directives["Service"]["PrivateDevices"], "yes");
+    assert_eq!(directives["Service"]["PrivateDevices"], "no");
+    assert_eq!(directives["Service"]["DevicePolicy"], "closed");
+    assert!(UNIT.contains("DeviceAllow=/dev/nvidiactl rw"));
+    assert!(UNIT.contains("DeviceAllow=/dev/nvidia0 rw"));
     assert_eq!(directives["Service"]["ProtectSystem"], "strict");
     assert_eq!(directives["Service"]["ProtectHome"], "yes");
     assert_eq!(directives["Service"]["RestrictAddressFamilies"], "AF_UNIX");
@@ -302,7 +305,7 @@ fn assert_actual_systemd_failure_lifecycle(daemon_behavior: &str) {
         )
         .replace("WatchdogSec=6s", "WatchdogSec=1s")
         .replace("RestartSec=2s", "RestartSec=200ms")
-        .replace("TimeoutStartSec=6s", "TimeoutStartSec=1s");
+        .replace("TimeoutStartSec=30s", "TimeoutStartSec=1s");
     // The user-manager probe lives in the checkout, so only that derived unit relaxes home
     // isolation. Both modes expose their host temporary observation log to the derived unit;
     // the production unit's hardening contract is asserted separately above.

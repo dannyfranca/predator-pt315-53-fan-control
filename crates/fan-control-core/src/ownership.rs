@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::{
-    AcerHwmonDevice, AcerHwmonDiscoveryError, BoundedFileAccess, Clock, CompleteSampleSet,
-    EmergencyContainmentReport, FirmwareAutoRestorationError, FreshSampleGate,
+    AcerHwmonDevice, AcerHwmonDiscoveryError, BoundedIdentityBoundFileAccess, Clock,
+    CompleteSampleSet, EmergencyContainmentReport, FirmwareAutoRestorationError, FreshSampleGate,
     IdentityBoundFileAccess, PlatformError, PlatformErrorKind, RuntimeLockAccess, RuntimeLockError,
     SampleReadiness, SampleSetError, SampleSources, ServiceAccess,
     restoration::{
@@ -113,7 +113,7 @@ where
         sources: &mut dyn SampleSources,
     ) -> Result<OwnershipSampleReadiness, SampleSetError>
     where
-        P: BoundedFileAccess + Clock + Sized,
+        P: BoundedIdentityBoundFileAccess + Clock + Sized,
     {
         if !self.refresh_firmware_auto_confirmation(device) {
             gate.reset();
@@ -150,6 +150,17 @@ where
         self.platform.delay(duration);
     }
 
+    /// Waits until the next gate cycle is due, measured from the previous cycle's start.
+    pub fn wait_for_next_fresh_sample(
+        &mut self,
+        gate: &FreshSampleGate,
+    ) -> Result<(), SampleSetError>
+    where
+        P: Clock + Sized,
+    {
+        gate.wait_for_next_sample(self.platform)
+    }
+
     pub(crate) fn begin_custom_transition(&mut self) -> (&mut P, u64) {
         self.restoration_confirmed = false;
         self.reset_sampling_epoch();
@@ -180,7 +191,7 @@ where
 
     pub(crate) fn refresh_firmware_auto_confirmation(&mut self, device: &AcerHwmonDevice) -> bool
     where
-        P: BoundedFileAccess + Clock,
+        P: BoundedIdentityBoundFileAccess + Clock,
     {
         if !self.restoration_confirmed {
             return false;
@@ -189,8 +200,20 @@ where
             .platform
             .monotonic_now()
             .saturating_add(crate::NORMAL_SAMPLE_CADENCE);
-        let cpu = self.platform.read_before(device.cpu().enable(), deadline);
-        let gpu = self.platform.read_before(device.gpu().enable(), deadline);
+        let cpu = self.platform.read_bound_before(
+            device.root(),
+            device.backing_identity(),
+            child_name(device.cpu().enable()),
+            endpoint_identity(device, device.cpu().enable()),
+            deadline,
+        );
+        let gpu = self.platform.read_bound_before(
+            device.root(),
+            device.backing_identity(),
+            child_name(device.gpu().enable()),
+            endpoint_identity(device, device.gpu().enable()),
+            deadline,
+        );
         let confirmed = matches!(cpu, Ok(ref value) if value.trim() == FIRMWARE_AUTO)
             && matches!(gpu, Ok(ref value) if value.trim() == FIRMWARE_AUTO);
         if !confirmed {
@@ -209,7 +232,7 @@ where
         device: &AcerHwmonDevice,
     ) -> Result<(), FirmwareAutoRestorationError>
     where
-        P: BoundedFileAccess + Clock,
+        P: BoundedIdentityBoundFileAccess + Clock,
     {
         self.restoration_confirmed = false;
         self.reset_sampling_epoch();
@@ -223,7 +246,7 @@ where
         device: &AcerHwmonDevice,
     ) -> EmergencyContainmentReport
     where
-        P: BoundedFileAccess + Clock,
+        P: BoundedIdentityBoundFileAccess + Clock,
     {
         self.restoration_confirmed = false;
         self.reset_sampling_epoch();
@@ -237,7 +260,7 @@ where
         device: &AcerHwmonDevice,
     ) -> FirmwareAutoSafingOutcome
     where
-        P: BoundedFileAccess + Clock,
+        P: BoundedIdentityBoundFileAccess + Clock,
     {
         match self.restore_firmware_auto(device) {
             Ok(()) => FirmwareAutoSafingOutcome::Restored,
@@ -260,7 +283,7 @@ where
 
     pub fn recover_firmware_auto(&mut self, device: &AcerHwmonDevice)
     where
-        P: BoundedFileAccess + Clock,
+        P: BoundedIdentityBoundFileAccess + Clock,
     {
         self.restoration_confirmed = false;
         self.reset_sampling_epoch();
@@ -454,4 +477,16 @@ fn reject_competing_services(
         }
     }
     Ok(())
+}
+
+fn endpoint_identity(device: &AcerHwmonDevice, path: &Path) -> crate::FileIdentity {
+    device
+        .endpoint_identity(path)
+        .expect("fan endpoint belongs to the discovered device")
+}
+
+fn child_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .expect("fan endpoint is a direct UTF-8 child")
 }
