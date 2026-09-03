@@ -333,17 +333,6 @@ where
     }
 }
 
-#[cfg(feature = "acceptance-fixture")]
-impl ControllerOwnership<'_, crate::FakePlatform> {
-    /// Acceptance-fixture-only access to the in-memory platform.
-    ///
-    /// This specialization cannot expose a real platform or fan device to downstream callers.
-    #[doc(hidden)]
-    pub fn acceptance_platform_mut(&mut self) -> &mut crate::FakePlatform {
-        self.platform
-    }
-}
-
 pub struct ControllerReleaseError<'a, P>
 where
     P: RuntimeLockAccess + ?Sized,

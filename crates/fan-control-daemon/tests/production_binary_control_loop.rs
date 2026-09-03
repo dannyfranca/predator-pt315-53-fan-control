@@ -8,6 +8,18 @@ use std::{
 const CHILD_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[test]
+fn production_daemon_has_no_acceptance_fixture_entrypoint() {
+    let output = Command::new(env!("CARGO_BIN_EXE_fan-control-daemon"))
+        .args(["--acceptance-fixture", "normal"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr(&output).contains("usage: pt31553-fand [--status]"));
+}
+
+#[test]
 fn production_binary_runs_real_cycles_and_recovers_before_readiness() {
     for scenario in ["normal", "rediscovery"] {
         let harness = Harness::new(scenario);
@@ -214,9 +226,9 @@ impl Harness {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_fan-control-daemon"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fan-control-acceptance-fixture"));
         command
-            .args(["--acceptance-fixture", self.scenario])
+            .arg(self.scenario)
             .env("NOTIFY_SOCKET", &self.socket_path)
             .env("WATCHDOG_USEC", "6000000")
             .env_remove("WATCHDOG_PID");

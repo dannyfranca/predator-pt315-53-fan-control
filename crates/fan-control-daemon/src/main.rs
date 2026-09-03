@@ -23,21 +23,18 @@ fn main() {
 }
 
 fn run() -> Result<(), DaemonError> {
-    let acceptance_scenario: Option<String> =
-        match env::args().skip(1).collect::<Vec<_>>().as_slice() {
-            [argument] if argument == "--status" => {
-                report_unqualified_status();
-                return Ok(());
-            }
-            #[cfg(feature = "acceptance-fixture")]
-            [argument, scenario] if argument == "--acceptance-fixture" => Some(scenario.clone()),
-            [] => None,
-            _ => {
-                return Err(DaemonError::Startup(StartupError::Configuration(
-                    "usage: pt31553-fand [--status]".into(),
-                )));
-            }
-        };
+    match env::args().skip(1).collect::<Vec<_>>().as_slice() {
+        [argument] if argument == "--status" => {
+            report_unqualified_status();
+            return Ok(());
+        }
+        [] => {}
+        _ => {
+            return Err(DaemonError::Startup(StartupError::Configuration(
+                "usage: pt31553-fand [--status]".into(),
+            )));
+        }
+    }
 
     let notifier = SystemdNotifier::from_environment().map_err(DaemonError::Supervision)?;
     // Do not let child identity probes inherit the manager's notify socket and emit unrelated
@@ -52,15 +49,6 @@ fn run() -> Result<(), DaemonError> {
     let shutdown_request = shutdown.request_handle();
     let _signal_handlers = TerminationSignalHandlers::install(shutdown_request.clone())
         .map_err(DaemonError::Supervision)?;
-
-    #[cfg(feature = "acceptance-fixture")]
-    if let Some(scenario) = acceptance_scenario {
-        return fan_control_daemon::run_acceptance_fixture(&scenario, notifier, &mut shutdown)
-            .map_err(DaemonError::Supervision);
-    }
-
-    #[cfg(not(feature = "acceptance-fixture"))]
-    let _ = acceptance_scenario;
 
     let mut discovery = discover_system_startup().map_err(DaemonError::Startup)?;
     let observations = [discovery.observation];

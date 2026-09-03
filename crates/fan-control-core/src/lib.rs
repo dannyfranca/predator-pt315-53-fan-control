@@ -138,6 +138,8 @@ pub use ownership::{
     ControllerOwnershipError, ControllerReleaseError, OwnershipSampleReadiness, RUNTIME_LOCK_PATH,
     SystemFirmwareAutoRecovery, acquire_controller_ownership,
 };
+#[cfg(feature = "acceptance-fixture")]
+pub use platform::FakePlatformControl;
 pub use platform::{
     BoundedFileAccess, BoundedIdentityBoundFileAccess, BoundedIdentityBoundReadAccess, Clock,
     FakePlatform, FakeRuntimeLock, FakeRuntimeLockBackend, FakeStep, FileAccess, FileIdentity,

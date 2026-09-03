@@ -9,7 +9,7 @@ use std::{
 
 use fan_control_core::{
     CompatibilityDeclarationV1, CompatibilityObservation, EmergencyFanStatus, EvidenceCompleteness,
-    ExternalPower, FakePlatform, FakeStep, FanWriteBackend, FilePermissions,
+    ExternalPower, FakePlatform, FakePlatformControl, FakeStep, FanWriteBackend, FilePermissions,
     GracefulShutdownFailure, ObservedFanAbi, ObservedSample, PackageProvenanceV1, PlatformError,
     PlatformErrorKind, PlatformOperation, QUALIFICATION_RECORD_PATH,
     SUPERVISED_ENDURANCE_EVIDENCE_PATH, SampleCapture, SampleSourceError, SampleSources,
@@ -44,6 +44,7 @@ pub fn run_acceptance_fixture(
     let scenario = Scenario::parse(scenario)?;
     let policy = policy_source();
     let mut platform = qualified_platform(&policy)?;
+    let platform_control = platform.acceptance_control();
     let compatibility = compatibility_source(&policy);
     let mut environment = FixtureStartupDiscoveryEnvironment {
         platform: &mut platform,
@@ -74,7 +75,7 @@ pub fn run_acceptance_fixture(
             .restore_firmware_auto(&discovery.device)
             .map_err(startup_io_error)?;
     }
-    prepare_exit_fault(startup.ownership.acceptance_platform_mut(), scenario);
+    prepare_exit_fault(&platform_control, scenario);
     if matches!(
         scenario,
         Scenario::CleanupContained
@@ -329,7 +330,7 @@ impl Scenario {
     }
 }
 
-fn prepare_exit_fault(platform: &mut FakePlatform, scenario: Scenario) {
+fn prepare_exit_fault(platform: &FakePlatformControl, scenario: Scenario) {
     let injected = || {
         PlatformError::new(
             PlatformErrorKind::Unavailable,

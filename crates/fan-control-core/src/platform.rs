@@ -403,6 +403,8 @@ where
 
 /// Read-only identity-bound access that rejects operations completing after a monotonic deadline.
 pub trait BoundedIdentityBoundReadAccess {
+    fn read_deadline_now(&mut self) -> Duration;
+
     fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError>;
 
     fn list_before(
@@ -445,8 +447,12 @@ pub trait BoundedIdentityBoundReadAccess {
 
 impl<T> BoundedIdentityBoundReadAccess for T
 where
-    T: BoundedIdentityBoundFileAccess + ?Sized,
+    T: BoundedIdentityBoundFileAccess + Clock + ?Sized,
 {
+    fn read_deadline_now(&mut self) -> Duration {
+        Clock::monotonic_now(self)
+    }
+
     fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError> {
         BoundedFileAccess::read_before(self, path, deadline)
     }
@@ -1900,6 +1906,55 @@ pub enum FakeStep {
     Advance(Duration),
 }
 
+#[cfg(feature = "acceptance-fixture")]
+#[derive(Debug)]
+enum FakePlatformControlAction {
+    InsertFile { path: PathBuf, contents: String },
+    RebindPathIdentity(PathBuf),
+    QueueFileSteps(Vec<FakeStep>),
+    QueueRuntimeLockSteps(Vec<FakeStep>),
+}
+
+/// Out-of-band controls owned by the dedicated acceptance-fixture process.
+#[cfg(feature = "acceptance-fixture")]
+#[derive(Debug, Clone)]
+pub struct FakePlatformControl {
+    actions: Arc<Mutex<VecDeque<FakePlatformControlAction>>>,
+}
+
+#[cfg(feature = "acceptance-fixture")]
+impl FakePlatformControl {
+    pub fn insert_file(&self, path: impl Into<PathBuf>, contents: impl Into<String>) {
+        self.push(FakePlatformControlAction::InsertFile {
+            path: path.into(),
+            contents: contents.into(),
+        });
+    }
+
+    pub fn rebind_path_identity(&self, path: impl Into<PathBuf>) {
+        self.push(FakePlatformControlAction::RebindPathIdentity(path.into()));
+    }
+
+    pub fn queue_file_steps(&self, steps: impl IntoIterator<Item = FakeStep>) {
+        self.push(FakePlatformControlAction::QueueFileSteps(
+            steps.into_iter().collect(),
+        ));
+    }
+
+    pub fn queue_runtime_lock_steps(&self, steps: impl IntoIterator<Item = FakeStep>) {
+        self.push(FakePlatformControlAction::QueueRuntimeLockSteps(
+            steps.into_iter().collect(),
+        ));
+    }
+
+    fn push(&self, action: FakePlatformControlAction) {
+        self.actions
+            .lock()
+            .expect("fake platform controls must not be poisoned")
+            .push_back(action);
+    }
+}
+
 #[derive(Debug)]
 struct FakeRuntimeLockState {
     root_owned: bool,
@@ -1961,6 +2016,8 @@ pub struct FakePlatform {
     runtime_lock_steps: VecDeque<FakeStep>,
     operations: Vec<PlatformOperation>,
     bounded_write_attempts: Vec<PlatformOperation>,
+    #[cfg(feature = "acceptance-fixture")]
+    acceptance_actions: Arc<Mutex<VecDeque<FakePlatformControlAction>>>,
 }
 
 impl FakePlatform {
@@ -1977,6 +2034,13 @@ impl FakePlatform {
 
     pub fn runtime_lock_backend(&self) -> FakeRuntimeLockBackend {
         self.runtime_lock_backend.clone()
+    }
+
+    #[cfg(feature = "acceptance-fixture")]
+    pub fn acceptance_control(&self) -> FakePlatformControl {
+        FakePlatformControl {
+            actions: Arc::clone(&self.acceptance_actions),
+        }
     }
 
     pub fn insert_directory(&mut self, directory: impl Into<PathBuf>) {
@@ -2115,6 +2179,7 @@ impl FakePlatform {
     }
 
     fn apply_next_step(&mut self) -> Result<(), PlatformError> {
+        self.apply_acceptance_actions();
         match self.steps.pop_front().unwrap_or(FakeStep::Pass) {
             FakeStep::Pass => Ok(()),
             FakeStep::Fail(error) => Err(error),
@@ -2131,6 +2196,7 @@ impl FakePlatform {
     }
 
     fn apply_next_file_step(&mut self) -> Result<(), PlatformError> {
+        self.apply_acceptance_actions();
         let Some(step) = self.file_steps.pop_front() else {
             return self.apply_next_step();
         };
@@ -2150,6 +2216,7 @@ impl FakePlatform {
     }
 
     fn apply_next_runtime_lock_step(&mut self) -> Result<(), PlatformError> {
+        self.apply_acceptance_actions();
         let Some(step) = self.runtime_lock_steps.pop_front() else {
             return self.apply_next_step();
         };
@@ -2198,6 +2265,7 @@ impl FakePlatform {
         operation: &str,
         deadline: Duration,
     ) -> Result<(), PlatformError> {
+        self.apply_acceptance_actions();
         if self.monotonic_time >= deadline {
             return Err(Self::timed_out(path, operation));
         }
@@ -2229,6 +2297,7 @@ impl FakePlatform {
         operation: &str,
         deadline: Duration,
     ) -> Result<(), PlatformError> {
+        self.apply_acceptance_actions();
         if self.file_steps.is_empty() {
             return self.apply_next_step_before(path, operation, deadline);
         }
@@ -2265,6 +2334,35 @@ impl FakePlatform {
         file.contents = contents;
         Ok(())
     }
+
+    #[cfg(feature = "acceptance-fixture")]
+    fn apply_acceptance_actions(&mut self) {
+        let actions = self
+            .acceptance_actions
+            .lock()
+            .expect("fake platform controls must not be poisoned")
+            .drain(..)
+            .collect::<Vec<_>>();
+        for action in actions {
+            match action {
+                FakePlatformControlAction::InsertFile { path, contents } => {
+                    self.insert_file(path, contents);
+                }
+                FakePlatformControlAction::RebindPathIdentity(path) => {
+                    self.rebind_path_identity(path);
+                }
+                FakePlatformControlAction::QueueFileSteps(steps) => {
+                    self.queue_file_steps(steps);
+                }
+                FakePlatformControlAction::QueueRuntimeLockSteps(steps) => {
+                    self.queue_runtime_lock_steps(steps);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "acceptance-fixture"))]
+    fn apply_acceptance_actions(&mut self) {}
 
     fn read_file(&self, path: &Path) -> Result<String, PlatformError> {
         let file = self.files.get(path).ok_or_else(|| Self::missing(path))?;
@@ -2729,11 +2827,13 @@ impl RuntimeLockAccess for FakePlatform {
 
 impl Clock for FakePlatform {
     fn monotonic_now(&mut self) -> Duration {
+        self.apply_acceptance_actions();
         self.operations.push(PlatformOperation::MonotonicNow);
         self.monotonic_time
     }
 
     fn delay(&mut self, duration: Duration) {
+        self.apply_acceptance_actions();
         self.operations.push(PlatformOperation::Delay(duration));
         self.delays.push(duration);
         self.monotonic_time = self.monotonic_time.saturating_add(duration);

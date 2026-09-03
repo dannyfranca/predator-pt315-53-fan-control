@@ -17,11 +17,10 @@ use fan_control_core::{
     IdentityBoundReadAccess, ModuleIdentity, ModuleProvenance, NvidiaGpuSelector, NvmlAccess,
     NvmlError, NvmlErrorKind, NvmlGpuSample, ObservedFanAbi, ObservedSample,
     PackageProvenanceModuleV1, PackageProvenanceV1, PlatformError, PlatformErrorKind,
-    RootOwnedQualificationRecordAccess, SENSOR_REDISCOVERY_WINDOW, SampleCapture,
-    SampleSourceError, SampleSources, SensorSourceDiscovery, SystemOwnershipPlatform,
-    TemperatureCelsius, discover_acer_hwmon, discover_coretemp, parse_compatibility_v1,
-    sample_nvidia_gpu, validate_package_provenance_compatibility_v1,
-    validate_package_provenance_v1,
+    RootOwnedQualificationRecordAccess, SampleCapture, SampleSourceError, SampleSources,
+    SensorSourceDiscovery, SystemOwnershipPlatform, TemperatureCelsius, discover_acer_hwmon,
+    discover_coretemp, parse_compatibility_v1, sample_nvidia_gpu,
+    validate_package_provenance_compatibility_v1, validate_package_provenance_v1,
 };
 use object::{Object, ObjectSection};
 use sha2::{Digest, Sha256};
@@ -346,18 +345,21 @@ impl SystemSampleSources {
     }
 
     fn rediscover_with(
-        files: &mut dyn IdentityBoundReadAccess,
+        files: &mut dyn BoundedIdentityBoundReadAccess,
         expected_nvidia: &NvidiaGpuSelector,
-        window: Duration,
+        deadline: Duration,
     ) -> Result<Self, StartupError> {
-        let started = Instant::now();
-        let coretemp = discover_coretemp(files, Path::new(HWMON_ROOT))
-            .map_err(|error| StartupError::Device(error.to_string()))?;
-        let remaining = window.checked_sub(started.elapsed()).ok_or_else(|| {
-            StartupError::Device("sensor rediscovery exceeded its deadline".into())
-        })?;
+        let coretemp = discover_coretemp(
+            &mut DeadlineReadAccess { files, deadline },
+            Path::new(HWMON_ROOT),
+        )
+        .map_err(|error| StartupError::Device(error.to_string()))?;
+        let remaining = remaining_rediscovery_time(files, deadline)?;
         let nvidia = NvidiaSmi::rediscover_with_timeout(expected_nvidia, remaining)?;
-        let power = BoundExternalPower::discover_readonly(files, Path::new(POWER_SUPPLY_ROOT))?;
+        let power = BoundExternalPower::discover_readonly(
+            &mut DeadlineReadAccess { files, deadline },
+            Path::new(POWER_SUPPLY_ROOT),
+        )?;
         Ok(Self {
             platform: SystemOwnershipPlatform::new(),
             coretemp,
@@ -365,6 +367,16 @@ impl SystemSampleSources {
             power,
         })
     }
+}
+
+fn remaining_rediscovery_time(
+    files: &mut dyn BoundedIdentityBoundReadAccess,
+    deadline: Duration,
+) -> Result<Duration, StartupError> {
+    deadline
+        .checked_sub(files.read_deadline_now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| StartupError::Device("sensor rediscovery exceeded its deadline".into()))
 }
 
 impl SampleSources for SystemSampleSources {
@@ -431,7 +443,7 @@ pub struct SystemSensorSourceDiscovery<S = SystemSampleSources> {
 }
 
 type RediscoverSources<S> =
-    dyn FnMut(&mut dyn IdentityBoundReadAccess, Duration) -> Result<S, SampleSourceError>;
+    dyn FnMut(&mut dyn BoundedIdentityBoundReadAccess, Duration) -> Result<S, SampleSourceError>;
 
 struct DeadlineReadAccess<'a> {
     files: &'a mut dyn BoundedIdentityBoundReadAccess,
@@ -572,7 +584,7 @@ impl<S> SystemSensorSourceDiscovery<S> {
     #[cfg(feature = "acceptance-fixture")]
     pub(crate) fn injected(
         rediscover: impl FnMut(
-            &mut dyn IdentityBoundReadAccess,
+            &mut dyn BoundedIdentityBoundReadAccess,
             Duration,
         ) -> Result<S, SampleSourceError>
         + 'static,
@@ -594,10 +606,7 @@ where
         files: &mut dyn BoundedIdentityBoundReadAccess,
         deadline: Duration,
     ) -> Result<Self::Sources, SampleSourceError> {
-        (self.rediscover)(
-            &mut DeadlineReadAccess { files, deadline },
-            SENSOR_REDISCOVERY_WINDOW,
-        )
+        (self.rediscover)(files, deadline)
     }
 }
 
@@ -2693,6 +2702,26 @@ mod tests {
 
         let error = access.read(path).unwrap_err();
         assert_eq!(error.kind(), PlatformErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn nvidia_rediscovery_gets_only_the_budget_left_after_filesystem_discovery() {
+        let path = Path::new("/sys/class/hwmon/hwmon47/name");
+        let mut platform = FakePlatform::new();
+        platform.insert_file(path, "coretemp\n");
+        platform.queue_file_steps([FakeStep::Advance(Duration::from_millis(750))]);
+        let deadline = Duration::from_secs(1);
+        DeadlineReadAccess {
+            files: &mut platform,
+            deadline,
+        }
+        .read(path)
+        .unwrap();
+
+        assert_eq!(
+            remaining_rediscovery_time(&mut platform, deadline).unwrap(),
+            Duration::from_millis(250)
+        );
     }
 
     #[test]
