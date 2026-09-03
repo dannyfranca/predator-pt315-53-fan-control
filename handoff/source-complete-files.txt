@@ -57,6 +57,7 @@ crates/fan-control-core/src/tachometer.rs
 crates/fan-control-core/src/termination.rs
 crates/fan-control-core/src/validation.rs
 crates/fan-control-core/tests/acer_hwmon_discovery.rs
+crates/fan-control-core/tests/candidate_declarations.rs
 crates/fan-control-core/tests/compatibility_admission.rs
 crates/fan-control-core/tests/config_parse.rs
 crates/fan-control-core/tests/config_validation.rs
@@ -154,14 +155,17 @@ qualification/workloads/cpu
 qualification/workloads/gpu
 qualification/workloads/idle
 qualification/workloads/mixed
+schemas/candidate-identity-v1.json
 schemas/evidence-v2.json
 schemas/evidence.json
 schemas/package-provenance-v1.json
 schemas/promotion-manifest.json
 schemas/qualification-record.json
+scripts/build-source-candidate
 scripts/check-promotion
 scripts/check-repository-policy
 scripts/check-sensitive-history
+scripts/generate-candidate-declarations
 scripts/redact-evidence
 scripts/verify-package-provenance
 scripts/verify-source-complete-handoff
