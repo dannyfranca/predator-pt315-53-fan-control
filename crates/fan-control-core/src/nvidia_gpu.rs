@@ -241,6 +241,10 @@ fn normalize_uuid(value: &str) -> Option<String> {
     Some(format!("GPU-{}", body.to_ascii_lowercase()))
 }
 
+pub(crate) fn is_nvidia_gpu_uuid(value: &str) -> bool {
+    normalize_uuid(value).is_some()
+}
+
 fn normalize_pci_bus_id(value: &str) -> Option<String> {
     let (slot, function) = value.split_once('.')?;
     if function.len() != 1 || !function.bytes().all(|byte| byte.is_ascii_hexdigit()) {

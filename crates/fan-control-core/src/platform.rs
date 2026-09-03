@@ -109,9 +109,16 @@ fn validate_owned_protected_file(
         let metadata = fs::symlink_metadata(&current).map_err(|error| {
             io_platform_error(&format!("cannot inspect {}", current.display()), error)
         })?;
+        let has_extended_acl = path_has_extended_acl(&current).map_err(|error| {
+            io_platform_error(
+                &format!("cannot inspect ACL for {}", current.display()),
+                error,
+            )
+        })?;
         if metadata.file_type().is_symlink()
             || (metadata.uid() != 0 && metadata.uid() != required_owner)
             || metadata.permissions().mode() & 0o022 != 0
+            || has_extended_acl
         {
             return Err(PlatformError::new(
                 PlatformErrorKind::PermissionDenied,
@@ -136,6 +143,36 @@ fn validate_owned_protected_file(
         ));
     }
     Ok(())
+}
+
+pub fn path_has_extended_acl(path: &Path) -> io::Result<bool> {
+    let path_name = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path contains an interior NUL: {}", path.display()),
+        )
+    })?;
+    for acl_name in [c"system.posix_acl_access", c"system.posix_acl_default"] {
+        // SAFETY: both C strings are NUL-terminated and the null buffer with length zero only
+        // queries the attribute size. lgetxattr deliberately does not follow a final symlink.
+        let result = unsafe {
+            libc::lgetxattr(
+                path_name.as_ptr(),
+                acl_name.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if result >= 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if !matches!(error.raw_os_error(), Some(code) if code == libc::ENODATA || code == libc::ENOTSUP)
+        {
+            return Err(error);
+        }
+    }
+    Ok(false)
 }
 
 fn verify_supervised_endurance_evidence_source(
@@ -201,6 +238,31 @@ pub trait IdentityBoundFileAccess: FileAccess {
         child: &str,
     ) -> Result<String, PlatformError>;
 
+    /// Reads one direct child while atomically binding both directory and child identities.
+    fn read_child_bound(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+    ) -> Result<String, PlatformError> {
+        let path = direct_bound_child(directory, child)?;
+        if self.identity(&path)? != expected_child {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("endpoint identity changed: {}", path.display()),
+            ));
+        }
+        let value = self.read_bound(directory, expected_directory, child)?;
+        if self.identity(&path)? != expected_child {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("endpoint identity changed: {}", path.display()),
+            ));
+        }
+        Ok(value)
+    }
+
     /// Lists direct children while atomically binding the listing to the expected identity.
     fn list_bound(
         &mut self,
@@ -219,12 +281,64 @@ pub trait IdentityBoundReadAccess {
 
     fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError>;
 
+    fn permissions_child_bound(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+    ) -> Result<FilePermissions, PlatformError> {
+        let path = direct_bound_child(directory, child)?;
+        if self.identity(directory)? != expected_directory
+            || self.identity(&path)? != expected_child
+        {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("endpoint identity changed: {}", path.display()),
+            ));
+        }
+        let permissions = self.permissions(&path)?;
+        if self.identity(directory)? != expected_directory
+            || self.identity(&path)? != expected_child
+        {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("endpoint identity changed: {}", path.display()),
+            ));
+        }
+        Ok(permissions)
+    }
+
     fn read_bound(
         &mut self,
         directory: &Path,
         expected: FileIdentity,
         child: &str,
     ) -> Result<String, PlatformError>;
+
+    fn read_child_bound(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+    ) -> Result<String, PlatformError> {
+        let path = direct_bound_child(directory, child)?;
+        if self.identity(&path)? != expected_child {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("endpoint identity changed: {}", path.display()),
+            ));
+        }
+        let value = self.read_bound(directory, expected_directory, child)?;
+        if self.identity(&path)? != expected_child {
+            return Err(PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("endpoint identity changed: {}", path.display()),
+            ));
+        }
+        Ok(value)
+    }
 
     fn list_bound(
         &mut self,
@@ -260,6 +374,22 @@ where
         child: &str,
     ) -> Result<String, PlatformError> {
         IdentityBoundFileAccess::read_bound(self, directory, expected, child)
+    }
+
+    fn read_child_bound(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+    ) -> Result<String, PlatformError> {
+        IdentityBoundFileAccess::read_child_bound(
+            self,
+            directory,
+            expected_directory,
+            child,
+            expected_child,
+        )
     }
 
     fn list_bound(
@@ -362,10 +492,20 @@ fn direct_bound_child(directory: &Path, child: &str) -> Result<PathBuf, Platform
     Ok(directory.join(child))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct FilePermissions {
     mode: u32,
+    extended_acl: bool,
+    owner_uid: u32,
 }
+
+impl PartialEq for FilePermissions {
+    fn eq(&self, other: &Self) -> bool {
+        self.mode == other.mode && self.extended_acl == other.extended_acl
+    }
+}
+
+impl Eq for FilePermissions {}
 
 impl FilePermissions {
     pub const NONE: Self = Self::from_mode(0o000);
@@ -376,7 +516,19 @@ impl FilePermissions {
     pub const fn from_mode(mode: u32) -> Self {
         Self {
             mode: mode & 0o7777,
+            extended_acl: false,
+            owner_uid: 0,
         }
+    }
+
+    pub const fn with_extended_acl(mut self) -> Self {
+        self.extended_acl = true;
+        self
+    }
+
+    pub const fn with_owner_uid(mut self, owner_uid: u32) -> Self {
+        self.owner_uid = owner_uid;
+        self
     }
 
     pub const fn mode(self) -> u32 {
@@ -389,6 +541,14 @@ impl FilePermissions {
 
     pub const fn writable(self) -> bool {
         self.mode & 0o222 != 0
+    }
+
+    pub const fn has_extended_acl(self) -> bool {
+        self.extended_acl
+    }
+
+    pub const fn owner_uid(self) -> u32 {
+        self.owner_uid
     }
 }
 
@@ -609,9 +769,15 @@ impl FileAccess for SystemOwnershipPlatform {
     }
 
     fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
-        Ok(FilePermissions::from_mode(
-            Self::metadata(path)?.permissions().mode(),
-        ))
+        let metadata = Self::metadata(path)?;
+        let mut permissions = FilePermissions::from_mode(metadata.permissions().mode())
+            .with_owner_uid(metadata.uid());
+        if path_has_extended_acl(path).map_err(|error| {
+            io_platform_error(&format!("cannot inspect ACL for {}", path.display()), error)
+        })? {
+            permissions = permissions.with_extended_acl();
+        }
+        Ok(permissions)
     }
 }
 
@@ -682,6 +848,24 @@ impl IdentityBoundFileAccess for SystemOwnershipPlatform {
         let path = direct_bound_child(directory, child)?;
         let directory_handle = open_directory_bound(directory, expected)?;
         let mut file = open_direct_child(&directory_handle, &path, libc::O_RDONLY)?;
+        let mut value = String::new();
+        file.read_to_string(&mut value).map_err(|error| {
+            io_platform_error(&format!("cannot read {}", path.display()), error)
+        })?;
+        Ok(value)
+    }
+
+    fn read_child_bound(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+    ) -> Result<String, PlatformError> {
+        let path = direct_bound_child(directory, child)?;
+        let directory_handle = open_directory_bound(directory, expected_directory)?;
+        let mut file = open_direct_child(&directory_handle, &path, libc::O_RDONLY)?;
+        require_open_file_identity(&file, &path, expected_child)?;
         let mut value = String::new();
         file.read_to_string(&mut value).map_err(|error| {
             io_platform_error(&format!("cannot read {}", path.display()), error)
@@ -845,7 +1029,10 @@ impl BoundedIdentityBoundFileAccess for SystemOwnershipPlatform {
         let file = open_direct_child(&directory_handle, &path, libc::O_RDONLY | libc::O_NONBLOCK)?;
         let metadata = require_open_file_identity(&file, &path, expected_child)?;
         self.require_deadline(deadline, &path, "bound permissions")?;
-        Ok(FilePermissions::from_mode(metadata.permissions().mode()))
+        Ok(
+            FilePermissions::from_mode(metadata.permissions().mode())
+                .with_owner_uid(metadata.uid()),
+        )
     }
 
     fn write_bound_if_before(
@@ -1848,6 +2035,20 @@ impl IdentityBoundFileAccess for FakePlatform {
         self.read_file(&path)
     }
 
+    fn read_child_bound(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+    ) -> Result<String, PlatformError> {
+        let path = direct_bound_child(directory, child)?;
+        self.operations.push(PlatformOperation::Read(path.clone()));
+        self.apply_next_file_step()?;
+        self.require_bound_identities(directory, expected_directory, &path, expected_child)?;
+        self.read_file(&path)
+    }
+
     fn list_bound(
         &mut self,
         directory: &Path,
@@ -2464,6 +2665,61 @@ mod tests {
         ));
 
         fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn production_acl_probe_rejects_default_directory_acls() {
+        let directory = env::current_dir().unwrap().join("target").join(format!(
+            "fan-control-default-acl-check-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("qualification-harness");
+        fs::write(&executable, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let owner = unsafe { libc::geteuid() };
+        let path = CString::new(directory.as_os_str().as_bytes()).unwrap();
+        // Linux POSIX ACL xattr: version 2 plus owner/group/other entries.
+        let acl: [u8; 28] = [
+            2, 0, 0, 0, // version
+            1, 0, 7, 0, 255, 255, 255, 255, // user::rwx
+            4, 0, 5, 0, 255, 255, 255, 255, // group::r-x
+            32, 0, 5, 0, 255, 255, 255, 255, // other::r-x
+        ];
+        // SAFETY: path and attribute name are NUL-terminated; acl is valid for its byte length.
+        let result = unsafe {
+            libc::setxattr(
+                path.as_ptr(),
+                c"system.posix_acl_default".as_ptr(),
+                acl.as_ptr().cast(),
+                acl.len(),
+                0,
+            )
+        };
+        assert_eq!(
+            result,
+            0,
+            "cannot create default ACL: {}",
+            io::Error::last_os_error()
+        );
+
+        assert!(path_has_extended_acl(&directory).unwrap());
+        assert!(matches!(
+            validate_owned_protected_file(
+                &executable,
+                ProtectedFileRequirement::Executable,
+                owner,
+            ),
+            Err(error) if error.kind() == PlatformErrorKind::PermissionDenied
+        ));
+        let mut platform = SystemOwnershipPlatform::new();
+        assert!(
+            FileAccess::permissions(&mut platform, &directory)
+                .unwrap()
+                .has_extended_acl()
+        );
+
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

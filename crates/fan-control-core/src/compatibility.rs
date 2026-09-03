@@ -113,19 +113,22 @@ pub enum EscapeHatchCapability {
     AlternateFanWriteBackend,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum EvidenceCompleteness {
     Complete,
     Incomplete,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservedFanAbi {
     pub hwmon_name: String,
     pub endpoints: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompatibilityObservation {
     pub hardware: HardwareIdentity,
     pub kernel: KernelIdentity,

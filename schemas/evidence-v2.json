@@ -36,6 +36,22 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "preflight_binding_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nvidia_gpu_uuid": {
+      "type": "string",
+      "pattern": "^GPU-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    },
+    "fan_endpoint_identities": { "$ref": "#/$defs/fanEndpointIdentities" },
+    "firmware_auto_cleanup": { "$ref": "#/$defs/firmwareAutoCleanup" },
+    "preflight_checks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": { "$ref": "#/$defs/preflightCheck" }
+    },
     "workload": {
       "anyOf": [
         { "$ref": "#/$defs/workload" },
@@ -203,6 +219,88 @@
           }
         },
         "not": { "required": ["live_lifecycle_cases"] }
+      }
+    },
+    {
+      "if": {
+        "properties": { "stage": { "const": "preflight" } },
+        "required": ["stage"]
+      },
+      "then": {
+        "oneOf": [
+          {
+            "properties": {
+              "preflight_checks": {
+                "minItems": 12,
+                "maxItems": 12,
+                "allOf": [
+                  { "contains": { "properties": { "check": { "const": "platform" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "trust" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "fan-abi" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "sensors" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "configuration" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "policy" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "recovery" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "stock-boot-fallback" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "tooling" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "disk-space" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "competing-services" } }, "required": ["check"] } },
+                  { "contains": { "properties": { "check": { "const": "firmware-auto" } }, "required": ["check"] } }
+                ]
+              }
+            },
+            "allOf": [{
+              "if": {
+                "properties": {
+                  "outcome": {
+                    "properties": { "status": { "const": "failed" } },
+                    "required": ["status"]
+                  }
+                },
+                "required": ["outcome"]
+              },
+              "then": {
+                "properties": {
+                  "preflight_checks": {
+                    "contains": {
+                      "properties": { "passed": { "const": false } },
+                      "required": ["passed"]
+                    }
+                  },
+                  "faults": { "minItems": 1 }
+                }
+              },
+              "else": {
+                "properties": {
+                  "preflight_checks": {
+                    "items": {
+                      "properties": { "passed": { "const": true } },
+                      "required": ["passed"]
+                    }
+                  }
+                }
+              }
+            }]
+          },
+          {
+            "properties": {
+              "faults": { "minItems": 1 },
+              "preflight_checks": {
+                "minItems": 1,
+                "maxItems": 1,
+                "items": {
+                  "properties": {
+                    "check": { "const": "evidence-collection" },
+                    "passed": { "const": false }
+                  }
+                }
+              },
+              "outcome": {
+                "properties": { "status": { "const": "failed" } }
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -408,6 +506,115 @@
     },
     {
       "if": {
+        "properties": { "stage": { "const": "firmware-auto-baseline" } },
+        "required": ["stage"]
+      },
+      "then": { "required": ["preflight_binding_sha256"] },
+      "else": {
+        "allOf": [
+          { "not": { "required": ["preflight_binding_sha256"] } },
+          { "not": { "required": ["firmware_auto_cleanup"] } }
+        ]
+      }
+    },
+    {
+      "if": {
+        "anyOf": [
+          {
+            "properties": { "stage": { "const": "firmware-auto-baseline" } },
+            "required": ["stage"]
+          },
+          {
+            "properties": {
+              "stage": { "const": "preflight" },
+              "outcome": {
+                "properties": { "status": { "const": "passed" } },
+                "required": ["status"]
+              }
+            },
+            "required": ["stage", "outcome"]
+          }
+        ]
+      },
+      "then": { "required": ["nvidia_gpu_uuid"] }
+    },
+    {
+      "if": {
+        "properties": { "stage": { "enum": ["preflight", "firmware-auto-baseline"] } },
+        "required": ["stage"]
+      },
+      "then": {},
+      "else": { "not": { "required": ["nvidia_gpu_uuid"] } }
+    },
+    {
+      "if": {
+        "properties": { "stage": { "enum": ["preflight", "firmware-auto-baseline"] } },
+        "required": ["stage"]
+      },
+      "then": {},
+      "else": {
+        "allOf": [
+          { "not": { "required": ["fan_endpoint_identities"] } }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": { "stage": { "const": "preflight" } },
+        "required": ["stage"]
+      },
+      "then": { "required": ["preflight_checks"] },
+      "else": { "not": { "required": ["preflight_checks"] } }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": { "const": "preflight" },
+          "outcome": {
+            "properties": { "status": { "const": "passed" } },
+            "required": ["status"]
+          }
+        },
+        "required": ["stage", "outcome"]
+      },
+      "then": { "required": ["fan_endpoint_identities"] }
+    },
+    {
+      "if": {
+        "properties": { "stage": { "const": "firmware-auto-baseline" } },
+        "required": ["stage"]
+      },
+      "then": { "required": ["fan_endpoint_identities"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": { "const": "firmware-auto-baseline" },
+          "outcome": {
+            "properties": { "status": { "const": "passed" } },
+            "required": ["status"]
+          }
+        },
+        "required": ["stage", "outcome"]
+      },
+      "then": {
+        "required": ["firmware_auto_cleanup"],
+        "properties": {
+          "firmware_auto_cleanup": {
+            "properties": {
+              "workload_stop_confirmed_at": { "$ref": "#/$defs/timestamp" },
+              "containment_required": { "const": false },
+              "containment_confirmed": { "const": false },
+              "containment_confirmed_at": { "type": "null" },
+              "cleanup_completed_at": { "$ref": "#/$defs/timestamp" },
+              "fan_control_write_count": { "const": 0 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
         "properties": {
           "stage": { "const": "matched-workload" },
           "outcome": {
@@ -485,12 +692,9 @@
             "properties": {
               "stage": { "const": "preflight" },
               "samples": {
-                "minItems": 1,
-                "contains": {
-                  "properties": { "freshness": { "const": "fresh" } },
-                  "required": ["freshness"]
-                }
+                "maxItems": 0
               },
+              "preflight_checks": { "minItems": 12, "maxItems": 12 },
               "workload": { "type": "null" },
               "thermal_summary": { "type": "null" },
               "commands": { "maxItems": 0 },
@@ -509,21 +713,37 @@
             "properties": {
               "stage": { "const": "firmware-auto-baseline" },
               "samples": {
-                "minItems": 1,
+                "minItems": 2,
+                "items": {
+                  "required": ["cpu_utilization_basis_points", "gpu_utilization_basis_points"],
+                  "properties": {
+                    "freshness": { "const": "fresh" },
+                    "cpu_utilization_basis_points": { "$ref": "#/$defs/basisPoints" },
+                    "gpu_utilization_basis_points": { "$ref": "#/$defs/basisPoints" }
+                  }
+                },
                 "contains": {
                   "properties": { "freshness": { "const": "fresh" } },
                   "required": ["freshness"]
-                }
+                },
+                "minContains": 2
               },
               "workload": { "$ref": "#/$defs/workload" },
               "thermal_summary": { "$ref": "#/$defs/thermalSummary" },
               "commands": { "maxItems": 0 },
               "state_transitions": { "maxItems": 0 },
               "restoration_attempts": { "maxItems": 0 },
+              "faults": { "maxItems": 0 },
               "readbacks": {
+                "description": "Structural minimums for passed baselines. Exact one enable and RPM readback per fan per sample is enforced by semantic evidence validation because JSON Schema cannot correlate sibling array lengths.",
+                "minItems": 16,
                 "allOf": [
                   { "contains": { "$ref": "#/$defs/cpuFirmwareAutoReadback" } },
-                  { "contains": { "$ref": "#/$defs/gpuFirmwareAutoReadback" } }
+                  { "contains": { "$ref": "#/$defs/gpuFirmwareAutoReadback" } },
+                  { "contains": { "properties": { "fan": { "const": "cpu" }, "field": { "const": "enable" }, "phase": { "const": "sample" }, "value": { "const": 2 }, "outcome": { "const": "confirmed" } }, "required": ["fan", "field", "phase", "value", "outcome"] }, "minContains": 2 },
+                  { "contains": { "properties": { "fan": { "const": "gpu" }, "field": { "const": "enable" }, "phase": { "const": "sample" }, "value": { "const": 2 }, "outcome": { "const": "confirmed" } }, "required": ["fan", "field", "phase", "value", "outcome"] }, "minContains": 2 },
+                  { "contains": { "properties": { "fan": { "const": "cpu" }, "field": { "const": "rpm" }, "phase": { "const": "sample" }, "outcome": { "const": "confirmed" } }, "required": ["fan", "field", "phase", "outcome"] }, "minContains": 2 },
+                  { "contains": { "properties": { "fan": { "const": "gpu" }, "field": { "const": "rpm" }, "phase": { "const": "sample" }, "outcome": { "const": "confirmed" } }, "required": ["fan", "field", "phase", "outcome"] }, "minContains": 2 }
                 ]
               }
             }
@@ -1144,6 +1364,17 @@
       "properties": {
         "monotonic_millis": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
         "wall_unix_millis": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 }
+      }
+    },
+    "preflightCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "check", "passed", "detail"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "check": { "$ref": "#/$defs/identifier" },
+        "passed": { "type": "boolean" },
+        "detail": { "type": "string", "minLength": 1 }
       }
     },
     "qualificationEnvelope": {
@@ -1784,6 +2015,45 @@
         "system_stable": { "type": "boolean" },
         "kernel_faults": { "type": "array", "items": { "type": "string" } },
         "nvidia_faults": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "firmwareAutoCleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workload_stop_requested_at", "workload_stop_confirmed_at", "containment_required", "containment_confirmed", "containment_confirmed_at", "cleanup_completed_at", "fan_control_write_count"],
+      "properties": {
+        "workload_stop_requested_at": { "$ref": "#/$defs/timestamp" },
+        "workload_stop_confirmed_at": {
+          "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+        },
+        "containment_required": { "type": "boolean" },
+        "containment_confirmed": { "type": "boolean" },
+        "containment_confirmed_at": {
+          "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+        },
+        "cleanup_completed_at": {
+          "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+        },
+        "fan_control_write_count": {
+          "anyOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "fanEndpointIdentities": {
+      "type": "object",
+      "description": "Six distinct endpoint identities; cross-property distinctness is enforced by semantic evidence validation.",
+      "additionalProperties": false,
+      "required": ["cpu_pwm", "cpu_enable", "cpu_tachometer", "gpu_pwm", "gpu_enable", "gpu_tachometer"],
+      "properties": {
+        "cpu_pwm": { "$ref": "#/$defs/identifier" },
+        "cpu_enable": { "$ref": "#/$defs/identifier" },
+        "cpu_tachometer": { "$ref": "#/$defs/identifier" },
+        "gpu_pwm": { "$ref": "#/$defs/identifier" },
+        "gpu_enable": { "$ref": "#/$defs/identifier" },
+        "gpu_tachometer": { "$ref": "#/$defs/identifier" }
       }
     },
     "enduranceThermalEnvelope": {

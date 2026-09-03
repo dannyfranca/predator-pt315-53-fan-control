@@ -110,7 +110,10 @@ crates/fan-control-core/tests/status_build_install_runbook.rs
 crates/fan-control-core/tests/supervised_endurance.rs
 crates/fan-control-core/tests/support/mod.rs
 crates/fan-control-daemon/Cargo.toml
+crates/fan-control-daemon/src/lib.rs
 crates/fan-control-daemon/src/main.rs
+crates/fan-control-daemon/src/system.rs
+crates/fan-control-daemon/tests/qualified_startup.rs
 crates/fan-control-daemon/tests/service_supervision.rs
 crates/fan-control-daemon/tests/sleep_guard.rs
 crates/fan-control-daemon/tests/startup.rs
@@ -118,6 +121,7 @@ crates/fan-control-qualify/Cargo.toml
 crates/fan-control-qualify/src/lib.rs
 crates/fan-control-qualify/src/main.rs
 crates/fan-control-qualify/tests/promotion.rs
+crates/fan-control-qualify/tests/qualification_stages.rs
 crates/fan-control-qualify/tests/startup.rs
 crates/fan-control-qualify/tests/validate_records.rs
 crates/fan-control-restore/Cargo.toml
@@ -145,6 +149,7 @@ packaging/kernel/trust/cachyos-release-key.gpg
 policy/README.md
 policy/qualified-envelope.example.toml
 qualification/evidence-example/evidence-v1.json
+qualification/preflight-baseline-harness.md
 qualification/supervised-endurance-harness.md
 qualification/supervised-endurance-v2.json.gz
 qualification/workloads/README.md
