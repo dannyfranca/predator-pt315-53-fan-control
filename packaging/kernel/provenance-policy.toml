@@ -5,14 +5,10 @@ kernel_release = "7.1.8-cachyos-pt31553"
 module_vermagic = "7.1.8-cachyos-pt31553 SMP preempt mod_unload"
 kernel_source_commit = "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
 nvidia_source_version = "610.57.04"
-# Unqualified source placeholders. Replace these with distinct DER certificate
-# fingerprints when qualifying a build; the verifier rejects placeholders and
-# signer reuse because private keys remain external and role-specific.
-package_signer_sha256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-module_signer_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
-# SHA-256 of the reviewed DER-encoded CN=Database Key certificate enrolled in
-# this PT315-53 firmware db. Its external private key signs only the EFI image.
-kernel_image_signer_sha256 = "1c549f6b61cc97b1673e9a73b974b63160bea16357be93a533d93382086f17bc"
+# Signer identities are build outputs, not committed authority. The offline
+# verifier requires explicit expected DER fingerprints, verifies three
+# distinct public certificates, and records their actual identities in the
+# generated unqualified candidate declaration.
 kernel_image_path = "usr/lib/modules/7.1.8-cachyos-pt31553/vmlinuz"
 kernel_config_path = "usr/lib/modules/7.1.8-cachyos-pt31553/build/.config"
 module_trust_certificate_path = "usr/lib/modules/7.1.8-cachyos-pt31553/build/certs/signing_key.x509"

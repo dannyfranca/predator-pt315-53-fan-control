@@ -8,7 +8,9 @@ use native_journal::{assert_no_native_event, journal_receiver, receive_native_ev
 fn daemon_reports_that_custom_control_is_unavailable() {
     let (receiver, socket_path) = journal_receiver("daemon-status");
     let output = Command::new(env!("CARGO_BIN_EXE_fan-control-daemon"))
+        .arg("--status")
         .env("PT31553_TEST_JOURNALD_SOCKET", &socket_path)
+        .env("NOTIFY_SOCKET", "relative-path-is-invalid")
         .output()
         .expect("daemon executable should start");
 

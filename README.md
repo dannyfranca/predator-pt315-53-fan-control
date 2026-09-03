@@ -155,6 +155,18 @@ test -z "$(git status --porcelain=v1 --untracked-files=all)"
 cargo fetch --locked
 cargo deny fetch
 CARGO_NET_OFFLINE=true scripts/check-repository-policy
+controller_source_revision=$(/usr/bin/sed -n \
+  "s/^_commit='\([0-9a-f]\{40\}\)'$/\1/p" packaging/controller/PKGBUILD)
+test "${#controller_source_revision}" -eq 40
+controller_source_checkout="$source_parent/controller-source"
+controller_cargo_home=/secure/controller-cargo-home
+test ! -e "$controller_source_checkout"
+/usr/bin/install -d -m 0700 "$controller_cargo_home"
+git worktree add --detach "$controller_source_checkout" "$controller_source_revision"
+CARGO_HOME="$controller_cargo_home" cargo fetch --locked \
+  --manifest-path "$controller_source_checkout/Cargo.toml" \
+  --target x86_64-unknown-linux-gnu
+git worktree remove "$controller_source_checkout"
 ```
 
 That policy command runs formatting, linting, all simulated unit/integration
@@ -175,127 +187,194 @@ repository policy above. It checks both the source tree and revision again
 afterward. Success is reported only as **Source-complete handoff**. It is not
 hardware qualification, Custom-control authorization, or artifact promotion.
 
-Build the signed controller package from its pinned recipe in a separate clean
-directory. The runbook checkout and packaged controller are distinct reviewed
-identities: the recipe pins the controller source archive, while the runbook
-may be newer. Record and explicitly confirm both; never imply that the package
-contains the runbook checkout. The signing key must already be
-operator-controlled and trusted by the local pacman keyring; keep private keys
-outside the source and output trees. Invoke Bash explicitly because `makepkg`
-and `mapfile` are Bash interfaces:
-
-```sh
-/usr/bin/bash -eu <<'RUNBOOK_CONTROLLER'
-controller_source_revision='REPLACE_WITH_REVIEWED_CONTROLLER_SOURCE_COMMIT'
-controller_recipe="$PWD/packaging/controller"
-controller_build=/absolute/path/to/new-controller-build
-controller_signer='REPLACE_WITH_CONTROLLER_SIGNING_KEY_FINGERPRINT'
-case "$controller_source_revision" in REPLACE_*|*[!0-9a-f]*) exit 1 ;; esac
-test "${#controller_source_revision}" -eq 40
-case "$controller_signer" in REPLACE_*|'') exit 1 ;; esac
-case "$controller_build" in /absolute/path/*|'') exit 1 ;; esac
-recipe_revision=$(/usr/bin/sed -n \
-  "s/^_commit='\([0-9a-f]\{40\}\)'$/\1/p" \
-  "$controller_recipe/PKGBUILD")
-test "${#recipe_revision}" -eq 40
-test "$recipe_revision" = "$controller_source_revision"
-test ! -e "$controller_build"
-/usr/bin/install -d -m 0700 "$controller_build"
-/usr/bin/cp -a "$controller_recipe/." "$controller_build/"
-cd "$controller_build"
-mapfile -t controller_packages < <(makepkg --packagelist)
-test "${#controller_packages[@]}" -eq 1
-controller_package=${controller_packages[0]}
-makepkg --cleanbuild --noconfirm --syncdeps --sign --key "$controller_signer"
-test -f "$controller_package"
-test -f "$controller_package.sig"
-/usr/bin/pacman-key --verify "$controller_package.sig" "$controller_package"
-controller_package_sha256=$(/usr/bin/sha256sum "$controller_package" | \
-  /usr/bin/awk '{print $1}')
-controller_package_identity=$(/usr/bin/pacman -Qp "$controller_package")
-/usr/bin/printf 'controller_package=%s\ncontroller_package_sha256=%s\ncontroller_package_identity=%s\n' \
-  "$controller_package" "$controller_package_sha256" "$controller_package_identity"
-RUNBOOK_CONTROLLER
-```
-
-Retain the three printed values together. Use that exact absolute package path,
-SHA-256, and pacman identity in step 4; a valid signature on any other package
-is insufficient.
-
-For the kernel, first use a reviewed, committed signer-enrollment revision in
-which `packaging/kernel/provenance-policy.toml`,
-`schemas/package-provenance-v1.json`, and `compatibility/pt315-53.toml` all
-replace their policy-bound all-zero/all-`f` package, module, image, and signer
-placeholders with the same reviewed public identities supplied below. This is
-one coordinated change; do not edit a checkout in place. Review and commit the
-enrollment, then begin again from its clean revision at step 3. Until that
-prerequisite exists, the provenance verifier is expected to fail and no
-candidate may be installed.
-
-From that clean revision, assemble `/bundle` exactly as specified in
-[`packaging/kernel/README.md`](packaging/kernel/README.md), keep signing inputs
-outside it, and run only the authenticated wrapper into a new empty output:
+Assemble `/bundle` exactly as specified in
+[`packaging/kernel/README.md`](packaging/kernel/README.md). Keep all signing
+keys and machine trust outside the repository, bundle, and output. From this
+clean revision, build the kernel, headers, matching NVIDIA modules, and
+controller as one coherent source candidate. Supply independently reviewed
+certificate fingerprints; never calculate the expected values from the
+certificate files being verified. Preseed the locked Cargo dependencies—the
+controller build is offline and does not install missing dependencies:
 
 ```sh
 set -eu
 source_root=$PWD
-test -x "$source_root/scripts/verify-source-lock"
-test -x "$source_root/scripts/verify-package-provenance"
-cd "$source_root"
 test -d /bundle
-test ! -e "$PWD/build-output"
-/usr/bin/install -d -m 0700 "$PWD/build-output"
-SOURCE_LOCK_SIGNING_DIR=/secure/signing \
-SOURCE_LOCK_OUTPUT="$PWD/build-output" \
-  scripts/verify-source-lock --inputs /bundle --exec-verified
-
-package_manifest_signature=/secure/public/package-set.p7s
-test ! -e "$package_manifest_signature"
-/usr/bin/openssl cms -sign -binary \
-  -in "$PWD/build-output/SHA256SUMS" \
-  -signer /secure/public/package-signing-certificate.pem \
-  -inkey /secure/private/package-signing-key.pem \
-  -outform DER -out "$package_manifest_signature" \
-  -nocerts -noattr -md sha256
-test -s "$package_manifest_signature"
-
-scripts/verify-package-provenance \
-  --artifacts "$PWD/build-output" \
-  --module-cert /secure/signing/module-signing-certificate.der \
-  --module-cert-sha256 REPLACE_WITH_MODULE_CERT_SHA256 \
+candidate_output=/absolute/path/to/new-source-candidate
+test ! -e "$candidate_output"
+scripts/build-source-candidate \
+  --bundle /bundle \
+  --kernel-signing-dir /secure/signing \
   --package-cert /secure/public/package-signing-certificate.pem \
-  --package-cert-sha256 REPLACE_WITH_PACKAGE_CERT_SHA256 \
+  --package-cert-sha256 REPLACE_WITH_APPROVED_PACKAGE_CERT_SHA256 \
+  --package-key /secure/private/package-signing-key.pem \
+  --module-cert-sha256 REPLACE_WITH_APPROVED_MODULE_CERT_SHA256 \
   --kernel-cert /secure/public/enrolled-image-signing-certificate.pem \
-  --kernel-cert-sha256 REPLACE_WITH_IMAGE_CERT_SHA256 \
-  --package-manifest-signature "$package_manifest_signature" \
-  --output "$PWD/package-provenance-v1.json"
+  --kernel-cert-sha256 REPLACE_WITH_APPROVED_IMAGE_CERT_SHA256 \
+  --cargo-home /secure/controller-cargo-home \
+  --controller-gnupg-home /secure/controller-gnupg \
+  --controller-key REPLACE_WITH_CONTROLLER_PRIMARY_KEY_FINGERPRINT \
+  --output "$candidate_output"
 ```
 
-The source-lock wrapper builds exactly the uniquely named kernel, headers, and
-NVIDIA-open packages. The provenance verifier must run offline after the
-package-set manifest has been signed as described in the kernel README.
+The command fails before publication for a dirty source revision, incomplete
+or inconsistent source lock/package set, any signature or hash mismatch,
+placeholder identity, reused signer, controller-package mismatch, unsafe
+output, or sensitive material. It archives the controller recipe's committed
+source-lock revision locally and runs Cargo offline. It never installs a package,
+changes a boot default, enables a unit, or invokes GitHub Actions.
+Unsafe inherited shell, loader, OpenSSL, Git, language, package-build, Cargo,
+or GnuPG environment overrides are rejected before signing.
+
+The new read-only output contains the three uniquely named kernel packages,
+the signed controller package, detached signatures, verified package
+provenance, generated compatibility declaration, and
+`candidate-identity-v1.json`. All hashes, signer fingerprints, source/build
+inputs, patched module, image, and package identities come from actual verified
+outputs. Every declaration remains explicitly **UNQUALIFIED** and
+`disabled-only` until the separate QA and promotion gates succeed.
 
 ### 4. Install the controller disabled
 
 Do this on the clean stock boot, before installing or booting the candidate
-kernel. Reverify the exact package, require that neither controller unit is
-already enabled or active, then install. Arch package installation does not
-start either unit; the shipped preset also says `disable` for both.
+kernel. First obtain the approved candidate-manifest SHA-256 and controller
+signer fingerprint from the independent review record outside the candidate
+directory. Reverify the exact package and its embedded bindings, require that
+neither controller unit is already enabled or active, then install. Arch package
+installation does not start either unit; the shipped preset also says `disable`
+for both.
 
 ```sh
 set -eu
-controller_package=/absolute/path/to/pt31553-fan-control.pkg.tar.zst
+candidate_output=/absolute/path/to/source-candidate
+approved_candidate_manifest_sha256=REPLACE_WITH_APPROVED_CANDIDATE_MANIFEST_SHA256
+approved_controller_signer_fingerprint=REPLACE_WITH_APPROVED_CONTROLLER_SIGNER_FINGERPRINT
+candidate_manifest="$candidate_output/declarations/candidate-identity-v1.json"
+candidate_provenance="$candidate_output/declarations/package-provenance-v1.json"
+candidate_compatibility="$candidate_output/declarations/compatibility.toml"
+test -f "$candidate_manifest"
+test ! -L "$candidate_manifest"
+test -f "$candidate_provenance"
+test ! -L "$candidate_provenance"
+test -f "$candidate_compatibility"
+test ! -L "$candidate_compatibility"
+printf '%s\n' "$approved_candidate_manifest_sha256" | \
+  /usr/bin/grep -Eq '^[0-9a-f]{64}$'
+test "$approved_candidate_manifest_sha256" != \
+  0000000000000000000000000000000000000000000000000000000000000000
+test "$approved_candidate_manifest_sha256" != \
+  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+printf '%s\n' "$approved_controller_signer_fingerprint" | \
+  /usr/bin/grep -Eq '^[0-9A-F]{40}$'
+test "$(/usr/bin/sha256sum "$candidate_manifest" | /usr/bin/awk '{print $1}')" = \
+  "$approved_candidate_manifest_sha256"
+controller_package=$(/usr/bin/find "$candidate_output/controller" \
+  -mindepth 1 -maxdepth 1 -type f -name '*.pkg.tar.zst' -print)
+test -n "$controller_package"
+test "$(/usr/bin/find "$candidate_output/controller" \
+  -mindepth 1 -maxdepth 1 -type f -name '*.pkg.tar.zst' | \
+  /usr/bin/wc -l)" -eq 1
 controller_signature="$controller_package.sig"
-controller_package_sha256='REPLACE_WITH_RECORDED_CONTROLLER_PACKAGE_SHA256'
-controller_package_identity='REPLACE_WITH_RECORDED_PACMAN_PACKAGE_IDENTITY'
-case "$controller_package_sha256" in REPLACE_*|*[!0-9a-f]*) exit 1 ;; esac
-test "${#controller_package_sha256}" -eq 64
-case "$controller_package_identity" in REPLACE_*|'') exit 1 ;; esac
+test -f "$controller_signature"
+test ! -L "$controller_signature"
+controller_package_sha256=$(/usr/bin/python3 -I - "$candidate_manifest" <<'PY'
+import json, pathlib, sys
+record = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+assert record["qualification_status"] == "unqualified"
+assert record["installation"] == {
+    "allowed_state": "disabled-only",
+    "candidate_default": False,
+    "recovery_kernel_package": "linux-cachyos-lts",
+}
+print(record["controller"]["package_sha256"])
+PY
+)
+controller_package_identity=$(/usr/bin/python3 -I - "$candidate_manifest" <<'PY'
+import json, pathlib, sys
+controller = json.loads(pathlib.Path(sys.argv[1]).read_bytes())["controller"]
+print(controller["name"], controller["version"])
+PY
+)
+controller_signature_sha256=$(/usr/bin/python3 -I - "$candidate_manifest" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_bytes())["controller"]["signature_sha256"])
+PY
+)
+controller_signer_fingerprint=$(/usr/bin/python3 -I - "$candidate_manifest" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_bytes())["controller"]["signer_fingerprint"])
+PY
+)
+controller_compatibility_sha256=$(/usr/bin/python3 -I - "$candidate_manifest" <<'PY'
+import json, pathlib, sys
+record = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+assert set(record) == {"schema_version", "qualification_status", "candidate", "controller", "kernel", "package_set", "installation"}
+assert record["schema_version"] == 1
+controller = record["controller"]
+assert set(controller) == {"name", "version", "architecture", "source_commit", "package_sha256", "signature_sha256", "signer_fingerprint", "compatibility_sha256"}
+print(controller["compatibility_sha256"])
+PY
+)
+controller_source_commit=$(/usr/bin/python3 -I - "$candidate_manifest" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_bytes())["controller"]["source_commit"])
+PY
+)
+candidate_provenance_sha256=$(/usr/bin/python3 -I - "$candidate_manifest" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_bytes())["package_set"]["provenance_sha256"])
+PY
+)
+test "$controller_signer_fingerprint" = \
+  "$approved_controller_signer_fingerprint"
+test "$(/usr/bin/sha256sum "$candidate_provenance" | /usr/bin/awk '{print $1}')" = \
+  "$candidate_provenance_sha256"
+test "$(/usr/bin/sha256sum "$candidate_compatibility" | /usr/bin/awk '{print $1}')" = \
+  "$controller_compatibility_sha256"
 test "$(/usr/bin/sha256sum "$controller_package" | /usr/bin/awk '{print $1}')" = \
   "$controller_package_sha256"
+test "$(/usr/bin/sha256sum "$controller_signature" | /usr/bin/awk '{print $1}')" = \
+  "$controller_signature_sha256"
 test "$(/usr/bin/pacman -Qp "$controller_package")" = \
   "$controller_package_identity"
 /usr/bin/pacman-key --verify "$controller_signature" "$controller_package"
+controller_status=$(/usr/bin/mktemp)
+trap '/usr/bin/rm -f -- "$controller_status"' EXIT HUP INT TERM
+LC_ALL=C /usr/bin/gpg --batch --no-options \
+  --homedir /etc/pacman.d/gnupg --status-fd 1 \
+  --verify "$controller_signature" "$controller_package" >"$controller_status"
+actual_controller_signer=$(/usr/bin/python3 -I - "$controller_status" <<'PY'
+import pathlib, re, sys
+matches = []
+for line in pathlib.Path(sys.argv[1]).read_text(encoding="ascii").splitlines():
+    fields = line.split()
+    if len(fields) >= 3 and fields[:2] == ["[GNUPG:]", "VALIDSIG"]:
+        values = [value for value in fields[2:] if re.fullmatch(r"[0-9A-F]{40}", value)]
+        if values:
+            matches.append(values[-1])
+assert len(matches) == 1
+print(matches[0])
+PY
+)
+test "$actual_controller_signer" = "$controller_signer_fingerprint"
+/usr/bin/rm -f -- "$controller_status"
+trap - EXIT HUP INT TERM
+controller_check=$(/usr/bin/mktemp -d)
+trap '/usr/bin/rm -rf -- "$controller_check"' EXIT HUP INT TERM
+/usr/bin/bsdtar -xOf "$controller_package" \
+  usr/lib/pt31553-fan-control/compatibility.toml \
+  >"$controller_check/compatibility.toml"
+/usr/bin/bsdtar -xOf "$controller_package" \
+  usr/share/pt31553-fan-control/source-commit \
+  >"$controller_check/source-commit"
+/usr/bin/cmp "$candidate_compatibility" "$controller_check/compatibility.toml"
+test "$(/usr/bin/sha256sum "$controller_check/compatibility.toml" | \
+  /usr/bin/awk '{print $1}')" = "$controller_compatibility_sha256"
+test "$(/usr/bin/sed -n '1p' "$controller_check/source-commit")" = \
+  "$controller_source_commit"
+test "$(/usr/bin/wc -l <"$controller_check/source-commit")" -eq 1
+/usr/bin/rm -rf -- "$controller_check"
+trap - EXIT HUP INT TERM
 ! /usr/bin/pgrep -x pt31553-fand >/dev/null
 for unit in pt31553-fand.service pt31553-fan-sleep-guard.service; do
   enabled_state=$(/usr/bin/systemctl is-enabled "$unit" 2>/dev/null || true)
@@ -490,9 +569,11 @@ replace either stock package:
 
 ```sh
 set -eu
-artifact_dir=/absolute/path/to/build-output
-provenance_record=/absolute/path/to/accepted-package-provenance-v1.json
-package_manifest_signature=/absolute/path/to/package-set-manifest.p7s
+candidate_output=/absolute/path/to/source-candidate
+candidate_manifest="$candidate_output/declarations/candidate-identity-v1.json"
+artifact_dir="$candidate_output/kernel"
+provenance_record="$candidate_output/declarations/package-provenance-v1.json"
+package_manifest_signature="$candidate_output/signatures/package-set.p7s"
 module_cert=/absolute/path/to/module-signing-certificate.der
 package_cert=/absolute/path/to/package-signing-certificate.pem
 kernel_cert=/absolute/path/to/enrolled-image-signing-certificate.pem
@@ -500,6 +581,24 @@ module_cert_sha256='REPLACE_WITH_MODULE_CERT_SHA256'
 package_cert_sha256='REPLACE_WITH_PACKAGE_CERT_SHA256'
 kernel_cert_sha256='REPLACE_WITH_KERNEL_CERT_SHA256'
 install_recheck_dir=/absolute/path/to/new-empty-install-recheck
+test -f "$candidate_manifest" && test ! -L "$candidate_manifest"
+test -f "$provenance_record" && test ! -L "$provenance_record"
+test -f "$package_manifest_signature" && test ! -L "$package_manifest_signature"
+/usr/bin/python3 -I - "$candidate_manifest" "$provenance_record" \
+  "$package_manifest_signature" <<'PY'
+import hashlib, json, pathlib, sys
+candidate = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+assert candidate["qualification_status"] == "unqualified"
+assert candidate["installation"] == {
+    "allowed_state": "disabled-only",
+    "candidate_default": False,
+    "recovery_kernel_package": "linux-cachyos-lts",
+}
+def digest(path):
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+assert candidate["package_set"]["provenance_sha256"] == digest(sys.argv[2])
+assert candidate["package_set"]["manifest_signature_sha256"] == digest(sys.argv[3])
+PY
 test "$(sudo /usr/bin/stat -c '%u:%a' /run/pt31553-stock-default-entry)" = 0:400
 default_entry=$(sudo /usr/bin/cat /run/pt31553-stock-default-entry)
 default_efi_variable=/sys/firmware/efi/efivars/LoaderEntryDefault-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
@@ -1273,13 +1372,13 @@ the exact candidate identity and environmental limits before stage 2. Start
 each following stage only after the preceding evidence is complete, protected,
 and accepted. At every handoff, repeat the Auto boundary above.
 
-> **IMPLEMENTATION BLOCK:** this source revision packages no production stage
-> runner for preflight, baseline, calibration, matched workloads, or live
-> lifecycle, and packages no reviewed endurance harness. Therefore stages 2
-> through 7 describe the required evidence procedure but cannot be executed by
-> this revision. Stop here. Do not improvise commands, direct sysfs writes, or a
-> local harness. A later revision must add and package reviewed stage-oriented
-> entrypoints before an operator may follow the live steps below.
+> **IMPLEMENTATION BLOCK:** this source revision exposes preflight and the seven
+> Firmware Auto baselines through `pt31553-fan-qualify`, but does not yet package
+> their reviewed hardware harness. Calibration, matched workloads, and live
+> lifecycle also remain unavailable. Do not run live qualification until the
+> packaged harness and remaining stage entrypoints land. The implemented command
+> contract is documented in
+> [`qualification/preflight-baseline-harness.md`](qualification/preflight-baseline-harness.md).
 
 ### 2. Run read-only preflight
 
@@ -1290,12 +1389,12 @@ tool and unit identities, journal/storage health, recovery entries, and both
 enable readbacks. Reject unexpected devices, paths, identities, permissions,
 values, missing prerequisites, or a non-`2` enable readback.
 
-Publish the protected result as
-`/var/lib/pt31553-fan-control/evidence/preflight.json`. End by repeating the
-read-only preflight form of the Auto boundary. Because this revision does not
-expose a production preflight stage command, it cannot create qualifying
-preflight evidence; do not replace that missing entrypoint with ad-hoc shell
-writes or treat source tests as hardware evidence.
+Publish the protected result as `preflight.json` under the manifest's unique
+evidence session directory. The executable form is
+`pt31553-fan-qualify preflight --manifest FILE --harness FILE`. End by repeating
+the read-only preflight form of the Auto boundary. Until the reviewed harness is
+packaged, do not replace it with ad-hoc shell scripts or direct sysfs writes,
+or treat source tests as hardware evidence.
 
 ### 3. Record Firmware Auto baselines
 
@@ -1312,6 +1411,11 @@ for comparable starting conditions before continuing.
 Store the seven root-owned evidence records under
 `/var/lib/pt31553-fan-control/evidence/`. Their identities and paths become the
 ordered `baselines` array in the endurance plan.
+
+The executable form is `pt31553-fan-qualify firmware-auto-baselines --manifest
+FILE --harness FILE`. It fixes the durations and workload identities, checks the
+full read-only preflight again before every new workload, and resumes only exact,
+fresh, complete evidence with unchanged fan endpoint identities.
 
 ### 4. Calibrate one fan at a time
 

@@ -1,7 +1,7 @@
 # Exact-model compatibility declaration for the unqualified source package.
-# Build-specific image and module hashes are impossible zero sentinels until a
-# qualified release replaces them. The module signer is likewise unqualified;
-# the EFI signer pins the enrolled public CN=Database Key certificate.
+# Build-specific hashes and signer identities are impossible zero sentinels.
+# The source-candidate wrapper replaces this template with values generated
+# from verified outputs; qualification may later promote that exact identity.
 # This declaration cannot authorize Custom mode by itself.
 
 schema_version = 1
@@ -16,7 +16,7 @@ release = "7.1.8-cachyos-pt31553"
 package = "linux-cachyos-pt31553"
 source_commit = "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"
 image_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
-image_signer_fingerprint = "1c549f6b61cc97b1673e9a73b974b63160bea16357be93a533d93382086f17bc"
+image_signer_fingerprint = "0000000000000000000000000000000000000000000000000000000000000000"
 
 [module]
 name = "acer_wmi"

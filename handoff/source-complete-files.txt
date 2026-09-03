@@ -57,6 +57,7 @@ crates/fan-control-core/src/tachometer.rs
 crates/fan-control-core/src/termination.rs
 crates/fan-control-core/src/validation.rs
 crates/fan-control-core/tests/acer_hwmon_discovery.rs
+crates/fan-control-core/tests/candidate_declarations.rs
 crates/fan-control-core/tests/compatibility_admission.rs
 crates/fan-control-core/tests/config_parse.rs
 crates/fan-control-core/tests/config_validation.rs
@@ -109,7 +110,10 @@ crates/fan-control-core/tests/status_build_install_runbook.rs
 crates/fan-control-core/tests/supervised_endurance.rs
 crates/fan-control-core/tests/support/mod.rs
 crates/fan-control-daemon/Cargo.toml
+crates/fan-control-daemon/src/lib.rs
 crates/fan-control-daemon/src/main.rs
+crates/fan-control-daemon/src/system.rs
+crates/fan-control-daemon/tests/qualified_startup.rs
 crates/fan-control-daemon/tests/service_supervision.rs
 crates/fan-control-daemon/tests/sleep_guard.rs
 crates/fan-control-daemon/tests/startup.rs
@@ -117,6 +121,7 @@ crates/fan-control-qualify/Cargo.toml
 crates/fan-control-qualify/src/lib.rs
 crates/fan-control-qualify/src/main.rs
 crates/fan-control-qualify/tests/promotion.rs
+crates/fan-control-qualify/tests/qualification_stages.rs
 crates/fan-control-qualify/tests/startup.rs
 crates/fan-control-qualify/tests/validate_records.rs
 crates/fan-control-restore/Cargo.toml
@@ -144,6 +149,7 @@ packaging/kernel/trust/cachyos-release-key.gpg
 policy/README.md
 policy/qualified-envelope.example.toml
 qualification/evidence-example/evidence-v1.json
+qualification/preflight-baseline-harness.md
 qualification/supervised-endurance-harness.md
 qualification/supervised-endurance-v2.json.gz
 qualification/workloads/README.md
@@ -154,14 +160,17 @@ qualification/workloads/cpu
 qualification/workloads/gpu
 qualification/workloads/idle
 qualification/workloads/mixed
+schemas/candidate-identity-v1.json
 schemas/evidence-v2.json
 schemas/evidence.json
 schemas/package-provenance-v1.json
 schemas/promotion-manifest.json
 schemas/qualification-record.json
+scripts/build-source-candidate
 scripts/check-promotion
 scripts/check-repository-policy
 scripts/check-sensitive-history
+scripts/generate-candidate-declarations
 scripts/redact-evidence
 scripts/verify-package-provenance
 scripts/verify-source-complete-handoff

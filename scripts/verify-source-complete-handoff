@@ -105,6 +105,8 @@ required_executables=(
     scripts/check-promotion
     scripts/check-repository-policy
     scripts/check-sensitive-history
+    scripts/build-source-candidate
+    scripts/generate-candidate-declarations
     scripts/redact-evidence
     scripts/verify-package-provenance
     scripts/verify-source-complete-handoff

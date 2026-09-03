@@ -66,7 +66,7 @@ fn source_metadata_is_exact_and_reproducible() {
     assert!(pkgbuild.contains(&format!("_commit='{SOURCE_COMMIT}'")));
     assert!(pkgbuild.contains(SOURCE_SHA256));
     assert!(pkgbuild.contains(
-        "depends=('bash' 'coreutils' 'gcc-libs' 'glibc' 'glmark2' 'stress-ng' 'systemd')"
+        "depends=('bash' 'coreutils' 'gcc-libs' 'glibc' 'glmark2' 'kmod' 'nvidia-utils' 'openssl' 'pacman' 'sbsigntools' 'stress-ng' 'systemd')"
     ));
     assert!(!pkgbuild.contains("SKIP"));
     assert!(!pkgbuild.contains("pkgver()"));
@@ -108,6 +108,11 @@ fn source_metadata_is_exact_and_reproducible() {
             "gcc-libs",
             "glibc",
             "glmark2",
+            "kmod",
+            "nvidia-utils",
+            "openssl",
+            "pacman",
+            "sbsigntools",
             "stress-ng",
             "systemd"
         ]
@@ -179,15 +184,7 @@ fn compatibility_declaration_is_exact_model_but_cannot_claim_qualified_artifacts
     for identity in [declaration.kernel.image_sha256, declaration.module.sha256] {
         assert_eq!(identity, "0".repeat(64));
     }
-    let expected_image_signer = if std::env::var_os("PT31553_LOCKED_SOURCE_ROOT").is_some() {
-        "0".repeat(64)
-    } else {
-        "1c549f6b61cc97b1673e9a73b974b63160bea16357be93a533d93382086f17bc".into()
-    };
-    assert_eq!(
-        declaration.kernel.image_signer_fingerprint,
-        expected_image_signer
-    );
+    assert_eq!(declaration.kernel.image_signer_fingerprint, "0".repeat(64));
     assert_eq!(declaration.module.signer_fingerprint, "0".repeat(64));
     for warning in ["unqualified", "zero", "cannot authorize Custom mode"] {
         assert!(source.contains(warning), "missing warning: {warning}");

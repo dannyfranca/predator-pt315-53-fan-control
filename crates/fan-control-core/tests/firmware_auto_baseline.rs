@@ -5,15 +5,17 @@ use std::{cell::Cell, collections::VecDeque, path::Path, rc::Rc, time::Duration}
 use fan_control_core::{
     AcerHwmonDevice, AcerHwmonDiscoveryError, BaselineCleanupAttestation, BaselineObservation,
     BaselineStartingConditions, CapturedBaselineStartingConditions, Clock, EvidenceExternalPower,
-    EvidenceProfile, EvidenceTimestamp, FakePlatform, FanReadbackPhase, FileIdentity,
-    FilePermissions, FirmwareAutoBaselineAccess, FirmwareAutoBaselineEnvironment,
-    FirmwareAutoBaselinePlan, IdentityBoundReadAccess, ObservationOutcome, PlatformError,
-    PlatformOperation, RunOutcomeStatus, SampleFreshness, TelemetrySampleEvidence,
-    WorkloadEvidence, parse_evidence_v1, parse_evidence_v2, run_firmware_auto_baseline,
+    EvidenceProfile, EvidenceTimestamp, FakePlatform, FanEndpointIdentitiesEvidence,
+    FanReadbackPhase, FileIdentity, FilePermissions, FirmwareAutoBaselineAccess,
+    FirmwareAutoBaselineEnvironment, FirmwareAutoBaselinePlan, IdentityBoundReadAccess,
+    ObservationOutcome, PlatformError, PlatformOperation, RunOutcomeStatus, SampleFreshness,
+    TelemetrySampleEvidence, WorkloadEvidence, parse_evidence_v1, parse_evidence_v2,
+    run_firmware_auto_baseline, validate_firmware_auto_baseline_resume,
 };
-use support::{PROTECTED_POLICY, compatibility_declaration};
+use support::{PROTECTED_POLICY, compatibility_declaration, fan_endpoint_identities};
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
+const NVIDIA_GPU_UUID: &str = "GPU-11111111-2222-3333-4444-555555555555";
 const EVIDENCE_V2_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../schemas/evidence-v2.json"
@@ -36,6 +38,9 @@ fn passing_baseline_records_fixed_workload_conditions_telemetry_and_summary_with
         &FirmwareAutoBaselinePlan {
             hwmon_root: Path::new(HWMON_ROOT),
             qualification_envelope: envelope,
+            preflight_binding_sha256: "a".repeat(64),
+            nvidia_gpu_uuid: NVIDIA_GPU_UUID.into(),
+            expected_fan_endpoint_identities: fan_endpoint_identities(),
             workload: workload.clone(),
             samples_required: 3,
         },
@@ -106,6 +111,216 @@ fn passing_baseline_records_fixed_workload_conditions_telemetry_and_summary_with
             .iter()
             .all(|operation| !matches!(operation, PlatformOperation::Write { .. }))
     );
+}
+
+#[test]
+fn schema_and_parser_reject_passed_baseline_without_sample_enable_evidence() {
+    let mut platform = auto_platform();
+    let mut environment = StubEnvironment::with_observations(vec![
+        observation(1_000, 42_000, 39_000),
+        observation(3_000, 65_000, 54_000),
+    ]);
+    let valid = run(&mut platform, &mut environment, 2).into_record();
+    let mut malformed = serde_json::to_value(valid).unwrap();
+    let readbacks = malformed["readbacks"].as_array_mut().unwrap();
+    let replacements = readbacks
+        .iter()
+        .filter(|readback| readback["phase"] == "sample" && readback["field"] == "rpm")
+        .cloned()
+        .collect::<Vec<_>>();
+    readbacks.retain(|readback| !(readback["phase"] == "sample" && readback["field"] == "enable"));
+    readbacks.extend(replacements);
+
+    let serialized = serde_json::to_string(&malformed).unwrap();
+    assert!(parse_evidence_v2(&serialized).is_err());
+    let schema: serde_json::Value = serde_json::from_str(EVIDENCE_V2_SCHEMA).unwrap();
+    assert!(
+        !jsonschema::validator_for(&schema)
+            .unwrap()
+            .is_valid(&malformed)
+    );
+}
+
+#[test]
+fn resume_requires_the_exact_plan_and_current_endpoint_identities() {
+    let mut platform = auto_platform();
+    let mut environment = StubEnvironment::with_observations(vec![
+        observation(1_000, 42_000, 39_000),
+        observation(3_000, 65_000, 54_000),
+        observation(5_000, 67_000, 56_000),
+    ]);
+    let plan = FirmwareAutoBaselinePlan {
+        hwmon_root: Path::new(HWMON_ROOT),
+        qualification_envelope: envelope(),
+        preflight_binding_sha256: "a".repeat(64),
+        nvidia_gpu_uuid: NVIDIA_GPU_UUID.into(),
+        expected_fan_endpoint_identities: fan_endpoint_identities(),
+        workload: workload(),
+        samples_required: 3,
+    };
+    let record = run_firmware_auto_baseline(&mut platform, &mut environment, &plan)
+        .unwrap()
+        .into_record();
+    assert!(validate_firmware_auto_baseline_resume(&mut platform, &record, &plan).is_ok());
+
+    let mut within_jitter = record.clone();
+    for sample in &mut within_jitter.samples {
+        sample.timestamp.monotonic_millis += 100;
+        sample.timestamp.wall_unix_millis += 100;
+    }
+    for readback in &mut within_jitter.readbacks {
+        if matches!(
+            readback.phase,
+            Some(FanReadbackPhase::Sample | FanReadbackPhase::Final)
+        ) {
+            readback.timestamp.monotonic_millis += 100;
+            readback.timestamp.wall_unix_millis += 100;
+        }
+    }
+    let cleanup = within_jitter.firmware_auto_cleanup.as_mut().unwrap();
+    cleanup.workload_stop_requested_at.monotonic_millis += 100;
+    cleanup.workload_stop_requested_at.wall_unix_millis += 100;
+    cleanup
+        .workload_stop_confirmed_at
+        .as_mut()
+        .unwrap()
+        .monotonic_millis += 100;
+    cleanup
+        .workload_stop_confirmed_at
+        .as_mut()
+        .unwrap()
+        .wall_unix_millis += 100;
+    cleanup
+        .cleanup_completed_at
+        .as_mut()
+        .unwrap()
+        .monotonic_millis += 100;
+    cleanup
+        .cleanup_completed_at
+        .as_mut()
+        .unwrap()
+        .wall_unix_millis += 100;
+    within_jitter.completed_at.monotonic_millis += 100;
+    within_jitter.completed_at.wall_unix_millis += 100;
+    validate_firmware_auto_baseline_resume(&mut platform, &within_jitter, &plan).unwrap();
+
+    let mut late_stop = record.clone();
+    let cleanup = late_stop.firmware_auto_cleanup.as_mut().unwrap();
+    let requested = cleanup.workload_stop_requested_at;
+    let late = EvidenceTimestamp {
+        monotonic_millis: requested.monotonic_millis + 5_001,
+        wall_unix_millis: requested.wall_unix_millis + 5_001,
+    };
+    cleanup.workload_stop_confirmed_at = Some(late);
+    cleanup.cleanup_completed_at = Some(late);
+    for readback in &mut late_stop.readbacks {
+        if readback.phase == Some(FanReadbackPhase::Final) {
+            readback.timestamp = late;
+        }
+    }
+    late_stop.completed_at = late;
+    assert!(validate_firmware_auto_baseline_resume(&mut platform, &late_stop, &plan).is_err());
+
+    let mut reversed_cleanup_wall_time = record.clone();
+    let cleanup = reversed_cleanup_wall_time
+        .firmware_auto_cleanup
+        .as_mut()
+        .unwrap();
+    cleanup
+        .cleanup_completed_at
+        .as_mut()
+        .unwrap()
+        .wall_unix_millis = cleanup.workload_stop_confirmed_at.unwrap().wall_unix_millis - 1;
+    assert!(
+        validate_firmware_auto_baseline_resume(&mut platform, &reversed_cleanup_wall_time, &plan)
+            .is_err()
+    );
+
+    let substituted_plan = FirmwareAutoBaselinePlan {
+        hwmon_root: Path::new(HWMON_ROOT),
+        qualification_envelope: envelope(),
+        preflight_binding_sha256: "a".repeat(64),
+        nvidia_gpu_uuid: NVIDIA_GPU_UUID.into(),
+        expected_fan_endpoint_identities: fan_endpoint_identities(),
+        workload: WorkloadEvidence {
+            workload_id: "gpu-ac-v1".into(),
+            ..workload()
+        },
+        samples_required: 3,
+    };
+    assert!(
+        validate_firmware_auto_baseline_resume(&mut platform, &record, &substituted_plan).is_err()
+    );
+
+    let different_preflight = FirmwareAutoBaselinePlan {
+        hwmon_root: Path::new(HWMON_ROOT),
+        qualification_envelope: envelope(),
+        preflight_binding_sha256: "b".repeat(64),
+        nvidia_gpu_uuid: NVIDIA_GPU_UUID.into(),
+        expected_fan_endpoint_identities: fan_endpoint_identities(),
+        workload: workload(),
+        samples_required: 3,
+    };
+    assert!(
+        validate_firmware_auto_baseline_resume(&mut platform, &record, &different_preflight)
+            .is_err()
+    );
+
+    let different_gpu = FirmwareAutoBaselinePlan {
+        hwmon_root: Path::new(HWMON_ROOT),
+        qualification_envelope: envelope(),
+        preflight_binding_sha256: "a".repeat(64),
+        nvidia_gpu_uuid: "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+        expected_fan_endpoint_identities: fan_endpoint_identities(),
+        workload: workload(),
+        samples_required: 3,
+    };
+    assert!(
+        validate_firmware_auto_baseline_resume(&mut platform, &record, &different_gpu).is_err()
+    );
+
+    let mut rebound_persisted_map = record.clone();
+    rebound_persisted_map
+        .fan_endpoint_identities
+        .as_mut()
+        .unwrap()
+        .cpu_pwm = "device-0-inode-999".into();
+    assert!(
+        validate_firmware_auto_baseline_resume(&mut platform, &rebound_persisted_map, &plan)
+            .is_err()
+    );
+
+    platform.rebind_path_identity(Path::new(HWMON_ROOT).join("hwmon0/fan2_input"));
+    assert!(validate_firmware_auto_baseline_resume(&mut platform, &record, &plan).is_err());
+}
+
+#[test]
+fn baseline_start_requires_preflight_endpoint_identities() {
+    let mut platform = auto_platform();
+    let mut environment = StubEnvironment::with_observations(vec![]);
+    let report = run_firmware_auto_baseline(
+        &mut platform,
+        &mut environment,
+        &FirmwareAutoBaselinePlan {
+            hwmon_root: Path::new(HWMON_ROOT),
+            qualification_envelope: envelope(),
+            preflight_binding_sha256: "a".repeat(64),
+            nvidia_gpu_uuid: NVIDIA_GPU_UUID.into(),
+            expected_fan_endpoint_identities: FanEndpointIdentitiesEvidence {
+                cpu_pwm: "device-0-inode-999".into(),
+                ..fan_endpoint_identities()
+            },
+            workload: workload(),
+            samples_required: 2,
+        },
+    )
+    .unwrap();
+
+    assert!(!report.accepted());
+    assert!(!environment.events.contains(&"start"));
+    assert!(report.record().faults.iter().any(|fault| {
+        fault.code == "fan-endpoint-identity" && fault.detail.contains("preflight")
+    }));
 }
 
 #[test]
@@ -265,8 +480,18 @@ fn missed_two_second_cadence_and_workload_failures_are_evidence_not_panics() {
                 .any(|fault| fault.code == code)
         );
     }
-    assert_eq!(environment.events.last(), Some(&"stop"));
-    assert!(!environment.events.contains(&"cleanup"));
+    assert!(
+        environment
+            .events
+            .ends_with(&["stop", "contain", "cleanup"])
+    );
+    assert!(
+        report
+            .record()
+            .faults
+            .iter()
+            .any(|fault| fault.code == "cleanup")
+    );
     assert!(report.record().validate().is_ok());
 }
 
@@ -377,6 +602,9 @@ fn malformed_workload_and_out_of_range_telemetry_cannot_pass() {
         &FirmwareAutoBaselinePlan {
             hwmon_root: Path::new(HWMON_ROOT),
             qualification_envelope: envelope(),
+            preflight_binding_sha256: "a".repeat(64),
+            nvidia_gpu_uuid: NVIDIA_GPU_UUID.into(),
+            expected_fan_endpoint_identities: fan_endpoint_identities(),
             workload: invalid_workload,
             samples_required: 1,
         },
@@ -423,6 +651,9 @@ fn invalid_qualification_envelope_is_rejected_before_any_baseline_action() {
         &FirmwareAutoBaselinePlan {
             hwmon_root: Path::new(HWMON_ROOT),
             qualification_envelope: invalid_envelope,
+            preflight_binding_sha256: "a".repeat(64),
+            nvidia_gpu_uuid: NVIDIA_GPU_UUID.into(),
+            expected_fan_endpoint_identities: fan_endpoint_identities(),
             workload: workload(),
             samples_required: 2,
         },
@@ -513,6 +744,14 @@ fn passed_baseline_records_reject_semantically_incomplete_or_contradictory_evide
     ]);
     let valid = run(&mut platform, &mut environment, 2).into_record();
     assert!(valid.validate().is_ok());
+    let schema: serde_json::Value = serde_json::from_str(EVIDENCE_V2_SCHEMA).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let mut one_sample_json = serde_json::to_value(&valid).unwrap();
+    one_sample_json["samples"]
+        .as_array_mut()
+        .unwrap()
+        .truncate(1);
+    assert!(!validator.is_valid(&one_sample_json));
 
     let mut candidates = Vec::new();
     let mut one_sample = valid.clone();
@@ -576,6 +815,9 @@ fn passed_baseline_records_reject_semantically_incomplete_or_contradictory_evide
     let mut invalid_sample = valid.clone();
     invalid_sample.samples[0].freshness = SampleFreshness::Invalid;
     candidates.push(invalid_sample);
+    let mut missing_utilization = valid.clone();
+    missing_utilization.samples[0].cpu_utilization_basis_points = None;
+    candidates.push(missing_utilization);
     let mut wrong_profile = valid.clone();
     wrong_profile.samples[0].selected_profile = Some(EvidenceProfile::Battery);
     candidates.push(wrong_profile);
@@ -593,6 +835,58 @@ fn passed_baseline_records_reject_semantically_incomplete_or_contradictory_evide
     let mut missing_readback = valid.clone();
     missing_readback.readbacks.pop();
     candidates.push(missing_readback);
+    let mut missing_sample_rpm = valid.clone();
+    let index = missing_sample_rpm
+        .readbacks
+        .iter()
+        .position(|readback| {
+            readback.field == fan_control_core::FanReadbackField::Rpm
+                && readback.phase == Some(FanReadbackPhase::Sample)
+        })
+        .unwrap();
+    missing_sample_rpm.readbacks.remove(index);
+    candidates.push(missing_sample_rpm);
+    let mut missing_gpu_identity = valid.clone();
+    missing_gpu_identity.nvidia_gpu_uuid = None;
+    candidates.push(missing_gpu_identity);
+    let mut malformed_gpu_identity = valid.clone();
+    malformed_gpu_identity.nvidia_gpu_uuid = Some("GPU-not-a-uuid".into());
+    candidates.push(malformed_gpu_identity);
+    let mut missing_endpoint_identities = valid.clone();
+    missing_endpoint_identities.fan_endpoint_identities = None;
+    candidates.push(missing_endpoint_identities);
+    let mut collapsed_endpoint_identities = valid.clone();
+    let identities = collapsed_endpoint_identities
+        .fan_endpoint_identities
+        .as_mut()
+        .unwrap();
+    identities.cpu_pwm = identities.cpu_enable.clone();
+    candidates.push(collapsed_endpoint_identities);
+    let mut missing_cleanup = valid.clone();
+    missing_cleanup.firmware_auto_cleanup = None;
+    candidates.push(missing_cleanup);
+    let mut cleanup_wrote_fan_control = valid.clone();
+    cleanup_wrote_fan_control
+        .firmware_auto_cleanup
+        .as_mut()
+        .unwrap()
+        .fan_control_write_count = Some(1);
+    candidates.push(cleanup_wrote_fan_control);
+    let mut premature_cleanup = valid.clone();
+    let started = premature_cleanup.workload_started_at.unwrap();
+    let cleanup = premature_cleanup.firmware_auto_cleanup.as_mut().unwrap();
+    cleanup.workload_stop_requested_at = started;
+    cleanup.workload_stop_confirmed_at = Some(started);
+    cleanup.cleanup_completed_at = Some(started);
+    candidates.push(premature_cleanup);
+    let mut contradictory_containment = valid.clone();
+    let cleanup = contradictory_containment
+        .firmware_auto_cleanup
+        .as_mut()
+        .unwrap();
+    cleanup.containment_confirmed = true;
+    cleanup.containment_confirmed_at = Some(cleanup.workload_stop_requested_at);
+    candidates.push(contradictory_containment);
     let mut snapshot_only_readbacks = valid.clone();
     for readback in &mut snapshot_only_readbacks.readbacks {
         readback.timestamp = snapshot_only_readbacks.started_at;
@@ -602,15 +896,83 @@ fn passed_baseline_records_reject_semantically_incomplete_or_contradictory_evide
     rebound_endpoint
         .readbacks
         .iter_mut()
-        .find(|readback| readback.phase == Some(FanReadbackPhase::Sample))
+        .find(|readback| {
+            readback.field == fan_control_core::FanReadbackField::Rpm
+                && readback.phase == Some(FanReadbackPhase::Sample)
+        })
         .unwrap()
         .endpoint_identity = "different-device-999-inode-999".into();
     candidates.push(rebound_endpoint);
+    let mut stalled_tachometer = valid.clone();
+    stalled_tachometer
+        .readbacks
+        .iter_mut()
+        .find(|readback| readback.field == fan_control_core::FanReadbackField::Rpm)
+        .unwrap()
+        .value = Some(0);
+    candidates.push(stalled_tachometer);
 
     for candidate in candidates {
         assert!(candidate.validate().is_err());
         assert!(serde_json::to_string(&candidate).is_err());
     }
+}
+
+#[test]
+fn zero_or_low_tachometer_rpm_aborts_the_baseline() {
+    for rpm in [0, 99] {
+        let mut platform = auto_platform();
+        platform.insert_file_with_permissions(
+            Path::new(HWMON_ROOT).join("hwmon0/fan1_input"),
+            format!("{rpm}\n"),
+            FilePermissions::READ_ONLY,
+        );
+        let mut environment = StubEnvironment::with_observations(vec![
+            observation(1_000, 42_000, 39_000),
+            observation(3_000, 65_000, 54_000),
+        ]);
+
+        let report = run(&mut platform, &mut environment, 2);
+
+        assert!(!report.accepted(), "rpm={rpm}");
+        assert!(
+            report
+                .record()
+                .faults
+                .iter()
+                .any(|fault| fault.detail.contains("tachometer")),
+            "rpm={rpm}"
+        );
+    }
+}
+
+#[test]
+fn sample_mode_and_tachometer_reads_share_one_deadline() {
+    let mut platform = ScriptedModes::new(
+        auto_platform(),
+        ["2", "2", "2", "2", "2"],
+        ["2", "2", "2", "2", "2"],
+    )
+    .with_sample_read_delays(Duration::from_millis(90), Duration::from_millis(90));
+    let mut environment = StubEnvironment::with_observations(vec![
+        observation(1_000, 42_000, 39_000),
+        observation(3_000, 43_000, 40_000),
+    ]);
+
+    let report = run(&mut platform, &mut environment, 2);
+
+    assert!(!report.accepted());
+    assert!(
+        report
+            .record()
+            .faults
+            .iter()
+            .any(|fault| fault.code == "tachometer"),
+        "faults: {:?}",
+        report.record().faults
+    );
+    assert!(report.record().validate().is_ok());
+    assert!(serde_json::to_string(report.record()).is_ok());
 }
 
 #[test]
@@ -678,7 +1040,7 @@ fn mode_readbacks_use_their_post_capture_observation_time() {
                             == sample.timestamp.monotonic_millis + 50
                 })
                 .count(),
-            2
+            4
         );
     }
 }
@@ -808,6 +1170,73 @@ fn ambiguous_workload_start_failure_still_stops_before_cleanup() {
             .iter()
             .any(|fault| fault.code == "workload-start")
     );
+    assert!(report.record().validate().is_ok());
+    assert!(serde_json::to_string(report.record()).is_ok());
+}
+
+#[test]
+fn failed_stop_and_containment_remain_truthful_serializable_evidence() {
+    let mut platform = auto_platform();
+    let mut environment = StubEnvironment::with_observations(vec![
+        observation(1_000, 42_000, 39_000),
+        observation(3_000, 43_000, 40_000),
+    ]);
+    environment.stop_result = Err("workload would not exit".into());
+    environment.containment_result = Err("cgroup kill failed".into());
+
+    let report = run(&mut platform, &mut environment, 2);
+
+    assert!(!report.accepted());
+    let cleanup = report.record().firmware_auto_cleanup.as_ref().unwrap();
+    assert!(cleanup.containment_required);
+    assert!(!cleanup.containment_confirmed);
+    assert!(cleanup.containment_confirmed_at.is_none());
+    assert!(cleanup.cleanup_completed_at.is_none());
+    assert!(cleanup.fan_control_write_count.is_none());
+    assert!(report.record().validate().is_ok());
+    assert!(serde_json::to_string(report.record()).is_ok());
+}
+
+#[test]
+fn cleanup_requires_timely_confirmed_containment() {
+    let mut platform = auto_platform();
+    let mut environment = StubEnvironment::with_observations(vec![
+        observation(1_000, 42_000, 39_000),
+        observation(3_000, 43_000, 40_000),
+    ]);
+    environment.stop_elapsed_millis = 5_001;
+    environment.containment_elapsed_millis = 5_001;
+
+    let report = run(&mut platform, &mut environment, 2);
+
+    assert_eq!(
+        environment.events,
+        [
+            "conditions",
+            "start",
+            "wait",
+            "capture",
+            "wait",
+            "capture",
+            "stop",
+            "contain"
+        ]
+    );
+    let cleanup = report.record().firmware_auto_cleanup.as_ref().unwrap();
+    assert!(cleanup.containment_required);
+    assert!(!cleanup.containment_confirmed);
+    assert!(cleanup.cleanup_completed_at.is_none());
+    assert!(report.record().faults.iter().any(|fault| {
+        fault.code == "workload-containment" && fault.detail.contains("exceeded")
+    }));
+    assert!(report.record().validate().is_ok());
+
+    let mut forged = report.into_record();
+    let cleanup = forged.firmware_auto_cleanup.as_mut().unwrap();
+    cleanup.cleanup_completed_at = Some(forged.completed_at);
+    cleanup.fan_control_write_count = Some(0);
+    assert!(forged.validate().is_err());
+    assert!(serde_json::to_string(&forged).is_err());
 }
 
 #[test]
@@ -847,6 +1276,9 @@ fn run<P: FirmwareAutoBaselineAccess>(
         &FirmwareAutoBaselinePlan {
             hwmon_root: Path::new(HWMON_ROOT),
             qualification_envelope: envelope(),
+            preflight_binding_sha256: "a".repeat(64),
+            nvidia_gpu_uuid: NVIDIA_GPU_UUID.into(),
+            expected_fan_endpoint_identities: fan_endpoint_identities(),
             workload: workload(),
             samples_required,
         },
@@ -894,8 +1326,8 @@ fn observation(
             selected_profile: Some(EvidenceProfile::Ac),
             cpu_source_demand_basis_points: Some(4_000),
             gpu_source_demand_basis_points: Some(3_000),
-            cpu_utilization_basis_points: None,
-            gpu_utilization_basis_points: None,
+            cpu_utilization_basis_points: Some(6_000),
+            gpu_utilization_basis_points: Some(5_000),
             commanded_demand_basis_points: Some(4_000),
             cpu_thermal_throttling: Some(false),
             gpu_thermal_throttling: Some(false),
@@ -930,6 +1362,7 @@ struct StubEnvironment {
     wait_drift_millis: u64,
     start_result: Result<(), String>,
     stop_result: Result<(), String>,
+    containment_result: Result<(), String>,
     cleanup_result: Result<(), String>,
     cleanup_fan_control_write_count: u64,
     running: Option<Rc<Cell<bool>>>,
@@ -938,6 +1371,7 @@ struct StubEnvironment {
     conditions_elapsed_millis: u64,
     start_elapsed_millis: u64,
     stop_elapsed_millis: u64,
+    containment_elapsed_millis: u64,
 }
 
 impl StubEnvironment {
@@ -950,6 +1384,7 @@ impl StubEnvironment {
             wait_drift_millis: 0,
             start_result: Ok(()),
             stop_result: Ok(()),
+            containment_result: Ok(()),
             cleanup_result: Ok(()),
             cleanup_fan_control_write_count: 0,
             running: None,
@@ -958,6 +1393,7 @@ impl StubEnvironment {
             conditions_elapsed_millis: 0,
             start_elapsed_millis: 0,
             stop_elapsed_millis: 0,
+            containment_elapsed_millis: 0,
         }
     }
 }
@@ -1032,6 +1468,17 @@ impl FirmwareAutoBaselineEnvironment for StubEnvironment {
         self.stop_result.clone()
     }
 
+    fn contain_workload(&mut self, _deadline_monotonic_millis: u64) -> Result<(), String> {
+        self.events.push("contain");
+        self.now = self.now.saturating_add(self.containment_elapsed_millis);
+        if self.containment_result.is_ok() {
+            if let Some(running) = &self.running {
+                running.set(false);
+            }
+        }
+        self.containment_result.clone()
+    }
+
     fn cleanup_after_workload(&mut self) -> Result<BaselineCleanupAttestation, String> {
         self.events.push("cleanup");
         self.cleanup_result
@@ -1046,6 +1493,10 @@ struct ScriptedModes {
     inner: FakePlatform,
     cpu: VecDeque<String>,
     gpu: VecDeque<String>,
+    enable_reads: usize,
+    sample_mode_delay: Duration,
+    tachometer_delay: Duration,
+    tachometer_delayed: bool,
 }
 
 impl ScriptedModes {
@@ -1058,7 +1509,17 @@ impl ScriptedModes {
             inner,
             cpu: cpu.into_iter().map(str::to_owned).collect(),
             gpu: gpu.into_iter().map(str::to_owned).collect(),
+            enable_reads: 0,
+            sample_mode_delay: Duration::ZERO,
+            tachometer_delay: Duration::ZERO,
+            tachometer_delayed: false,
         }
+    }
+
+    fn with_sample_read_delays(mut self, mode: Duration, tachometer: Duration) -> Self {
+        self.sample_mode_delay = mode;
+        self.tachometer_delay = tachometer;
+        self
     }
 }
 
@@ -1131,6 +1592,19 @@ impl FirmwareAutoBaselineAccess for ScriptedModes {
         expected_child: FileIdentity,
         deadline: Duration,
     ) -> Result<String, PlatformError> {
+        if matches!(child, "pwm1_enable" | "pwm2_enable") {
+            self.enable_reads += 1;
+            if self.enable_reads == 7 {
+                let now = Clock::monotonic_now(&mut self.inner);
+                self.inner
+                    .advance_monotonic_time_to(now.saturating_add(self.sample_mode_delay));
+            }
+        } else if child == "fan1_input" && !self.tachometer_delayed {
+            self.tachometer_delayed = true;
+            let now = Clock::monotonic_now(&mut self.inner);
+            self.inner
+                .advance_monotonic_time_to(now.saturating_add(self.tachometer_delay));
+        }
         match child {
             "pwm1_enable" => self.cpu.pop_front().ok_or_else(|| exhausted("CPU mode")),
             "pwm2_enable" => self.gpu.pop_front().ok_or_else(|| exhausted("GPU mode")),

@@ -51,8 +51,9 @@ pub use baseline::{
     BaselineCleanupAttestation, BaselineObservation, BaselineStartingConditions,
     CPU_ABSOLUTE_ABORT_MILLICELSIUS, CapturedBaselineStartingConditions,
     FirmwareAutoBaselineAccess, FirmwareAutoBaselineEnvironment, FirmwareAutoBaselinePlan,
-    FirmwareAutoBaselinePlanError, FirmwareAutoBaselineReport, GPU_ABSOLUTE_ABORT_MILLICELSIUS,
-    run_firmware_auto_baseline,
+    FirmwareAutoBaselinePlanError, FirmwareAutoBaselineReport, FirmwareAutoBaselineResumeError,
+    GPU_ABSOLUTE_ABORT_MILLICELSIUS, run_firmware_auto_baseline,
+    validate_firmware_auto_baseline_resume,
 };
 pub use calibration::{
     CalibrationCheckpoint, CalibrationEvidenceWriteError, CalibrationLevelObservation,
@@ -98,8 +99,9 @@ pub use evidence::{
     EVIDENCE_SCHEMA_VERSION, EVIDENCE_SCHEMA_VERSION_V2, EnduranceThermalEnvelopeEvidence,
     EvidenceExternalPower, EvidenceFan, EvidenceParseError, EvidenceProfile, EvidenceRecord,
     EvidenceRecordStatus, EvidenceTimestamp, EvidenceValidationError, EvidenceWriteError,
-    FanCalibrationEvidence, FanCommandEvidence, FanControlField, FanReadbackEvidence,
-    FanReadbackField, FanReadbackPhase, FaultEvidence, ObservationOutcome, ProcessStopEvidence,
+    FanCalibrationEvidence, FanCommandEvidence, FanControlField, FanEndpointIdentitiesEvidence,
+    FanReadbackEvidence, FanReadbackField, FanReadbackPhase, FaultEvidence,
+    FirmwareAutoCleanupEvidence, ObservationOutcome, PreflightCheckEvidence, ProcessStopEvidence,
     QualificationEnvelopeIdentityV1, RestorationAttemptEvidence, RestorationOutcome,
     RpmAnchorEvidence, RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness,
     StateTransitionEvidence, StoppedProcess, TelemetrySampleEvidence, ThermalSummaryEvidence,
@@ -142,7 +144,7 @@ pub use platform::{
     IdentityBoundFileAccess, IdentityBoundReadAccess, PlatformError, PlatformErrorKind,
     PlatformOperation, ProtectedFileRequirement, RootOwnedQualificationRecordAccess,
     RuntimeLockAccess, RuntimeLockError, ServiceAccess, SystemOwnershipPlatform, SystemRuntimeLock,
-    validate_root_owned_protected_file,
+    path_has_extended_acl, validate_root_owned_protected_file,
 };
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,
@@ -151,6 +153,11 @@ pub use policy::{
 pub use preflight::{
     PreflightArtifact, PreflightCheck, PreflightCheckResult, PreflightEnvironment, PreflightInputs,
     PreflightReport, PreflightRequirements, run_read_only_preflight,
+};
+pub use promotion::{
+    PackageArtifactV1, PackageProvenanceBuildV1, PackageProvenanceKernelV1,
+    PackageProvenanceModuleSourceV1, PackageProvenanceModuleV1, PackageProvenanceV1,
+    validate_package_provenance_compatibility_v1, validate_package_provenance_v1,
 };
 pub use promotion::{
     PromotionInputs, PromotionValidationError, sanitize_qualification_evidence_v1,

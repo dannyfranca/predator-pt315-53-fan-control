@@ -23,6 +23,7 @@ use crate::{
         is_allowed_calibration_floor,
     },
     compatibility::validate_declaration,
+    platform::path_has_extended_acl,
 };
 
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
@@ -40,6 +41,11 @@ pub struct EvidenceRecord {
     pub starting_conditions_captured_at: Option<EvidenceTimestamp>,
     pub workload_started_at: Option<EvidenceTimestamp>,
     pub baseline_binding_sha256: Option<String>,
+    pub preflight_binding_sha256: Option<String>,
+    pub nvidia_gpu_uuid: Option<String>,
+    pub fan_endpoint_identities: Option<FanEndpointIdentitiesEvidence>,
+    pub firmware_auto_cleanup: Option<FirmwareAutoCleanupEvidence>,
+    pub preflight_checks: Option<Vec<PreflightCheckEvidence>>,
     pub workload: Option<WorkloadEvidence>,
     pub samples: Vec<TelemetrySampleEvidence>,
     pub commands: Vec<FanCommandEvidence>,
@@ -71,6 +77,16 @@ struct EvidenceRecordWire {
     workload_started_at: Option<EvidenceTimestamp>,
     #[serde(default, deserialize_with = "deserialize_present_option")]
     baseline_binding_sha256: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    preflight_binding_sha256: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    nvidia_gpu_uuid: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    fan_endpoint_identities: Option<FanEndpointIdentitiesEvidence>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    firmware_auto_cleanup: Option<FirmwareAutoCleanupEvidence>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    preflight_checks: Option<Vec<PreflightCheckEvidence>>,
     #[serde(deserialize_with = "deserialize_required_option")]
     workload: Option<WorkloadEvidence>,
     samples: Vec<TelemetrySampleEvidence>,
@@ -105,6 +121,11 @@ impl TryFrom<EvidenceRecordWire> for EvidenceRecord {
             starting_conditions_captured_at: wire.starting_conditions_captured_at,
             workload_started_at: wire.workload_started_at,
             baseline_binding_sha256: wire.baseline_binding_sha256,
+            preflight_binding_sha256: wire.preflight_binding_sha256,
+            nvidia_gpu_uuid: wire.nvidia_gpu_uuid,
+            fan_endpoint_identities: wire.fan_endpoint_identities,
+            firmware_auto_cleanup: wire.firmware_auto_cleanup,
+            preflight_checks: wire.preflight_checks,
             workload: wire.workload,
             samples: wire.samples,
             commands: wire.commands,
@@ -135,6 +156,11 @@ impl Serialize for EvidenceRecord {
             16 + usize::from(self.starting_conditions_captured_at.is_some())
                 + usize::from(self.workload_started_at.is_some())
                 + usize::from(self.baseline_binding_sha256.is_some())
+                + usize::from(self.preflight_binding_sha256.is_some())
+                + usize::from(self.nvidia_gpu_uuid.is_some())
+                + usize::from(self.fan_endpoint_identities.is_some())
+                + usize::from(self.firmware_auto_cleanup.is_some())
+                + usize::from(self.preflight_checks.is_some())
                 + usize::from(self.endurance_thermal_envelope.is_some())
                 + usize::from(self.live_lifecycle_cases.is_some())
                 + usize::from(!self.process_stops.is_empty()),
@@ -156,6 +182,21 @@ impl Serialize for EvidenceRecord {
         }
         if let Some(baseline_binding_sha256) = &self.baseline_binding_sha256 {
             record.serialize_field("baseline_binding_sha256", baseline_binding_sha256)?;
+        }
+        if let Some(preflight_binding_sha256) = &self.preflight_binding_sha256 {
+            record.serialize_field("preflight_binding_sha256", preflight_binding_sha256)?;
+        }
+        if let Some(nvidia_gpu_uuid) = &self.nvidia_gpu_uuid {
+            record.serialize_field("nvidia_gpu_uuid", nvidia_gpu_uuid)?;
+        }
+        if let Some(fan_endpoint_identities) = &self.fan_endpoint_identities {
+            record.serialize_field("fan_endpoint_identities", fan_endpoint_identities)?;
+        }
+        if let Some(firmware_auto_cleanup) = &self.firmware_auto_cleanup {
+            record.serialize_field("firmware_auto_cleanup", firmware_auto_cleanup)?;
+        }
+        if let Some(preflight_checks) = &self.preflight_checks {
+            record.serialize_field("preflight_checks", preflight_checks)?;
         }
         record.serialize_field("workload", &self.workload)?;
         record.serialize_field("samples", &self.samples)?;
@@ -218,6 +259,15 @@ pub struct EvidenceTimestamp {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PreflightCheckEvidence {
+    pub timestamp: EvidenceTimestamp,
+    pub check: String,
+    pub passed: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkloadEvidence {
     pub workload_id: String,
     pub command: Vec<String>,
@@ -255,6 +305,72 @@ pub struct TelemetrySampleEvidence {
     pub cpu_thermal_throttling: Option<bool>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub gpu_thermal_throttling: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirmwareAutoCleanupEvidence {
+    pub workload_stop_requested_at: EvidenceTimestamp,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub workload_stop_confirmed_at: Option<EvidenceTimestamp>,
+    pub containment_required: bool,
+    pub containment_confirmed: bool,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub containment_confirmed_at: Option<EvidenceTimestamp>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub cleanup_completed_at: Option<EvidenceTimestamp>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub fan_control_write_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FanEndpointIdentitiesEvidence {
+    pub cpu_pwm: String,
+    pub cpu_enable: String,
+    pub cpu_tachometer: String,
+    pub gpu_pwm: String,
+    pub gpu_enable: String,
+    pub gpu_tachometer: String,
+}
+
+impl FanEndpointIdentitiesEvidence {
+    pub(crate) fn from_device(device: &crate::AcerHwmonDevice) -> Option<Self> {
+        Some(Self {
+            cpu_pwm: Self::endpoint_identity(device, device.cpu().pwm())?,
+            cpu_enable: Self::endpoint_identity(device, device.cpu().enable())?,
+            cpu_tachometer: Self::endpoint_identity(device, device.cpu().tachometer())?,
+            gpu_pwm: Self::endpoint_identity(device, device.gpu().pwm())?,
+            gpu_enable: Self::endpoint_identity(device, device.gpu().enable())?,
+            gpu_tachometer: Self::endpoint_identity(device, device.gpu().tachometer())?,
+        })
+    }
+
+    pub(crate) fn endpoint_identity(
+        device: &crate::AcerHwmonDevice,
+        endpoint: &Path,
+    ) -> Option<String> {
+        device
+            .endpoint_identity(endpoint)
+            .map(|identity| format!("device-{}-inode-{}", identity.device(), identity.inode()))
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        let identities = [
+            &self.cpu_pwm,
+            &self.cpu_enable,
+            &self.cpu_tachometer,
+            &self.gpu_pwm,
+            &self.gpu_enable,
+            &self.gpu_tachometer,
+        ];
+        identities.iter().all(|identity| is_identifier(identity))
+            && identities.iter().enumerate().all(|(index, identity)| {
+                !identities[..index]
+                    .iter()
+                    .any(|earlier| earlier == identity)
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -630,6 +746,11 @@ impl EvidenceRecord {
             starting_conditions_captured_at: None,
             workload_started_at: None,
             baseline_binding_sha256: None,
+            preflight_binding_sha256: None,
+            nvidia_gpu_uuid: None,
+            fan_endpoint_identities: None,
+            firmware_auto_cleanup: None,
+            preflight_checks: None,
             workload: None,
             samples: Vec::new(),
             commands: Vec::new(),
@@ -667,6 +788,31 @@ impl EvidenceRecord {
             if self.baseline_binding_sha256.is_some() {
                 return Err(EvidenceValidationError::IncompatibleSchemaField {
                     field: "baseline_binding_sha256",
+                });
+            }
+            if self.preflight_binding_sha256.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "preflight_binding_sha256",
+                });
+            }
+            if self.nvidia_gpu_uuid.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "nvidia_gpu_uuid",
+                });
+            }
+            if self.fan_endpoint_identities.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "fan_endpoint_identities",
+                });
+            }
+            if self.firmware_auto_cleanup.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "firmware_auto_cleanup",
+                });
+            }
+            if self.preflight_checks.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "preflight_checks",
                 });
             }
             if self.live_lifecycle_cases.is_some() {
@@ -722,6 +868,98 @@ impl EvidenceRecord {
             (EVIDENCE_SCHEMA_VERSION_V2, "matched-workload", _) | (_, _, Some(_)) => {
                 return Err(EvidenceValidationError::InvalidValue {
                     field: "baseline_binding_sha256",
+                    index: 0,
+                });
+            }
+            (_, _, None) => {}
+        }
+        match (
+            self.schema_version,
+            self.stage.as_str(),
+            self.preflight_binding_sha256.as_deref(),
+        ) {
+            (EVIDENCE_SCHEMA_VERSION_V2, "firmware-auto-baseline", Some(binding))
+                if is_lower_hex(binding, 64) => {}
+            (EVIDENCE_SCHEMA_VERSION_V2, "firmware-auto-baseline", _) | (_, _, Some(_)) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "preflight_binding_sha256",
+                    index: 0,
+                });
+            }
+            (_, _, None) => {}
+        }
+        match (
+            self.schema_version,
+            self.stage.as_str(),
+            self.nvidia_gpu_uuid.as_deref(),
+        ) {
+            (EVIDENCE_SCHEMA_VERSION_V2, "preflight" | "firmware-auto-baseline", Some(uuid))
+                if crate::nvidia_gpu::is_nvidia_gpu_uuid(uuid) => {}
+            (EVIDENCE_SCHEMA_VERSION_V2, "preflight", None)
+                if self.outcome.status == RunOutcomeStatus::Failed => {}
+            (EVIDENCE_SCHEMA_VERSION_V2, "preflight" | "firmware-auto-baseline", _)
+            | (_, _, Some(_)) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "nvidia_gpu_uuid",
+                    index: 0,
+                });
+            }
+            (_, _, None) => {}
+        }
+        match (
+            self.schema_version,
+            self.stage.as_str(),
+            self.outcome.status,
+            self.fan_endpoint_identities.as_ref(),
+        ) {
+            (
+                EVIDENCE_SCHEMA_VERSION_V2,
+                "preflight" | "firmware-auto-baseline",
+                _,
+                Some(identities),
+            ) if identities.is_valid() => {}
+            (EVIDENCE_SCHEMA_VERSION_V2, "preflight", RunOutcomeStatus::Failed, None) => {}
+            (EVIDENCE_SCHEMA_VERSION_V2, "preflight" | "firmware-auto-baseline", _, _)
+            | (_, _, _, Some(_)) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "fan_endpoint_identities",
+                    index: 0,
+                });
+            }
+            (_, _, _, None) => {}
+        }
+        match (
+            self.schema_version,
+            self.stage.as_str(),
+            self.outcome.status,
+            self.firmware_auto_cleanup.as_ref(),
+        ) {
+            (EVIDENCE_SCHEMA_VERSION_V2, "firmware-auto-baseline", _, Some(cleanup))
+                if firmware_auto_cleanup_is_consistent(self, cleanup) => {}
+            (
+                EVIDENCE_SCHEMA_VERSION_V2,
+                "firmware-auto-baseline",
+                RunOutcomeStatus::Passed,
+                None,
+            )
+            | (_, _, _, Some(_)) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "firmware_auto_cleanup",
+                    index: 0,
+                });
+            }
+            (_, _, _, None) => {}
+        }
+        match (
+            self.schema_version,
+            self.stage.as_str(),
+            &self.preflight_checks,
+        ) {
+            (EVIDENCE_SCHEMA_VERSION_V2, "preflight", Some(checks))
+                if (1..=12).contains(&checks.len()) => {}
+            (EVIDENCE_SCHEMA_VERSION_V2, "preflight", _) | (_, _, Some(_)) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "preflight_checks",
                     index: 0,
                 });
             }
@@ -790,6 +1028,90 @@ impl EvidenceRecord {
         }
         if let Some(workload) = &self.workload {
             validate_workload(workload)?;
+        }
+        if let Some(checks) = &self.preflight_checks {
+            let mut names = std::collections::HashSet::new();
+            for (index, check) in checks.iter().enumerate() {
+                validate_timestamp(self, check.timestamp, "preflight_checks", index)?;
+                if !is_identifier(&check.check)
+                    || check.detail.is_empty()
+                    || !names.insert(check.check.as_str())
+                {
+                    return Err(EvidenceValidationError::InvalidValue {
+                        field: "preflight_checks",
+                        index,
+                    });
+                }
+            }
+            const REQUIRED_PREFLIGHT_CHECKS: [&str; 12] = [
+                "platform",
+                "trust",
+                "fan-abi",
+                "sensors",
+                "configuration",
+                "policy",
+                "recovery",
+                "stock-boot-fallback",
+                "tooling",
+                "disk-space",
+                "competing-services",
+                "firmware-auto",
+            ];
+            let is_complete_execution = checks.len() == REQUIRED_PREFLIGHT_CHECKS.len()
+                && REQUIRED_PREFLIGHT_CHECKS
+                    .iter()
+                    .all(|required| names.contains(required));
+            let is_collection_failure = self.outcome.status == RunOutcomeStatus::Failed
+                && checks.len() == 1
+                && checks[0].check == "evidence-collection"
+                && !checks[0].passed;
+            let failed_checks_have_faults =
+                checks.iter().filter(|check| !check.passed).all(|check| {
+                    self.faults.iter().any(|fault| {
+                        fault.code == format!("preflight-{}", check.check)
+                            && fault.detail == check.detail
+                            && fault.timestamp == check.timestamp
+                    })
+                });
+            if !is_complete_execution && !is_collection_failure
+                || self.outcome.status == RunOutcomeStatus::Passed
+                    && checks.iter().any(|check| !check.passed)
+                || self.outcome.status == RunOutcomeStatus::Failed
+                    && (checks.iter().all(|check| check.passed) || !failed_checks_have_faults)
+            {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "preflight_checks.complete",
+                    index: checks.len(),
+                });
+            }
+        }
+        if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2
+            && self.stage == "preflight"
+            && self.outcome.status == RunOutcomeStatus::Passed
+        {
+            let readback_is_exact = |fan| {
+                let mut matching = self.readbacks.iter().filter(|readback| {
+                    readback.fan == fan
+                        && readback.field == FanReadbackField::Enable
+                        && readback.phase == Some(FanReadbackPhase::Final)
+                        && readback.value == Some(2)
+                        && readback.outcome == ObservationOutcome::Confirmed
+                        && readback.source_timestamp.is_none()
+                        && readback.fresh.is_none()
+                        && readback.boot_id.is_none()
+                });
+                matching.next().is_some() && matching.next().is_none()
+            };
+            if self.readbacks.len() != 2
+                || !readback_is_exact(EvidenceFan::Cpu)
+                || !readback_is_exact(EvidenceFan::Gpu)
+                || !self.outcome.final_firmware_auto_confirmed
+            {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "preflight.readbacks",
+                    index: self.readbacks.len(),
+                });
+            }
         }
 
         for (index, sample) in self.samples.iter().enumerate() {
@@ -1276,6 +1598,12 @@ fn firmware_auto_baseline_is_complete(record: &EvidenceRecord) -> bool {
                 && sample.selected_profile == Some(workload.power_profile)
                 && sample.cpu_source_demand_basis_points.is_some()
                 && sample.gpu_source_demand_basis_points.is_some()
+                && sample
+                    .cpu_utilization_basis_points
+                    .is_some_and(|value| value <= 10_000)
+                && sample
+                    .gpu_utilization_basis_points
+                    .is_some_and(|value| value <= 10_000)
                 && sample.commanded_demand_basis_points.is_some()
                 && sample.cpu_thermal_throttling == Some(false)
                 && sample.gpu_thermal_throttling == Some(false)
@@ -1302,10 +1630,18 @@ fn firmware_auto_baseline_is_complete(record: &EvidenceRecord) -> bool {
         (1_900..=2_100).contains(&delta)
     });
     let readbacks_are_complete = record.readbacks.iter().all(|readback| {
-        readback.field == FanReadbackField::Enable
-            && readback.value == Some(2)
-            && readback.outcome == ObservationOutcome::Confirmed
+        readback.outcome == ObservationOutcome::Confirmed
             && readback.phase.is_some()
+            && match readback.field {
+                FanReadbackField::Enable => readback.value == Some(2),
+                FanReadbackField::Rpm => readback.value.is_some_and(|rpm| {
+                    (crate::tachometer::MINIMUM_PLAUSIBLE_RPM
+                        ..=crate::tachometer::MAXIMUM_PLAUSIBLE_RPM)
+                        .contains(&rpm)
+                        && readback.phase == Some(FanReadbackPhase::Sample)
+                }),
+                FanReadbackField::Pwm => false,
+            }
     }) && [EvidenceFan::Cpu, EvidenceFan::Gpu]
         .into_iter()
         .all(|fan| baseline_readback_phases_are_complete(record, fan, workload_started_at));
@@ -1313,6 +1649,51 @@ fn firmware_auto_baseline_is_complete(record: &EvidenceRecord) -> bool {
         .thermal_summary
         .as_ref()
         .is_some_and(|summary| baseline_summary_matches(record, summary));
+    let cleanup_is_complete = record
+        .firmware_auto_cleanup
+        .as_ref()
+        .is_some_and(|cleanup| {
+            let Some(stopped_at) = cleanup.workload_stop_confirmed_at else {
+                return false;
+            };
+            let Some(cleaned_at) = cleanup.cleanup_completed_at else {
+                return false;
+            };
+            let last_sample_observation = record
+                .samples
+                .iter()
+                .map(|sample| sample.timestamp.monotonic_millis)
+                .chain(
+                    record
+                        .readbacks
+                        .iter()
+                        .filter(|readback| readback.phase == Some(FanReadbackPhase::Sample))
+                        .map(|readback| readback.timestamp.monotonic_millis),
+                )
+                .max()
+                .unwrap_or(workload_started_at.monotonic_millis);
+            let first_final_readback = record
+                .readbacks
+                .iter()
+                .filter(|readback| readback.phase == Some(FanReadbackPhase::Final))
+                .map(|readback| readback.timestamp.monotonic_millis)
+                .min()
+                .unwrap_or(0);
+            timestamp_precedes(workload_started_at, cleanup.workload_stop_requested_at)
+                && last_sample_observation <= cleanup.workload_stop_requested_at.monotonic_millis
+                && timestamp_precedes(cleanup.workload_stop_requested_at, stopped_at)
+                && stopped_at
+                    .monotonic_millis
+                    .saturating_sub(cleanup.workload_stop_requested_at.monotonic_millis)
+                    <= crate::baseline::WORKLOAD_STOP_TIMEOUT_MILLIS
+                && timestamp_precedes(stopped_at, cleaned_at)
+                && cleaned_at.monotonic_millis <= first_final_readback
+                && timestamp_precedes(cleaned_at, record.completed_at)
+                && !cleanup.containment_required
+                && !cleanup.containment_confirmed
+                && cleanup.containment_confirmed_at.is_none()
+                && cleanup.fan_control_write_count == Some(0)
+        });
 
     workload_conditions_are_safe
         && samples_are_complete
@@ -1320,6 +1701,7 @@ fn firmware_auto_baseline_is_complete(record: &EvidenceRecord) -> bool {
         && cadence_is_valid
         && readbacks_are_complete
         && summary_matches
+        && cleanup_is_complete
         && record.faults.is_empty()
         && record.commands.is_empty()
         && record.state_transitions.is_empty()
@@ -1329,32 +1711,134 @@ fn firmware_auto_baseline_is_complete(record: &EvidenceRecord) -> bool {
         && final_enable_readback_confirms_auto(record, EvidenceFan::Gpu)
 }
 
+fn firmware_auto_cleanup_is_consistent(
+    record: &EvidenceRecord,
+    cleanup: &FirmwareAutoCleanupEvidence,
+) -> bool {
+    let workload_started_at = record.workload_started_at.unwrap_or(record.started_at);
+    let requested = cleanup.workload_stop_requested_at.monotonic_millis;
+    let last_sample_observation = record
+        .samples
+        .iter()
+        .map(|sample| sample.timestamp.monotonic_millis)
+        .chain(
+            record
+                .readbacks
+                .iter()
+                .filter(|readback| readback.phase == Some(FanReadbackPhase::Sample))
+                .map(|readback| readback.timestamp.monotonic_millis),
+        )
+        .max()
+        .unwrap_or(workload_started_at.monotonic_millis);
+    if !timestamp_precedes(record.started_at, cleanup.workload_stop_requested_at)
+        || !timestamp_precedes(cleanup.workload_stop_requested_at, record.completed_at)
+        || !timestamp_precedes(workload_started_at, cleanup.workload_stop_requested_at)
+        || requested < last_sample_observation
+        || cleanup.workload_stop_confirmed_at.is_some_and(|timestamp| {
+            !timestamp_precedes(cleanup.workload_stop_requested_at, timestamp)
+                || !timestamp_precedes(timestamp, record.completed_at)
+        })
+        || cleanup.containment_confirmed_at.is_some_and(|timestamp| {
+            !timestamp_precedes(cleanup.workload_stop_requested_at, timestamp)
+                || !timestamp_precedes(timestamp, record.completed_at)
+        })
+        || cleanup.cleanup_completed_at.is_some_and(|timestamp| {
+            !timestamp_precedes(cleanup.workload_stop_requested_at, timestamp)
+                || !timestamp_precedes(timestamp, record.completed_at)
+        })
+        || cleanup.containment_confirmed != cleanup.containment_confirmed_at.is_some()
+        || (!cleanup.containment_required
+            && (cleanup.containment_confirmed || cleanup.containment_confirmed_at.is_some()))
+    {
+        return false;
+    }
+    let stop_or_containment = cleanup
+        .workload_stop_confirmed_at
+        .iter()
+        .chain(cleanup.containment_confirmed_at.iter())
+        .map(|timestamp| timestamp.monotonic_millis)
+        .max();
+    if cleanup.containment_required
+        && stop_or_containment.is_none()
+        && record.outcome.status == RunOutcomeStatus::Passed
+    {
+        return false;
+    }
+    if cleanup.containment_confirmed_at.is_some_and(|timestamp| {
+        timestamp.monotonic_millis
+            < cleanup
+                .workload_stop_confirmed_at
+                .map_or(requested, |stopped| stopped.monotonic_millis.max(requested))
+    }) {
+        return false;
+    }
+    match cleanup.cleanup_completed_at {
+        Some(completed) => {
+            let precedes_final_readbacks = record
+                .readbacks
+                .iter()
+                .filter(|readback| readback.phase == Some(FanReadbackPhase::Final))
+                .all(|readback| completed.monotonic_millis <= readback.timestamp.monotonic_millis);
+            let follows_stop_and_containment = cleanup
+                .workload_stop_confirmed_at
+                .iter()
+                .chain(cleanup.containment_confirmed_at.iter())
+                .all(|timestamp| timestamp_precedes(*timestamp, completed));
+            let containment_allows_cleanup = !cleanup.containment_required
+                || cleanup.containment_confirmed && cleanup.containment_confirmed_at.is_some();
+            stop_or_containment.is_some()
+                && follows_stop_and_containment
+                && containment_allows_cleanup
+                && precedes_final_readbacks
+                && cleanup.fan_control_write_count.is_some()
+        }
+        None => cleanup.fan_control_write_count.is_none(),
+    }
+}
+
+fn timestamp_precedes(left: EvidenceTimestamp, right: EvidenceTimestamp) -> bool {
+    left.monotonic_millis <= right.monotonic_millis
+        && left.wall_unix_millis <= right.wall_unix_millis
+}
+
 fn baseline_readback_phases_are_complete(
     record: &EvidenceRecord,
     fan: EvidenceFan,
     workload_started_at: EvidenceTimestamp,
 ) -> bool {
-    let Some(endpoint_identity) = record
-        .readbacks
-        .iter()
-        .find(|readback| readback.fan == fan && readback.phase == Some(FanReadbackPhase::Initial))
-        .map(|readback| readback.endpoint_identity.as_str())
-    else {
+    let Some(identities) = &record.fan_endpoint_identities else {
         return false;
+    };
+    let (enable_identity, tachometer_identity) = match fan {
+        EvidenceFan::Cpu => (&identities.cpu_enable, &identities.cpu_tachometer),
+        EvidenceFan::Gpu => (&identities.gpu_enable, &identities.gpu_tachometer),
     };
     if !record
         .readbacks
         .iter()
-        .filter(|readback| readback.fan == fan)
-        .all(|readback| readback.endpoint_identity == endpoint_identity)
+        .filter(|readback| readback.fan == fan && readback.field == FanReadbackField::Enable)
+        .all(|readback| readback.endpoint_identity == *enable_identity)
+        || !record
+            .readbacks
+            .iter()
+            .filter(|readback| readback.fan == fan && readback.field == FanReadbackField::Rpm)
+            .all(|readback| {
+                readback.endpoint_identity == *tachometer_identity
+                    && readback.value.is_some_and(|rpm| {
+                        (crate::tachometer::MINIMUM_PLAUSIBLE_RPM
+                            ..=crate::tachometer::MAXIMUM_PLAUSIBLE_RPM)
+                            .contains(&rpm)
+                    })
+            })
     {
         return false;
     }
     let unique_phase = |phase| {
-        let mut matches = record
-            .readbacks
-            .iter()
-            .filter(|readback| readback.fan == fan && readback.phase == Some(phase));
+        let mut matches = record.readbacks.iter().filter(|readback| {
+            readback.fan == fan
+                && readback.field == FanReadbackField::Enable
+                && readback.phase == Some(phase)
+        });
         let readback = matches.next()?;
         matches.next().is_none().then_some(readback)
     };
@@ -1381,7 +1865,7 @@ fn baseline_readback_phases_are_complete(
             workload_started.timestamp.monotonic_millis <= sample.timestamp.monotonic_millis
         })
         && record.samples.iter().all(|sample| {
-            record
+            let enable_count = record
                 .readbacks
                 .iter()
                 .filter(|readback| {
@@ -1390,12 +1874,28 @@ fn baseline_readback_phases_are_complete(
                         .monotonic_millis
                         .saturating_sub(sample.timestamp.monotonic_millis);
                     readback.fan == fan
+                        && readback.field == FanReadbackField::Enable
                         && readback.phase == Some(FanReadbackPhase::Sample)
                         && readback.timestamp.monotonic_millis >= sample.timestamp.monotonic_millis
                         && delay <= 100
                 })
-                .count()
-                == 1
+                .count();
+            let rpm_count = record
+                .readbacks
+                .iter()
+                .filter(|readback| {
+                    let delay = readback
+                        .timestamp
+                        .monotonic_millis
+                        .saturating_sub(sample.timestamp.monotonic_millis);
+                    readback.fan == fan
+                        && readback.field == FanReadbackField::Rpm
+                        && readback.phase == Some(FanReadbackPhase::Sample)
+                        && readback.timestamp.monotonic_millis >= sample.timestamp.monotonic_millis
+                        && delay <= 100
+                })
+                .count();
+            enable_count == 1 && rpm_count == 1
         })
         && final_readback.timestamp == record.completed_at
         && record
@@ -1403,7 +1903,7 @@ fn baseline_readback_phases_are_complete(
             .iter()
             .filter(|readback| readback.fan == fan)
             .count()
-            == record.samples.len() + 4
+            == record.samples.len() * 2 + 4
 }
 
 fn profile_power(profile: EvidenceProfile) -> EvidenceExternalPower {
@@ -1704,10 +2204,13 @@ fn validate_owned_ancestor_chain(
             .symlink_metadata()
             .map_err(|source| io_error("inspect qualification record ancestor", source))?;
         let owner_is_trusted = metadata.uid() == 0 || metadata.uid() == required_owner;
+        let has_extended_acl = path_has_extended_acl(ancestor)
+            .map_err(|source| io_error("inspect qualification record ancestor ACL", source))?;
         if metadata.file_type().is_symlink()
             || !metadata.is_dir()
             || !owner_is_trusted
             || metadata.permissions().mode() & 0o022 != 0
+            || has_extended_acl
         {
             return Err(io_error(
                 "validate qualification record ancestor ownership",

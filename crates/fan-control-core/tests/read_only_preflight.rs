@@ -3,10 +3,11 @@ mod support;
 use std::{collections::BTreeMap, path::Path};
 
 use fan_control_core::{
-    FakePlatform, FileIdentity, FilePermissions, IdentityBoundReadAccess, NvidiaGpuSelector,
-    NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, PlatformError, PlatformErrorKind,
-    PlatformOperation, PreflightArtifact, PreflightCheck, PreflightEnvironment, PreflightInputs,
-    PreflightReport, PreflightRequirements, ServiceAccess, run_read_only_preflight,
+    EvidenceTimestamp, FakePlatform, FileIdentity, FilePermissions, IdentityBoundReadAccess,
+    NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, ObservationOutcome,
+    PlatformError, PlatformErrorKind, PlatformOperation, PreflightArtifact, PreflightCheck,
+    PreflightEnvironment, PreflightInputs, PreflightReport, PreflightRequirements,
+    QualificationEnvelopeIdentityV1, ServiceAccess, parse_evidence_v2, run_read_only_preflight,
 };
 use support::{
     PROTECTED_POLICY, compatibility_declaration, matching_observation_for_policy, matching_record,
@@ -37,6 +38,7 @@ gpu_curve = [{ temperature_c = 35, demand_percent = 25 }, { temperature_c = 82, 
 cpu_curve = [{ temperature_c = 40, demand_percent = 30 }, { temperature_c = 90, demand_percent = 100 }]
 gpu_curve = [{ temperature_c = 35, demand_percent = 25 }, { temperature_c = 82, demand_percent = 100 }]
 "#;
+const JSON_SCHEMA_V2: &str = include_str!("../../../schemas/evidence-v2.json");
 
 #[derive(Clone)]
 struct StubNvml(Result<NvmlGpuSample, NvmlError>);
@@ -54,6 +56,11 @@ struct StubEnvironment {
     artifacts: BTreeMap<PreflightArtifact, bool>,
     available_bytes: Result<u64, PlatformError>,
     requested_artifacts: Vec<PreflightArtifact>,
+    signing_trust_ready: bool,
+    recovery_ready: bool,
+    stock_boot_fallback_ready: bool,
+    qualification_workload_absent: bool,
+    timestamp_millis: u64,
 }
 
 impl StubEnvironment {
@@ -65,11 +72,41 @@ impl StubEnvironment {
                 .collect(),
             available_bytes: Ok(2_000_000),
             requested_artifacts: Vec::new(),
+            signing_trust_ready: true,
+            recovery_ready: true,
+            stock_boot_fallback_ready: true,
+            qualification_workload_absent: true,
+            timestamp_millis: 10,
         }
     }
 }
 
 impl PreflightEnvironment for StubEnvironment {
+    fn timestamp_now(&mut self) -> EvidenceTimestamp {
+        let timestamp = EvidenceTimestamp {
+            monotonic_millis: self.timestamp_millis,
+            wall_unix_millis: 100 + i64::try_from(self.timestamp_millis).unwrap(),
+        };
+        self.timestamp_millis += 1;
+        timestamp
+    }
+
+    fn signing_trust_is_ready(&mut self) -> Result<bool, PlatformError> {
+        Ok(self.signing_trust_ready)
+    }
+
+    fn recovery_is_ready(&mut self) -> Result<bool, PlatformError> {
+        Ok(self.recovery_ready)
+    }
+
+    fn stock_boot_fallback_is_ready(&mut self) -> Result<bool, PlatformError> {
+        Ok(self.stock_boot_fallback_ready)
+    }
+
+    fn qualification_workload_is_absent(&mut self) -> Result<bool, PlatformError> {
+        Ok(self.qualification_workload_absent)
+    }
+
     fn artifact_is_ready(&mut self, artifact: PreflightArtifact) -> Result<bool, PlatformError> {
         self.requested_artifacts.push(artifact);
         Ok(self.artifacts.get(&artifact).copied().unwrap_or(false))
@@ -121,6 +158,8 @@ fn reports_every_required_check_and_passes_without_any_write_or_lock() {
             PreflightCheck::Sensors,
             PreflightCheck::Configuration,
             PreflightCheck::Policy,
+            PreflightCheck::Recovery,
+            PreflightCheck::StockBootFallback,
             PreflightCheck::Tooling,
             PreflightCheck::DiskSpace,
             PreflightCheck::CompetingServices,
@@ -131,6 +170,133 @@ fn reports_every_required_check_and_passes_without_any_write_or_lock() {
     let plain = report.to_string();
     assert!(plain.lines().all(|line| line.starts_with("PASS ")));
     assert!(plain.contains("PASS firmware-auto: both fans are already in Firmware Auto"));
+    let record_value: serde_json::Value = serde_json::from_str(&record).unwrap();
+    let evidence = report
+        .clone()
+        .into_evidence(
+            QualificationEnvelopeIdentityV1 {
+                qualification_record_schema_version: 1,
+                qualification_id: record_value["qualification_id"].as_str().unwrap().into(),
+                policy_version: record_value["policy_version"].as_str().unwrap().into(),
+                protected_policy_sha256: record_value["protected_policy_sha256"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                compatibility: declaration.clone(),
+            },
+            Some("GPU-11111111-2222-3333-4444-555555555555".into()),
+            EvidenceTimestamp {
+                monotonic_millis: 10,
+                wall_unix_millis: 100,
+            },
+            EvidenceTimestamp {
+                monotonic_millis: 30,
+                wall_unix_millis: 130,
+            },
+        )
+        .unwrap();
+    assert_eq!(evidence.stage, "preflight");
+    assert_eq!(
+        evidence.nvidia_gpu_uuid.as_deref(),
+        Some("GPU-11111111-2222-3333-4444-555555555555")
+    );
+    assert_eq!(
+        evidence.fan_endpoint_identities.as_ref().unwrap().cpu_pwm,
+        "device-0-inode-7"
+    );
+    assert_eq!(
+        evidence
+            .fan_endpoint_identities
+            .as_ref()
+            .unwrap()
+            .gpu_tachometer,
+        "device-0-inode-12"
+    );
+    assert_eq!(evidence.readbacks.len(), 2);
+    let checks = evidence.preflight_checks.as_ref().unwrap();
+    assert_eq!(checks.len(), 12);
+    assert!(checks.iter().all(|check| check.passed));
+    let check_times = checks
+        .iter()
+        .map(|check| check.timestamp.monotonic_millis)
+        .collect::<Vec<_>>();
+    assert!(check_times.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(
+        check_times
+            .iter()
+            .all(|timestamp| (10..=30).contains(timestamp))
+    );
+    assert!(evidence.commands.is_empty());
+    assert!(evidence.validate().is_ok());
+    let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA_V2).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let evidence_json = serde_json::to_value(&evidence).unwrap();
+    assert!(validator.is_valid(&evidence_json));
+    let mut duplicate_check = evidence_json.clone();
+    duplicate_check["preflight_checks"][0]["check"] =
+        duplicate_check["preflight_checks"][1]["check"].clone();
+    assert!(!validator.is_valid(&duplicate_check));
+    let mut contradictory_check = evidence_json;
+    contradictory_check["preflight_checks"][0]["passed"] = false.into();
+    assert!(!validator.is_valid(&contradictory_check));
+    let mut missing_gpu_uuid = serde_json::to_value(&evidence).unwrap();
+    missing_gpu_uuid
+        .as_object_mut()
+        .unwrap()
+        .remove("nvidia_gpu_uuid");
+    assert!(!validator.is_valid(&missing_gpu_uuid));
+    let mut missing_endpoint_identities = serde_json::to_value(&evidence).unwrap();
+    missing_endpoint_identities
+        .as_object_mut()
+        .unwrap()
+        .remove("fan_endpoint_identities");
+    assert!(!validator.is_valid(&missing_endpoint_identities));
+    let mut semantically_missing_endpoint_identities = evidence.clone();
+    semantically_missing_endpoint_identities.fan_endpoint_identities = None;
+    assert!(semantically_missing_endpoint_identities.validate().is_err());
+    let mut invalid_endpoint_identities = evidence.clone();
+    invalid_endpoint_identities
+        .fan_endpoint_identities
+        .as_mut()
+        .unwrap()
+        .gpu_tachometer = "not an identity".into();
+    assert!(invalid_endpoint_identities.validate().is_err());
+    let mut faultless_collection_failure = contradictory_check;
+    faultless_collection_failure["preflight_checks"] = serde_json::json!([{
+        "check": "evidence-collection",
+        "passed": false,
+        "detail": "collection failed",
+        "timestamp": { "monotonic_millis": 20, "wall_unix_millis": 120 }
+    }]);
+    faultless_collection_failure["outcome"]["status"] = "failed".into();
+    faultless_collection_failure["faults"] = serde_json::json!([]);
+    assert!(!validator.is_valid(&faultless_collection_failure));
+    let mut contradictory_failure = evidence.clone();
+    contradictory_failure.outcome.status = fan_control_core::RunOutcomeStatus::Failed;
+    contradictory_failure.outcome.reason = "claimed failure without a failed check".into();
+    assert!(contradictory_failure.validate().is_err());
+    let mut wall_clock_adjusted = evidence.clone();
+    wall_clock_adjusted.started_at.wall_unix_millis = 10_000;
+    wall_clock_adjusted.completed_at.wall_unix_millis = -10_000;
+    assert!(wall_clock_adjusted.validate().is_ok());
+    let mut too_many_checks = evidence.clone();
+    let mut extra_check = too_many_checks.preflight_checks.as_ref().unwrap()[0].clone();
+    extra_check.check = "unexpected-extra".into();
+    too_many_checks
+        .preflight_checks
+        .as_mut()
+        .unwrap()
+        .push(extra_check);
+    assert!(too_many_checks.validate().is_err());
+    let mut malformed = evidence.clone();
+    malformed.readbacks[0].phase = None;
+    assert!(malformed.validate().is_err());
+    let mut malformed_json = serde_json::to_value(&evidence).unwrap();
+    malformed_json["readbacks"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("phase");
+    assert!(parse_evidence_v2(&malformed_json.to_string()).is_err());
     assert_eq!(
         environment.requested_artifacts,
         vec![
@@ -224,6 +390,57 @@ fn missing_cpu_sensor_is_a_blocking_sensor_failure() {
 }
 
 #[test]
+fn temperatures_at_absolute_abort_limits_fail_safe_start() {
+    let declaration = compatibility_declaration(PROTECTED_POLICY);
+    let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
+    let record = matching_record(PROTECTED_POLICY);
+
+    let (mut platform, mut nvml, mut environment) = passing_fixture();
+    platform.insert_file_with_permissions(
+        Path::new(HWMON_ROOT).join("hwmon1/temp1_input"),
+        "95000\n",
+        FilePermissions::READ_ONLY,
+    );
+    let report = run_fixture_report(
+        &mut platform,
+        &mut nvml,
+        &mut environment,
+        &declaration,
+        &observations,
+        &record,
+    );
+    assert!(
+        report
+            .result(PreflightCheck::Sensors)
+            .unwrap()
+            .detail()
+            .contains("95 °C absolute abort limit")
+    );
+
+    let (mut platform, _, mut environment) = passing_fixture();
+    let mut nvml = StubNvml(Ok(NvmlGpuSample::new(
+        EXPECTED_UUID,
+        "00000000:01:00.0",
+        85.0,
+    )));
+    let report = run_fixture_report(
+        &mut platform,
+        &mut nvml,
+        &mut environment,
+        &declaration,
+        &observations,
+        &record,
+    );
+    assert!(
+        report
+            .result(PreflightCheck::Sensors)
+            .unwrap()
+            .detail()
+            .contains("85 °C absolute abort limit")
+    );
+}
+
+#[test]
 fn incompatible_platform_trust_abi_and_policy_each_fail_their_reported_check() {
     for check in [
         PreflightCheck::Platform,
@@ -262,7 +479,7 @@ fn incompatible_platform_trust_abi_and_policy_each_fail_their_reported_check() {
         );
 
         assert!(!report.result(check).unwrap().passed(), "{check:?}");
-        assert_eq!(report.checks().len(), 10);
+        assert_eq!(report.checks().len(), 12);
         assert!(report.result(PreflightCheck::FirmwareAuto).is_some());
     }
 }
@@ -277,6 +494,9 @@ fn failures_are_all_reported_instead_of_short_circuiting() {
         .artifacts
         .insert(PreflightArtifact::RestorationTool, false);
     environment.available_bytes = Ok(999);
+    environment.signing_trust_ready = false;
+    environment.recovery_ready = false;
+    environment.stock_boot_fallback_ready = false;
     let declaration = compatibility_declaration(PROTECTED_POLICY);
     let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
     let record = matching_record(PROTECTED_POLICY);
@@ -303,6 +523,9 @@ fn failures_are_all_reported_instead_of_short_circuiting() {
 
     for check in [
         PreflightCheck::Configuration,
+        PreflightCheck::Trust,
+        PreflightCheck::Recovery,
+        PreflightCheck::StockBootFallback,
         PreflightCheck::Tooling,
         PreflightCheck::DiskSpace,
         PreflightCheck::CompetingServices,
@@ -310,7 +533,7 @@ fn failures_are_all_reported_instead_of_short_circuiting() {
     ] {
         assert!(!report.result(check).unwrap().passed(), "{check:?}");
     }
-    assert_eq!(report.checks().len(), 10);
+    assert_eq!(report.checks().len(), 12);
     assert_eq!(
         report.result(PreflightCheck::Tooling).unwrap().detail(),
         "missing /usr/bin/pt31553-fan-restore"
@@ -321,6 +544,41 @@ fn failures_are_all_reported_instead_of_short_circuiting() {
         .detail();
     assert!(competing.contains("fancontrol.service"));
     assert!(competing.contains("nbfc.service"));
+
+    let trust_timestamp = report.result(PreflightCheck::Trust).unwrap().timestamp();
+    let record_value: serde_json::Value = serde_json::from_str(&record).unwrap();
+    let evidence = report
+        .into_evidence(
+            QualificationEnvelopeIdentityV1 {
+                qualification_record_schema_version: 1,
+                qualification_id: record_value["qualification_id"].as_str().unwrap().into(),
+                policy_version: record_value["policy_version"].as_str().unwrap().into(),
+                protected_policy_sha256: record_value["protected_policy_sha256"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                compatibility: declaration,
+            },
+            Some("GPU-11111111-2222-3333-4444-555555555555".into()),
+            EvidenceTimestamp {
+                monotonic_millis: 1,
+                wall_unix_millis: 1,
+            },
+            EvidenceTimestamp {
+                monotonic_millis: 100,
+                wall_unix_millis: 1_000,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        evidence
+            .faults
+            .iter()
+            .find(|fault| fault.code == "preflight-trust")
+            .unwrap()
+            .timestamp,
+        trust_timestamp
+    );
 }
 
 #[test]
@@ -365,6 +623,204 @@ fn either_fan_outside_firmware_auto_blocks_preflight() {
 }
 
 #[test]
+fn fan_mode_endpoints_writable_outside_root_block_the_sandbox() {
+    for endpoint in [
+        "pwm1",
+        "pwm1_enable",
+        "fan1_input",
+        "pwm2",
+        "pwm2_enable",
+        "fan2_input",
+    ] {
+        for permissions in [
+            FilePermissions::from_mode(0o664),
+            FilePermissions::from_mode(0o644).with_extended_acl(),
+            FilePermissions::from_mode(0o600).with_owner_uid(65_534),
+        ] {
+            let (mut platform, mut nvml, mut environment) = passing_fixture();
+            platform.insert_file_with_permissions(
+                Path::new(HWMON_ROOT).join("hwmon0").join(endpoint),
+                "2\n",
+                permissions,
+            );
+            let declaration = compatibility_declaration(PROTECTED_POLICY);
+            let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
+            let record = matching_record(PROTECTED_POLICY);
+            let report = run_fixture_report(
+                &mut platform,
+                &mut nvml,
+                &mut environment,
+                &declaration,
+                &observations,
+                &record,
+            );
+            assert!(
+                !report.result(PreflightCheck::FanAbi).unwrap().passed()
+                    || !report
+                        .result(PreflightCheck::FirmwareAuto)
+                        .unwrap()
+                        .passed(),
+                "endpoint={endpoint} permissions={permissions:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn project_writers_and_leftover_workloads_block_preflight() {
+    for service in ["pt31553-fand.service", "pt31553-fan-sleep-guard.service"] {
+        let (mut platform, mut nvml, mut environment) = passing_fixture();
+        platform.insert_service(service, true);
+        let declaration = compatibility_declaration(PROTECTED_POLICY);
+        let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
+        let record = matching_record(PROTECTED_POLICY);
+        let report = run_fixture_report(
+            &mut platform,
+            &mut nvml,
+            &mut environment,
+            &declaration,
+            &observations,
+            &record,
+        );
+        assert!(
+            report
+                .result(PreflightCheck::CompetingServices)
+                .unwrap()
+                .detail()
+                .contains(service)
+        );
+    }
+
+    let (mut platform, mut nvml, mut environment) = passing_fixture();
+    environment.qualification_workload_absent = false;
+    let declaration = compatibility_declaration(PROTECTED_POLICY);
+    let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
+    let record = matching_record(PROTECTED_POLICY);
+    let report = run_fixture_report(
+        &mut platform,
+        &mut nvml,
+        &mut environment,
+        &declaration,
+        &observations,
+        &record,
+    );
+    assert!(
+        report
+            .result(PreflightCheck::CompetingServices)
+            .unwrap()
+            .detail()
+            .contains("qualification workload is still active")
+    );
+}
+
+#[test]
+fn final_fan_generation_rechecks_sandbox_write_boundary() {
+    let (platform, mut nvml, mut environment) = passing_fixture();
+    let mut platform = UnsafePermissionsAfterInitialFanAbi {
+        inner: platform,
+        fan_enable_permission_calls: 0,
+    };
+    let declaration = compatibility_declaration(PROTECTED_POLICY);
+    let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
+    let record = matching_record(PROTECTED_POLICY);
+    let report = run_fixture_report(
+        &mut platform,
+        &mut nvml,
+        &mut environment,
+        &declaration,
+        &observations,
+        &record,
+    );
+
+    assert!(
+        report.result(PreflightCheck::FanAbi).unwrap().passed(),
+        "fan-enable permission calls={}\n{report}",
+        platform.fan_enable_permission_calls
+    );
+    assert!(
+        !report
+            .result(PreflightCheck::FirmwareAuto)
+            .unwrap()
+            .passed()
+    );
+    assert_eq!(platform.fan_enable_permission_calls, 29);
+}
+
+#[test]
+fn malformed_fan_mode_becomes_identity_bound_unreadable_valid_failed_evidence() {
+    let (mut platform, mut nvml, mut environment) = passing_fixture();
+    platform.insert_file_with_permissions(
+        Path::new(HWMON_ROOT).join("hwmon0/pwm1_enable"),
+        "not-a-mode\n",
+        FilePermissions::READ_WRITE,
+    );
+    let declaration = compatibility_declaration(PROTECTED_POLICY);
+    let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
+    let record = matching_record(PROTECTED_POLICY);
+    let report = run_fixture_report(
+        &mut platform,
+        &mut nvml,
+        &mut environment,
+        &declaration,
+        &observations,
+        &record,
+    );
+    assert!(
+        report
+            .result(PreflightCheck::FirmwareAuto)
+            .unwrap()
+            .detail()
+            .contains("invalid mode")
+    );
+
+    let record_value: serde_json::Value = serde_json::from_str(&record).unwrap();
+    let evidence = report
+        .into_evidence(
+            QualificationEnvelopeIdentityV1 {
+                qualification_record_schema_version: 1,
+                qualification_id: record_value["qualification_id"].as_str().unwrap().into(),
+                policy_version: record_value["policy_version"].as_str().unwrap().into(),
+                protected_policy_sha256: record_value["protected_policy_sha256"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                compatibility: declaration,
+            },
+            Some("GPU-11111111-2222-3333-4444-555555555555".into()),
+            EvidenceTimestamp {
+                monotonic_millis: 1,
+                wall_unix_millis: 1,
+            },
+            EvidenceTimestamp {
+                monotonic_millis: 100,
+                wall_unix_millis: 1_000,
+            },
+        )
+        .unwrap();
+    let cpu = evidence
+        .readbacks
+        .iter()
+        .find(|readback| readback.fan == fan_control_core::EvidenceFan::Cpu)
+        .unwrap();
+    assert_eq!(cpu.value, None);
+    assert_eq!(cpu.outcome, ObservationOutcome::Unreadable);
+    assert!(cpu.endpoint_identity.starts_with("device-"));
+    assert!(evidence.fan_endpoint_identities.is_none());
+    assert!(evidence.validate().is_ok());
+    let mut partial = evidence.clone();
+    partial.preflight_checks.as_mut().unwrap().truncate(2);
+    assert!(partial.validate().is_err());
+    let mut mismatched_fault = evidence.clone();
+    mismatched_fault
+        .faults
+        .iter_mut()
+        .find(|fault| fault.code == "preflight-firmware-auto")
+        .unwrap()
+        .detail = "different fault detail".into();
+    assert!(mismatched_fault.validate().is_err());
+}
+
+#[test]
 fn fan_mode_reads_fail_closed_when_the_discovered_hwmon_identity_rebinds() {
     let (platform, mut nvml, mut environment) = passing_fixture();
     let mut platform = RebindOnCpuModeRead { inner: platform };
@@ -396,6 +852,87 @@ fn fan_mode_reads_fail_closed_when_the_discovered_hwmon_identity_rebinds() {
             .result(PreflightCheck::FirmwareAuto)
             .unwrap()
             .passed()
+    );
+    let record_value: serde_json::Value = serde_json::from_str(&record).unwrap();
+    let evidence = report
+        .into_evidence(
+            QualificationEnvelopeIdentityV1 {
+                qualification_record_schema_version: 1,
+                qualification_id: record_value["qualification_id"].as_str().unwrap().into(),
+                policy_version: record_value["policy_version"].as_str().unwrap().into(),
+                protected_policy_sha256: record_value["protected_policy_sha256"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                compatibility: declaration,
+            },
+            Some("GPU-11111111-2222-3333-4444-555555555555".into()),
+            EvidenceTimestamp {
+                monotonic_millis: 1,
+                wall_unix_millis: 1,
+            },
+            EvidenceTimestamp {
+                monotonic_millis: 100,
+                wall_unix_millis: 1_000,
+            },
+        )
+        .unwrap();
+    assert!(!evidence.outcome.final_firmware_auto_confirmed);
+    assert!(evidence.fan_endpoint_identities.is_none());
+    assert_eq!(evidence.readbacks.len(), 2);
+    assert_eq!(
+        evidence
+            .readbacks
+            .iter()
+            .map(|readback| readback.timestamp.monotonic_millis)
+            .collect::<Vec<_>>(),
+        vec![21, 22]
+    );
+    assert!(
+        evidence
+            .readbacks
+            .iter()
+            .all(|readback| readback.outcome == ObservationOutcome::Unreadable)
+    );
+}
+
+#[test]
+fn collection_failure_can_preserve_evidence_without_a_valid_gpu_identity() {
+    let report = fan_control_core::PreflightReport::collection_failure(
+        EvidenceTimestamp {
+            monotonic_millis: 2,
+            wall_unix_millis: 2,
+        },
+        "invalid protected GPU identity",
+    );
+    let evidence = report
+        .into_evidence(
+            QualificationEnvelopeIdentityV1 {
+                qualification_record_schema_version: 1,
+                qualification_id: "qualification-id".into(),
+                policy_version: "policy-v1".into(),
+                protected_policy_sha256: "a".repeat(64),
+                compatibility: compatibility_declaration(PROTECTED_POLICY),
+            },
+            None,
+            EvidenceTimestamp {
+                monotonic_millis: 1,
+                wall_unix_millis: 1,
+            },
+            EvidenceTimestamp {
+                monotonic_millis: 2,
+                wall_unix_millis: 2,
+            },
+        )
+        .unwrap();
+
+    assert!(evidence.nvidia_gpu_uuid.is_none());
+    assert!(evidence.validate().is_ok());
+    let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA_V2).unwrap();
+    assert!(
+        jsonschema::validator_for(&schema)
+            .unwrap()
+            .is_valid(&serde_json::to_value(&evidence).unwrap())
     );
 }
 
@@ -502,7 +1039,7 @@ impl IdentityBoundReadAccess for RebindOnCpuModeRead {
         child: &str,
     ) -> Result<String, PlatformError> {
         if child == "pwm1_enable" {
-            self.inner.rebind_path_identity(directory);
+            self.inner.rebind_path_identity(directory.join(child));
         }
         IdentityBoundReadAccess::read_bound(&mut self.inner, directory, expected, child)
     }
@@ -517,6 +1054,62 @@ impl IdentityBoundReadAccess for RebindOnCpuModeRead {
 }
 
 impl ServiceAccess for RebindOnCpuModeRead {
+    fn is_service_active(&mut self, service: &str) -> Result<bool, PlatformError> {
+        self.inner.is_service_active(service)
+    }
+}
+
+struct UnsafePermissionsAfterInitialFanAbi {
+    inner: FakePlatform,
+    fan_enable_permission_calls: usize,
+}
+
+impl IdentityBoundReadAccess for UnsafePermissionsAfterInitialFanAbi {
+    fn read(&mut self, path: &Path) -> Result<String, PlatformError> {
+        IdentityBoundReadAccess::read(&mut self.inner, path)
+    }
+
+    fn list(&mut self, directory: &Path) -> Result<Vec<std::path::PathBuf>, PlatformError> {
+        IdentityBoundReadAccess::list(&mut self.inner, directory)
+    }
+
+    fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
+        if path
+            .file_name()
+            .is_some_and(|name| name == "pwm1_enable" || name == "pwm2_enable")
+        {
+            self.fan_enable_permission_calls += 1;
+        }
+        if self.fan_enable_permission_calls > 28 {
+            Ok(FilePermissions::from_mode(0o666))
+        } else {
+            IdentityBoundReadAccess::permissions(&mut self.inner, path)
+        }
+    }
+
+    fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
+        IdentityBoundReadAccess::identity(&mut self.inner, path)
+    }
+
+    fn read_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+        child: &str,
+    ) -> Result<String, PlatformError> {
+        IdentityBoundReadAccess::read_bound(&mut self.inner, directory, expected, child)
+    }
+
+    fn list_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+    ) -> Result<Vec<std::path::PathBuf>, PlatformError> {
+        IdentityBoundReadAccess::list_bound(&mut self.inner, directory, expected)
+    }
+}
+
+impl ServiceAccess for UnsafePermissionsAfterInitialFanAbi {
     fn is_service_active(&mut self, service: &str) -> Result<bool, PlatformError> {
         self.inner.is_service_active(service)
     }

@@ -28,7 +28,7 @@ fn restores_both_fans_and_confirms_both_readbacks() {
 
 #[test]
 fn attempts_both_enable_writes_when_each_other_write_fails() {
-    let (mut platform, device, marker) = fixture("1\n", "1\n");
+    let (mut platform, device, _) = fixture("1\n", "1\n");
     platform.queue_file_steps([
         fail("cpu attempt 1"),
         FakeStep::Pass,
@@ -50,10 +50,7 @@ fn attempts_both_enable_writes_when_each_other_write_fails() {
         error,
         FirmwareAutoRestorationError::Unconfirmed { attempts: 3, .. }
     ));
-    let writes = restore_operations(&platform, marker)
-        .into_iter()
-        .filter(|operation| matches!(operation, PlatformOperation::Write { .. }))
-        .collect::<Vec<_>>();
+    let writes = auto_write_attempts(&platform);
     assert_eq!(writes.len(), 6);
     assert_eq!(writes[4], write(cpu_enable()));
     assert_eq!(writes[5], write(gpu_enable()));
@@ -62,7 +59,7 @@ fn attempts_both_enable_writes_when_each_other_write_fails() {
 #[test]
 fn a_single_fan_write_failure_never_skips_the_other_fan_or_the_next_attempt() {
     for failed_fan in [Fan::Cpu, Fan::Gpu] {
-        let (mut platform, device, marker) = fixture("1\n", "1\n");
+        let (mut platform, device, _) = fixture("1\n", "1\n");
         platform.queue_file_steps([
             if failed_fan == Fan::Cpu {
                 fail("cpu attempt 1")
@@ -80,10 +77,7 @@ fn a_single_fan_write_failure_never_skips_the_other_fan_or_the_next_attempt() {
 
         restore_firmware_auto(&mut platform, &device).unwrap();
 
-        let writes = restore_operations(&platform, marker)
-            .into_iter()
-            .filter(|operation| matches!(operation, PlatformOperation::Write { .. }))
-            .collect::<Vec<_>>();
+        let writes = auto_write_attempts(&platform);
         assert_eq!(
             writes,
             vec![
@@ -170,7 +164,7 @@ fn third_failed_attempt_at_exact_deadline_is_unconfirmed_not_timed_out() {
 
 #[test]
 fn late_confirmation_is_rejected_and_stops_further_attempts() {
-    let (mut platform, device, marker) = fixture("1\n", "1\n");
+    let (mut platform, device, _) = fixture("1\n", "1\n");
     platform.queue_file_steps((0..4).map(|_| FakeStep::Advance(Duration::from_millis(600))));
 
     let error = restore_firmware_auto(&mut platform, &device).unwrap_err();
@@ -180,13 +174,7 @@ fn late_confirmation_is_rejected_and_stops_further_attempts() {
         FirmwareAutoRestorationError::DeadlineExceeded { attempts: 1, .. }
     ));
     assert_eq!(platform.monotonic_now(), Duration::from_secs(2));
-    assert_eq!(
-        restore_operations(&platform, marker)
-            .iter()
-            .filter(|operation| matches!(operation, PlatformOperation::Write { .. }))
-            .count(),
-        2
-    );
+    assert_eq!(auto_write_attempts(&platform).len(), 2);
 }
 
 #[test]
@@ -213,18 +201,12 @@ fn unreadable_first_readback_can_recover_on_an_immediate_retry() {
             .count(),
         4
     );
-    assert_eq!(
-        operations
-            .iter()
-            .filter(|operation| matches!(operation, PlatformOperation::Write { .. }))
-            .count(),
-        4
-    );
+    assert_eq!(auto_write_attempts(&platform).len(), 4);
 }
 
 #[test]
 fn unreadable_gpu_readback_triggers_a_retry() {
-    let (mut platform, device, marker) = fixture("1\n", "1\n");
+    let (mut platform, device, _) = fixture("1\n", "1\n");
     platform.queue_file_steps([
         fail("cpu write rejected"),
         fail("gpu write rejected"),
@@ -238,18 +220,12 @@ fn unreadable_gpu_readback_triggers_a_retry() {
 
     restore_firmware_auto(&mut platform, &device).unwrap();
 
-    assert_eq!(
-        restore_operations(&platform, marker)
-            .iter()
-            .filter(|operation| matches!(operation, PlatformOperation::Write { .. }))
-            .count(),
-        4
-    );
+    assert_eq!(auto_write_attempts(&platform).len(), 4);
 }
 
 #[test]
 fn write_errors_are_not_fatal_when_both_readbacks_confirm_auto() {
-    let (mut platform, device, marker) = fixture("2\n", "2\n");
+    let (mut platform, device, _) = fixture("2\n", "2\n");
     platform.queue_file_steps([
         fail("cpu write rejected"),
         fail("gpu write rejected"),
@@ -259,13 +235,7 @@ fn write_errors_are_not_fatal_when_both_readbacks_confirm_auto() {
 
     restore_firmware_auto(&mut platform, &device).unwrap();
 
-    assert_eq!(
-        restore_operations(&platform, marker)
-            .iter()
-            .filter(|operation| matches!(operation, PlatformOperation::Write { .. }))
-            .count(),
-        2
-    );
+    assert_eq!(auto_write_attempts(&platform).len(), 2);
 }
 
 #[test]
@@ -326,6 +296,17 @@ fn restore_operations(platform: &FakePlatform, marker: usize) -> Vec<PlatformOpe
                     | PlatformOperation::AcquireRuntimeLock(_)
                     | PlatformOperation::ReleaseRuntimeLock(_)
             )
+        })
+        .cloned()
+        .collect()
+}
+
+fn auto_write_attempts(platform: &FakePlatform) -> Vec<PlatformOperation> {
+    platform
+        .bounded_write_attempts()
+        .iter()
+        .filter(|operation| {
+            matches!(operation, PlatformOperation::Write { path, contents } if contents == "2" && (path == cpu_enable() || path == gpu_enable()))
         })
         .cloned()
         .collect()

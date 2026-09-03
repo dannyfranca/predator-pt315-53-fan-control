@@ -765,6 +765,20 @@ fn zero_tachometer_times_out_then_restores_both() {
 }
 
 #[test]
+fn delayed_valid_tachometer_response_completes_qualified_arming() {
+    let (platform, device) = fixture("0\n", "0\n");
+    let mut platform = PathAwarePlatform::new(platform, InjectedFault::DelayedTachometerResponse);
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let (authority, candidate, sample) = admit_and_sample(&mut ownership, &device);
+    let armed =
+        arm_both_fans_safely(&mut ownership, &device, &authority, &candidate, sample).unwrap();
+
+    assert_eq!((armed.cpu_rpm(), armed.gpu_rpm()), (2400, 2600));
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
 fn one_fan_response_cannot_be_cached_while_the_other_starts() {
     let (platform, device) = fixture("2400\n", "0\n");
     let mut platform = PathAwarePlatform::new(platform, InjectedFault::CpuStopsBeforeGpuResponds);
@@ -825,7 +839,10 @@ fn admit_and_sample<P>(
     device: &fan_control_core::AcerHwmonDevice,
 ) -> (AdmittedPolicyAuthority, ValidatedConfig, ArmingReadySample)
 where
-    P: BoundedFileAccess + Clock + RootOwnedQualificationRecordAccess + RuntimeLockAccess,
+    P: BoundedIdentityBoundFileAccess
+        + Clock
+        + RootOwnedQualificationRecordAccess
+        + RuntimeLockAccess,
 {
     ownership.restore_firmware_auto(device).unwrap();
     let authority = admit_policy_authority(
@@ -903,16 +920,30 @@ fn arming_rejects_root_and_endpoint_rebinds_at_each_handover_phase() {
             FanArmingFailure::Platform { fan, operation, .. }
                 if *fan == expected_fan && *operation == expected_operation
         ));
-        assert_auto_restoration_attempted(&ownership.platform().inner, marker);
-        assert_eq!(
-            ownership.platform().inner.file_contents(cpu_enable()),
-            Some("2")
+        let rebound_path = match fault {
+            InjectedFault::RebindRootBeforeMaximum => Path::new(ACER_ROOT),
+            InjectedFault::RebindGpuPwmBeforeMaximum => gpu_pwm(),
+            InjectedFault::RebindCpuEnableBeforeCustom => cpu_enable(),
+            InjectedFault::RebindGpuEnableBeforeCustom => gpu_enable(),
+            InjectedFault::RebindCpuTachBeforeRead => cpu_tachometer(),
+            InjectedFault::RebindGpuTachBeforeRead => gpu_tachometer(),
+            _ => unreachable!(),
+        };
+        assert!(
+            ownership.platform().inner.operations()[marker..]
+                .iter()
+                .all(
+                    |operation| !matches!(operation, PlatformOperation::Write { path, contents }
+                if path == rebound_path && contents == "2")
+                )
         );
-        assert_eq!(
-            ownership.platform().inner.file_contents(gpu_enable()),
-            Some("2")
-        );
-        ownership.release().unwrap();
+        match error {
+            FanArmingError::Rejected(_) => ownership.release().unwrap(),
+            FanArmingError::RestorationFailed { .. } => {
+                let _ownership = ownership.release().unwrap_err().into_ownership();
+            }
+            other => panic!("{fault:?}: unexpected safing outcome: {other:?}"),
+        }
     }
 }
 
@@ -984,6 +1015,7 @@ enum InjectedFault {
     ChangeCpuPwmDuringFinalGpuSnapshot,
     ChangeGpuPwmDuringClosingCpuRead,
     CpuStopsBeforeGpuResponds,
+    DelayedTachometerResponse,
     RejectCpuTachRead,
     RejectGpuTachRead,
     RejectCpuCustomDutyRead,
@@ -1464,6 +1496,14 @@ impl Clock for PathAwarePlatform {
             self.inner.insert_file(gpu_enable(), "1\n");
         }
         self.inner.delay(duration);
+        if self.fault == InjectedFault::DelayedTachometerResponse
+            && self.gpu_custom_written
+            && !self.fault_consumed
+        {
+            self.fault_consumed = true;
+            self.inner.insert_file(cpu_tachometer(), "2400\n");
+            self.inner.insert_file(gpu_tachometer(), "2600\n");
+        }
     }
 }
 

@@ -757,33 +757,6 @@ if sys.argv[4] == "fake-sbverify":
     loaded.TOOLS["sbverify"] = tools / "sbverify"
 if (tools / "bsdtar").is_file():
     loaded.TOOLS["bsdtar"] = tools / "bsdtar"
-original_parse_policy = loaded.parse_policy
-def fixture_policy(path):
-    policy = original_parse_policy(path)
-    if "TEST_MODULE_POLICY_SHA256" in os.environ:
-        policy["package_signer_sha256"] = os.environ["TEST_PACKAGE_POLICY_SHA256"]
-        policy["module_signer_sha256"] = os.environ["TEST_MODULE_POLICY_SHA256"]
-        policy["kernel_image_signer_sha256"] = os.environ["TEST_KERNEL_POLICY_SHA256"]
-    return policy
-loaded.parse_policy = fixture_policy
-original_validate_schema_policy = loaded.validate_schema_policy
-def fixture_schema_policy(path, policy):
-    schema = json.loads(path.read_text())
-    schema["properties"]["build"]["properties"]["package_manifest_signer_fingerprint"]["const"] = policy["package_signer_sha256"]
-    schema["$defs"]["module"]["properties"]["signer_fingerprint"]["const"] = policy["module_signer_sha256"]
-    schema["properties"]["kernel"]["properties"]["module_trust_certificate_fingerprint"]["const"] = policy["module_signer_sha256"]
-    schema["properties"]["kernel"]["properties"]["image_signer_fingerprint"]["const"] = policy["kernel_image_signer_sha256"]
-    fixture_schema = tools / "fixture-package-provenance-schema.json"
-    fixture_schema.write_text(json.dumps(schema))
-    original_validate_schema_policy(fixture_schema, policy)
-loaded.validate_schema_policy = fixture_schema_policy
-original_validate_compatibility_policy = loaded.validate_compatibility_policy
-def fixture_compatibility_policy(compatibility, policy):
-    compatibility["module"]["signer_fingerprint"] = policy["module_signer_sha256"]
-    compatibility["kernel"]["image_signer_fingerprint"] = policy["kernel_image_signer_sha256"]
-    compatibility["module"]["vermagic"] = policy["kernel_release"] + " SMP preempt mod_unload"
-    original_validate_compatibility_policy(compatibility, policy)
-loaded.validate_compatibility_policy = fixture_compatibility_policy
 sys.argv = [str(script), *sys.argv[5:]]
 try:
     raise SystemExit(loaded.main())
@@ -828,10 +801,6 @@ except loaded.VerificationError as error:
             .env("FAKE_KERNEL_CERT", &self.kernel_cert)
             .env("FAKE_KERNEL_CERT_DER", &self.kernel_cert_der)
             .env("FAKE_CMS_LOG", &self.cms_log);
-        command
-            .env("TEST_PACKAGE_POLICY_SHA256", &self.package_cert_hash)
-            .env("TEST_MODULE_POLICY_SHA256", &self.module_cert_hash)
-            .env("TEST_KERNEL_POLICY_SHA256", &self.kernel_cert_hash);
         if self.real_modinfo {
             command.env("REAL_MODINFO", "1");
         }
@@ -874,6 +843,10 @@ fn verifies_exact_packages_signers_modules_and_build_provenance_offline() {
     assert_eq!(
         evidence["build"]["package_manifest_signer_fingerprint"],
         fixture.package_cert_hash
+    );
+    assert_eq!(
+        evidence["build"]["package_manifest_signature_sha256"],
+        sha_file(&fixture.manifest_signature)
     );
     assert_eq!(
         evidence["kernel"]["module_trust_certificate_fingerprint"],
@@ -1013,18 +986,23 @@ fn full_path_normalizes_real_x509_and_verifies_real_detached_cms() {
 }
 
 #[test]
-fn command_line_fingerprints_cannot_override_reviewed_signer_policy() {
+fn signer_identities_are_generated_build_outputs_not_committed_authority() {
     let fixture = Fixture::new();
-    let output = fixture
-        .command()
-        .env_remove("TEST_PACKAGE_POLICY_SHA256")
-        .env_remove("TEST_MODULE_POLICY_SHA256")
-        .env_remove("TEST_KERNEL_POLICY_SHA256")
-        .output()
-        .unwrap();
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .to_path_buf();
+    let policy =
+        fs::read_to_string(workspace.join("packaging/kernel/provenance-policy.toml")).unwrap();
+    assert!(!policy.contains("package_signer_sha256"));
+    assert!(!policy.contains("module_signer_sha256"));
+    assert!(!policy.contains("kernel_image_signer_sha256"));
+    let output = fixture.run();
     assert!(
-        !output.status.success(),
-        "accepted CLI-selected trust roots over the reviewed policy"
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -1069,6 +1047,14 @@ fn schema_rejects_duplicate_and_misbound_package_or_module_identities() {
         serde_json::from_slice(&fs::read(fixture.root.join("provenance.json")).unwrap()).unwrap();
     evidence["packages"][1] = evidence["packages"][0].clone();
     assert!(!validator.is_valid(&evidence));
+
+    for sentinel in ["0".repeat(64), "f".repeat(64)] {
+        let mut evidence: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture.root.join("provenance.json")).unwrap())
+                .unwrap();
+        evidence["kernel"]["image_sha256"] = sentinel.into();
+        assert!(!validator.is_valid(&evidence));
+    }
 }
 
 #[test]
@@ -1164,18 +1150,18 @@ fn schema_policy_binding_fails_closed_on_identity_drift() {
         ),
         (
             "module-signer",
-            "/$defs/module/properties/signer_fingerprint/const",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "/$defs/module/properties/signer_fingerprint",
+            "committed-authority-is-forbidden",
         ),
         (
             "package-signer",
-            "/properties/build/properties/package_manifest_signer_fingerprint/const",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "/properties/build/properties/package_manifest_signer_fingerprint",
+            "committed-authority-is-forbidden",
         ),
         (
             "module-trust-signer",
-            "/properties/kernel/properties/module_trust_certificate_fingerprint/const",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "/properties/kernel/properties/module_trust_certificate_fingerprint",
+            "committed-authority-is-forbidden",
         ),
         (
             "kernel-config-path",
@@ -1189,8 +1175,8 @@ fn schema_policy_binding_fails_closed_on_identity_drift() {
         ),
         (
             "kernel-image-signer",
-            "/properties/kernel/properties/image_signer_fingerprint/const",
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "/properties/kernel/properties/image_signer_fingerprint",
+            "committed-authority-is-forbidden",
         ),
     ] {
         let mut changed = original.clone();
@@ -1236,24 +1222,12 @@ fn compatibility_policy_binding_fails_closed_on_identity_drift() {
             "source_commit",
             "0000000000000000000000000000000000000000",
         ),
-        (
-            "image-signer",
-            "kernel",
-            "image_signer_fingerprint",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ),
         ("module-name", "module", "name", "wrong_module"),
         (
             "module-path",
             "module",
             "path",
             "/usr/lib/modules/wrong/acer-wmi.ko.zst",
-        ),
-        (
-            "module-signer",
-            "module",
-            "signer_fingerprint",
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         ),
         (
             "module-vermagic",
@@ -1421,7 +1395,6 @@ fn rejects_signature_trust_and_identity_mismatches() {
         .args(["--package-cert"])
         .arg(&fixture.module_cert)
         .args(["--package-cert-sha256", &fixture.module_cert_hash])
-        .env("TEST_PACKAGE_POLICY_SHA256", &fixture.module_cert_hash)
         .output()
         .expect("run verifier with a reused package signer");
     assert!(
@@ -5115,20 +5088,12 @@ raise SystemExit(0 if loaded.safe_member(sys.argv[2]) else 1)
 }
 
 fn schema_for_fixture(fixture: &Fixture) -> serde_json::Value {
-    let mut schema: serde_json::Value = serde_json::from_str(include_str!(concat!(
+    let _ = fixture;
+    serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../schemas/package-provenance-v1.json"
     )))
-    .unwrap();
-    schema["properties"]["build"]["properties"]["package_manifest_signer_fingerprint"]["const"] =
-        fixture.package_cert_hash.clone().into();
-    schema["$defs"]["module"]["properties"]["signer_fingerprint"]["const"] =
-        fixture.module_cert_hash.clone().into();
-    schema["properties"]["kernel"]["properties"]["module_trust_certificate_fingerprint"]["const"] =
-        fixture.module_cert_hash.clone().into();
-    schema["properties"]["kernel"]["properties"]["image_signer_fingerprint"]["const"] =
-        fixture.kernel_cert_hash.clone().into();
-    schema
+    .unwrap()
 }
 
 fn call_failing_evidence_publication(root: &Path) -> Output {
