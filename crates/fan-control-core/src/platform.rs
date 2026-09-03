@@ -401,6 +401,123 @@ where
     }
 }
 
+/// Read-only identity-bound access that rejects operations completing after a monotonic deadline.
+pub trait BoundedIdentityBoundReadAccess {
+    fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError>;
+
+    fn list_before(
+        &mut self,
+        directory: &Path,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError>;
+
+    fn identity_before(
+        &mut self,
+        path: &Path,
+        deadline: Duration,
+    ) -> Result<FileIdentity, PlatformError>;
+
+    fn read_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<String, PlatformError>;
+
+    fn list_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError>;
+
+    fn permissions_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<FilePermissions, PlatformError>;
+}
+
+impl<T> BoundedIdentityBoundReadAccess for T
+where
+    T: BoundedIdentityBoundFileAccess + ?Sized,
+{
+    fn read_before(&mut self, path: &Path, deadline: Duration) -> Result<String, PlatformError> {
+        BoundedFileAccess::read_before(self, path, deadline)
+    }
+
+    fn list_before(
+        &mut self,
+        directory: &Path,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        BoundedFileAccess::list_before(self, directory, deadline)
+    }
+
+    fn identity_before(
+        &mut self,
+        path: &Path,
+        deadline: Duration,
+    ) -> Result<FileIdentity, PlatformError> {
+        BoundedIdentityBoundFileAccess::identity_before(self, path, deadline)
+    }
+
+    fn read_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<String, PlatformError> {
+        BoundedIdentityBoundFileAccess::read_bound_before(
+            self,
+            directory,
+            expected_directory,
+            child,
+            expected_child,
+            deadline,
+        )
+    }
+
+    fn list_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        deadline: Duration,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        BoundedIdentityBoundFileAccess::list_bound_before(
+            self,
+            directory,
+            expected_directory,
+            deadline,
+        )
+    }
+
+    fn permissions_bound_before(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+        deadline: Duration,
+    ) -> Result<FilePermissions, PlatformError> {
+        BoundedIdentityBoundFileAccess::permissions_bound_before(
+            self,
+            directory,
+            expected_directory,
+            child,
+            expected_child,
+            deadline,
+        )
+    }
+}
+
 /// File access that rejects operations which complete at or after an absolute monotonic deadline.
 ///
 /// A production implementation must use local, nonblocking kernel interfaces. The deadline is an

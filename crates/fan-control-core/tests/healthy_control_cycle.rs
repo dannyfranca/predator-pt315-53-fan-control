@@ -279,11 +279,11 @@ impl SensorSourceDiscovery for RecoveryDiscovery {
 
     fn rediscover(
         &mut self,
-        files: &mut dyn fan_control_core::BoundedIdentityBoundFileAccess,
-        _deadline: Duration,
+        files: &mut dyn fan_control_core::BoundedIdentityBoundReadAccess,
+        deadline: Duration,
     ) -> Result<Self::Sources, SampleSourceError> {
         files
-            .identity(Path::new(ACER_ROOT))
+            .identity_before(Path::new(ACER_ROOT), deadline)
             .map_err(|error| SampleSourceError::new(error.to_string()))?;
         let mut script = self.script.borrow_mut();
         script.rediscoveries += 1;

@@ -11,15 +11,16 @@ use std::{
 };
 
 use fan_control_core::{
-    AcerHwmonDevice, BoundedIdentityBoundFileAccess, Clock, CompatibilityDeclarationV1,
-    CompatibilityObservation, CoretempDevice, EvidenceCompleteness, ExternalPower, FanWriteBackend,
-    FileIdentity, FilePermissions, HardwareIdentity, IdentityBoundReadAccess, ModuleIdentity,
-    ModuleProvenance, NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample,
-    ObservedFanAbi, ObservedSample, PackageProvenanceModuleV1, PackageProvenanceV1, PlatformError,
-    PlatformErrorKind, RootOwnedQualificationRecordAccess, SENSOR_REDISCOVERY_WINDOW,
-    SampleCapture, SampleSourceError, SampleSources, SensorSourceDiscovery,
-    SystemOwnershipPlatform, TemperatureCelsius, discover_acer_hwmon, discover_coretemp,
-    parse_compatibility_v1, sample_nvidia_gpu, validate_package_provenance_compatibility_v1,
+    AcerHwmonDevice, BoundedIdentityBoundFileAccess, BoundedIdentityBoundReadAccess, Clock,
+    CompatibilityDeclarationV1, CompatibilityObservation, CoretempDevice, EvidenceCompleteness,
+    ExternalPower, FanWriteBackend, FileIdentity, FilePermissions, HardwareIdentity,
+    IdentityBoundReadAccess, ModuleIdentity, ModuleProvenance, NvidiaGpuSelector, NvmlAccess,
+    NvmlError, NvmlErrorKind, NvmlGpuSample, ObservedFanAbi, ObservedSample,
+    PackageProvenanceModuleV1, PackageProvenanceV1, PlatformError, PlatformErrorKind,
+    RootOwnedQualificationRecordAccess, SENSOR_REDISCOVERY_WINDOW, SampleCapture,
+    SampleSourceError, SampleSources, SensorSourceDiscovery, SystemOwnershipPlatform,
+    TemperatureCelsius, discover_acer_hwmon, discover_coretemp, parse_compatibility_v1,
+    sample_nvidia_gpu, validate_package_provenance_compatibility_v1,
     validate_package_provenance_v1,
 };
 use object::{Object, ObjectSection};
@@ -433,7 +434,7 @@ type RediscoverSources<S> =
     dyn FnMut(&mut dyn IdentityBoundReadAccess, Duration) -> Result<S, SampleSourceError>;
 
 struct DeadlineReadAccess<'a> {
-    files: &'a mut dyn BoundedIdentityBoundFileAccess,
+    files: &'a mut dyn BoundedIdentityBoundReadAccess,
     deadline: Duration,
 }
 
@@ -590,7 +591,7 @@ where
 
     fn rediscover(
         &mut self,
-        files: &mut dyn BoundedIdentityBoundFileAccess,
+        files: &mut dyn BoundedIdentityBoundReadAccess,
         deadline: Duration,
     ) -> Result<Self::Sources, SampleSourceError> {
         (self.rediscover)(

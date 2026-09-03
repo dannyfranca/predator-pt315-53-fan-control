@@ -1,13 +1,14 @@
 use std::{error::Error, fmt, time::Duration};
 
 use crate::{
-    AcerHwmonDevice, AdmittedPolicyAuthority, BoundedIdentityBoundFileAccess, Clock,
-    CompletedControlCycle, ControllerOwnership, EmergencyContainmentReport, FanArmingError,
-    FirmwareAutoRestorationError, FreshSampleGate, HealthyControl, HealthyControlCycleError,
-    OwnershipSampleReadiness, RequiredInput, RuntimeFault, RuntimeLockAccess, RuntimeState,
-    RuntimeTransition, SampleSetError, SampleSourceError, SampleSources, ShutdownRequest,
-    ValidatedConfig, arm_both_fans_safely_until, diagnostics::sample_fault, emit_fault,
-    emit_state_transition, ownership::FirmwareAutoSafingOutcome, run_healthy_control_cycle,
+    AcerHwmonDevice, AdmittedPolicyAuthority, BoundedIdentityBoundFileAccess,
+    BoundedIdentityBoundReadAccess, Clock, CompletedControlCycle, ControllerOwnership,
+    EmergencyContainmentReport, FanArmingError, FirmwareAutoRestorationError, FreshSampleGate,
+    HealthyControl, HealthyControlCycleError, OwnershipSampleReadiness, RequiredInput,
+    RuntimeFault, RuntimeLockAccess, RuntimeState, RuntimeTransition, SampleSetError,
+    SampleSourceError, SampleSources, ShutdownRequest, ValidatedConfig, arm_both_fans_safely_until,
+    diagnostics::sample_fault, emit_fault, emit_state_transition,
+    ownership::FirmwareAutoSafingOutcome, run_healthy_control_cycle,
 };
 
 pub const SENSOR_REDISCOVERY_WINDOW: Duration = Duration::from_secs(1);
@@ -22,7 +23,7 @@ pub trait SensorSourceDiscovery {
 
     fn rediscover(
         &mut self,
-        files: &mut dyn BoundedIdentityBoundFileAccess,
+        files: &mut dyn BoundedIdentityBoundReadAccess,
         deadline: Duration,
     ) -> Result<Self::Sources, SampleSourceError>;
 }

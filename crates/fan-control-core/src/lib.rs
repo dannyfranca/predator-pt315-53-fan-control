@@ -139,12 +139,13 @@ pub use ownership::{
     SystemFirmwareAutoRecovery, acquire_controller_ownership,
 };
 pub use platform::{
-    BoundedFileAccess, BoundedIdentityBoundFileAccess, Clock, FakePlatform, FakeRuntimeLock,
-    FakeRuntimeLockBackend, FakeStep, FileAccess, FileIdentity, FilePermissions,
-    IdentityBoundFileAccess, IdentityBoundReadAccess, PlatformError, PlatformErrorKind,
-    PlatformOperation, ProtectedFileRequirement, RootOwnedQualificationRecordAccess,
-    RuntimeLockAccess, RuntimeLockError, ServiceAccess, SystemOwnershipPlatform, SystemRuntimeLock,
-    path_has_extended_acl, validate_root_owned_protected_file,
+    BoundedFileAccess, BoundedIdentityBoundFileAccess, BoundedIdentityBoundReadAccess, Clock,
+    FakePlatform, FakeRuntimeLock, FakeRuntimeLockBackend, FakeStep, FileAccess, FileIdentity,
+    FilePermissions, IdentityBoundFileAccess, IdentityBoundReadAccess, PlatformError,
+    PlatformErrorKind, PlatformOperation, ProtectedFileRequirement,
+    RootOwnedQualificationRecordAccess, RuntimeLockAccess, RuntimeLockError, ServiceAccess,
+    SystemOwnershipPlatform, SystemRuntimeLock, path_has_extended_acl,
+    validate_root_owned_protected_file,
 };
 pub use policy::{
     DemandSmoother, DownshiftPolicy, DownshiftPolicyError, EffectiveTemperature, HysteresisCelsius,

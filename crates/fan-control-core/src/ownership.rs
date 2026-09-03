@@ -333,9 +333,9 @@ where
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "acceptance-fixture")]
 impl ControllerOwnership<'_, crate::FakePlatform> {
-    /// Debug-build-only access to the in-memory acceptance platform.
+    /// Acceptance-fixture-only access to the in-memory platform.
     ///
     /// This specialization cannot expose a real platform or fan device to downstream callers.
     #[doc(hidden)]

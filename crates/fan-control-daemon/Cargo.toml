@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-acceptance-fixture = []
+acceptance-fixture = ["fan-control-core/acceptance-fixture"]
 
 [dependencies]
 fan-control-core = { path = "../fan-control-core" }
