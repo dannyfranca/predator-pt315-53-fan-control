@@ -19,7 +19,9 @@ separate facts. Agreement is required; one never substitutes for another.
    user. Otherwise obtain the official repository at
    `https://github.com/dannyfranca/predator-pt315-53-fan-control`, resolve a
    release tag or commit, and work from a clean detached checkout. Record the
-   40-character commit before using its instructions.
+   40-character commit before using its instructions. Build every executable
+   and package locally from this checkout; do not install prebuilt release
+   assets.
 3. Read that checkout's `SECURITY.md`, the status declaration at the start of
    `README.md`, and the relevant canonical runbook section. Inspect
    `compatibility/`, packaging, and command source when the runbook points to

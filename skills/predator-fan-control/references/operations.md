@@ -4,18 +4,19 @@ The exact target checkout owns all commands. Read its top-level status,
 `SECURITY.md`, packaging recipes, and the complete relevant canonical runbook
 section before proposing a command.
 
-## Acquire a target revision
+## Acquire and build a target revision
 
-Prefer a published release only when that release documents how to verify its
-artifact checksum and signature. Verify both before extraction or installation
-and retain the resolved tag and 40-character commit in the ledger.
+Acquire source from the official repository. Use a user-selected release tag
+or reviewed pinned commit, resolve it to a 40-character commit, clone into a
+new directory, check out that commit detached, and require a clean tree. Never
+install a prebuilt release asset or substitute a floating branch at execution
+time.
 
-When no verifiable release exists, use a user-selected or reviewed pinned
-commit. Clone into a new directory, check out the commit detached, require a
-clean tree, fetch locked dependencies as documented, and run the revision's
-local repository policy. Never substitute a floating branch at execution time.
-Do not trigger remote CI unless the user separately requests it; CI is not
-qualification authority.
+Fetch locked dependencies as documented, run the revision's local repository
+policy, and build every executable and package locally with that revision's
+documented commands. Retain the resolved source identity and locally built
+artifact hashes in the ledger. Do not trigger remote CI unless the user
+separately requests it; CI is not qualification authority.
 
 If source, packaging, or installed identities disagree, stop. Never silently
 rebuild a package recipe for a different commit.
