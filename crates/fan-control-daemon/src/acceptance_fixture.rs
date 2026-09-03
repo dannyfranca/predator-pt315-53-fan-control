@@ -80,6 +80,7 @@ pub fn run_acceptance_fixture(
         Scenario::CleanupContained
             | Scenario::CleanupCritical
             | Scenario::CleanupCriticalReleaseFailure
+            | Scenario::CleanupContainmentUnconfirmed
             | Scenario::CleanupReadbackUnconfirmed
             | Scenario::ReleaseFailure
     ) {
@@ -117,25 +118,26 @@ pub fn run_acceptance_fixture(
             )
         })
         .count();
-    let (cpu_max, gpu_max) = cleanup_maximum_confirmation(&result);
+    let (cpu_max, gpu_max, cpu_max_unconfirmed, gpu_max_unconfirmed) =
+        cleanup_containment_confirmation(&result);
     println!(
-        "fixture-state cpu_auto={cpu_auto} gpu_auto={gpu_auto} cpu_max={cpu_max} gpu_max={gpu_max} cpu_custom_writes={cpu_custom_writes} release_attempted={release_attempted} release_ordered={release_ordered} result={}",
+        "fixture-state cpu_auto={cpu_auto} gpu_auto={gpu_auto} cpu_max={cpu_max} gpu_max={gpu_max} cpu_max_unconfirmed={cpu_max_unconfirmed} gpu_max_unconfirmed={gpu_max_unconfirmed} cpu_custom_writes={cpu_custom_writes} release_attempted={release_attempted} release_ordered={release_ordered} result={}",
         if result.is_ok() { "ok" } else { "error" }
     );
 
     result.map_err(|error| io::Error::other(error.to_string()))
 }
 
-fn cleanup_maximum_confirmation(
+fn cleanup_containment_confirmation(
     result: &Result<(), ProductionControlLoopError<io::Error>>,
-) -> (bool, bool) {
+) -> (bool, bool, bool, bool) {
     let cleanup = match result {
         Err(ProductionControlLoopError::Cleanup { cleanup, .. }) => cleanup,
         Err(ProductionControlLoopError::Release {
             cleanup: Some(cleanup),
             ..
         }) => cleanup,
-        _ => return (false, false),
+        _ => return (false, false, false, false),
     };
     let containment = match cleanup {
         GracefulShutdownFailure::Contained { containment, .. }
@@ -144,6 +146,14 @@ fn cleanup_maximum_confirmation(
     (
         matches!(containment.cpu(), EmergencyFanStatus::MaximumConfirmed),
         matches!(containment.gpu(), EmergencyFanStatus::MaximumConfirmed),
+        matches!(
+            containment.cpu(),
+            EmergencyFanStatus::MaximumUnconfirmed { .. }
+        ),
+        matches!(
+            containment.gpu(),
+            EmergencyFanStatus::MaximumUnconfirmed { .. }
+        ),
     )
 }
 
@@ -235,20 +245,24 @@ impl StartupDiscoveryEnvironment for FixtureStartupDiscoveryEnvironment<'_> {
 
 fn release_follows_both_auto_writes(platform: &FakePlatform) -> bool {
     let operations = platform.operations();
-    let Some(release) = operations
+    let releases = operations
         .iter()
-        .rposition(|operation| matches!(operation, PlatformOperation::ReleaseRuntimeLock(_)))
-    else {
-        return true;
+        .enumerate()
+        .filter_map(|(index, operation)| {
+            matches!(operation, PlatformOperation::ReleaseRuntimeLock(_)).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let [release] = releases.as_slice() else {
+        return false;
     };
     ["pwm1_enable", "pwm2_enable"].iter().all(|endpoint| {
-        operations[..release].iter().rposition(|operation| {
+        operations[..*release].iter().rposition(|operation| {
             matches!(
                 operation,
                 PlatformOperation::Write { path, contents }
                     if path.file_name().is_some_and(|name| name == *endpoint) && contents == "2"
             )
-        }) > operations[..release].iter().rposition(|operation| {
+        }) > operations[..*release].iter().rposition(|operation| {
             matches!(
                 operation,
                 PlatformOperation::Write { path, contents }
@@ -273,6 +287,7 @@ enum Scenario {
     CleanupContained,
     CleanupCritical,
     CleanupCriticalReleaseFailure,
+    CleanupContainmentUnconfirmed,
     CleanupReadbackUnconfirmed,
     ReleaseFailure,
 }
@@ -293,6 +308,7 @@ impl Scenario {
             "cleanup-contained" => Ok(Self::CleanupContained),
             "cleanup-critical" => Ok(Self::CleanupCritical),
             "cleanup-critical-release-failure" => Ok(Self::CleanupCriticalReleaseFailure),
+            "cleanup-containment-unconfirmed" => Ok(Self::CleanupContainmentUnconfirmed),
             "cleanup-readback-unconfirmed" => Ok(Self::CleanupReadbackUnconfirmed),
             "release-failure" => Ok(Self::ReleaseFailure),
             _ => Err(io::Error::new(
@@ -326,13 +342,25 @@ fn prepare_exit_fault(platform: &mut FakePlatform, scenario: Scenario) {
             }
             platform.queue_file_steps(steps);
         }
-        Scenario::CleanupCritical | Scenario::CleanupCriticalReleaseFailure => {
+        Scenario::CleanupCritical
+        | Scenario::CleanupCriticalReleaseFailure
+        | Scenario::CleanupContainmentUnconfirmed => {
             let mut steps = Vec::new();
             for _ in 0..3 {
                 steps.extend([
                     FakeStep::Fail(injected()),
                     FakeStep::Fail(injected()),
                     FakeStep::Pass,
+                    FakeStep::Pass,
+                ]);
+            }
+            if scenario == Scenario::CleanupContainmentUnconfirmed {
+                steps.extend([
+                    FakeStep::Pass,
+                    FakeStep::Fail(injected()),
+                    FakeStep::Pass,
+                    FakeStep::Pass,
+                    FakeStep::Fail(injected()),
                     FakeStep::Pass,
                 ]);
             }
@@ -388,6 +416,7 @@ fn runtime_inputs(
         Scenario::CleanupContained
         | Scenario::CleanupCritical
         | Scenario::CleanupCriticalReleaseFailure
+        | Scenario::CleanupContainmentUnconfirmed
         | Scenario::CleanupReadbackUnconfirmed
         | Scenario::ReleaseFailure => RuntimeSources::healthy(),
         _ => RuntimeSources::healthy(),

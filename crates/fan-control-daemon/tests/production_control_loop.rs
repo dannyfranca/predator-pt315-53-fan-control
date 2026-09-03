@@ -1,7 +1,7 @@
 use std::{cell::Cell, convert::Infallible, io, path::Path, rc::Rc};
 
 use fan_control_core::{
-    ExternalPower, FakePlatform, FilePermissions, IdentityBoundReadAccess, ObservedSample,
+    BoundedIdentityBoundFileAccess, ExternalPower, FakePlatform, FilePermissions, ObservedSample,
     PlatformOperation, QUALIFICATION_RECORD_PATH, SUPERVISED_ENDURANCE_EVIDENCE_PATH,
     SampleCapture, SampleSourceError, SampleSources, SensorSourceDiscovery, ServiceNotification,
     ServiceNotifier, ShutdownController, ShutdownRequest, TemperatureCelsius, discover_acer_hwmon,
@@ -225,7 +225,8 @@ impl SensorSourceDiscovery for ScriptedDiscovery {
 
     fn rediscover(
         &mut self,
-        _files: &mut dyn IdentityBoundReadAccess,
+        _files: &mut dyn BoundedIdentityBoundFileAccess,
+        _deadline: std::time::Duration,
     ) -> Result<Self::Sources, SampleSourceError> {
         self.rediscoveries.set(self.rediscoveries.get() + 1);
         if self.failures_remaining > 0 {

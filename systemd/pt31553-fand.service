@@ -16,9 +16,9 @@ RuntimeDirectoryPreserve=yes
 ExecStart=/usr/bin/pt31553-fand
 ExecStopPost=/usr/bin/pt31553-fan-restore --restore
 WatchdogSec=6s
-# SIGABRT is latched as a graceful shutdown request. Never escalate a watchdog abort while the
-# daemon is retaining ownership to confirm Firmware Auto.
-TimeoutAbortSec=infinity
+# SIGABRT first requests graceful cleanup. If the control thread is wedged, force termination so
+# ExecStopPost can perform independent Firmware Auto recovery.
+TimeoutAbortSec=5s
 Restart=on-failure
 RestartSec=2s
 # Qualified startup may consume two full sample windows plus the bounded tachometer-response

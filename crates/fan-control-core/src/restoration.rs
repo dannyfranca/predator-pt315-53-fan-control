@@ -50,6 +50,10 @@ impl FanRestorationStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FirmwareAutoRestorationError {
+    DifferentController {
+        admitted: crate::FileIdentity,
+        restored: crate::FileIdentity,
+    },
     Unconfirmed {
         attempts: u8,
         cpu: Box<FanRestorationStatus>,
@@ -65,6 +69,10 @@ pub enum FirmwareAutoRestorationError {
 impl fmt::Display for FirmwareAutoRestorationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DifferentController { admitted, restored } => write!(
+                formatter,
+                "Firmware Auto was confirmed on a different controller (admitted: {admitted:?}, restored: {restored:?})"
+            ),
             Self::Unconfirmed { attempts, cpu, gpu } => write!(
                 formatter,
                 "Firmware Auto unconfirmed after {attempts} attempts (CPU: {cpu:?}, GPU: {gpu:?})"

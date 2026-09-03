@@ -19,6 +19,7 @@ fn production_binary_runs_real_cycles_and_recovers_before_readiness() {
             &output,
             false,
             false,
+            false,
             if scenario == "rediscovery" { 2 } else { 1 },
             true,
             "ok",
@@ -46,7 +47,7 @@ fn production_binary_signals_restore_before_release() {
             "signal {signal}: {}",
             stderr(&output)
         );
-        assert_state(&output, false, false, 1, true, "ok");
+        assert_state(&output, false, false, false, 1, true, "ok");
     }
 }
 
@@ -67,7 +68,7 @@ fn production_binary_systemd_stop_used_by_sleep_guard_restores_before_release() 
     assert!(output.status.success(), "{}", stderr(&output));
     // The sleep guard's systemd transaction and fresh-resume gate are covered in sleep_guard.rs;
     // this proves the production daemon side of its synchronous SIGTERM stop boundary.
-    assert_state(&output, false, false, 1, true, "ok");
+    assert_state(&output, false, false, false, 1, true, "ok");
 }
 
 #[test]
@@ -79,7 +80,7 @@ fn production_binary_restores_on_real_notification_transport_failures() {
         !output.status.success(),
         "initial READY unexpectedly succeeded"
     );
-    assert_state(&output, false, false, 1, true, "error");
+    assert_state(&output, false, false, false, 1, true, "error");
 
     let watchdog = Harness::new("notification-transport-failure");
     let child = watchdog
@@ -96,7 +97,7 @@ fn production_binary_restores_on_real_notification_transport_failures() {
         !output.status.success(),
         "WATCHDOG transport unexpectedly succeeded"
     );
-    assert_state(&output, false, false, 1, true, "error");
+    assert_state(&output, false, false, false, 1, true, "error");
 }
 
 #[test]
@@ -114,7 +115,7 @@ fn production_binary_restores_on_control_notification_timeout_and_authority_faul
             !output.status.success(),
             "{scenario} unexpectedly succeeded"
         );
-        assert_state(&output, false, false, 1, true, "error");
+        assert_state(&output, false, false, false, 1, true, "error");
         if scenario == "watchdog-failure" {
             assert_eq!(harness.notifications(1), ["READY=1"]);
         } else {
@@ -126,15 +127,15 @@ fn production_binary_restores_on_control_notification_timeout_and_authority_faul
 #[test]
 fn production_binary_preserves_containment_and_release_ordering() {
     let cases = [
-        ("cleanup-contained", false, true),
-        ("cleanup-critical", true, true),
-        ("cleanup-critical-release-failure", true, true),
-        ("cleanup-readback-unconfirmed", true, true),
-        ("device-change", false, true),
-        ("release-failure", false, true),
+        ("cleanup-contained", false, false, true),
+        ("cleanup-critical", true, false, true),
+        ("cleanup-critical-release-failure", true, false, true),
+        ("cleanup-containment-unconfirmed", false, true, true),
+        ("cleanup-readback-unconfirmed", true, false, true),
+        ("release-failure", false, false, true),
     ];
 
-    for (scenario, maximum_containment, release_attempted) in cases {
+    for (scenario, maximum_containment, maximum_unconfirmed, release_attempted) in cases {
         let output = Harness::new(scenario).run();
         assert!(
             !output.status.success(),
@@ -144,6 +145,7 @@ fn production_binary_preserves_containment_and_release_ordering() {
             &output,
             maximum_containment,
             maximum_containment,
+            maximum_unconfirmed,
             1,
             release_attempted,
             "error",
@@ -247,13 +249,14 @@ fn assert_state(
     output: &Output,
     cpu_max: bool,
     gpu_max: bool,
+    maximum_unconfirmed: bool,
     cpu_custom_writes: usize,
     release_attempted: bool,
     result: &str,
 ) {
     let stdout = String::from_utf8(output.stdout.clone()).unwrap();
     let expected = format!(
-        "fixture-state cpu_auto=true gpu_auto=true cpu_max={cpu_max} gpu_max={gpu_max} cpu_custom_writes={cpu_custom_writes} release_attempted={release_attempted} release_ordered=true result={result}\n"
+        "fixture-state cpu_auto=true gpu_auto=true cpu_max={cpu_max} gpu_max={gpu_max} cpu_max_unconfirmed={maximum_unconfirmed} gpu_max_unconfirmed={maximum_unconfirmed} cpu_custom_writes={cpu_custom_writes} release_attempted={release_attempted} release_ordered=true result={result}\n"
     );
     assert_eq!(stdout, expected, "stderr: {}", stderr(output));
 }

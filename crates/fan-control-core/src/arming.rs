@@ -332,7 +332,7 @@ where
         );
         entered_arming = true;
         let ownership_id = ownership.ownership_id();
-        let (platform, custom_epoch) = ownership.begin_custom_transition();
+        let (platform, custom_epoch) = ownership.begin_custom_transition(device);
         arm(
             platform,
             device,

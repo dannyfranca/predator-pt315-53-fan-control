@@ -1,15 +1,16 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 
 use crate::{
     AcerHwmonDevice, AdmittedPolicyAuthority, BoundedIdentityBoundFileAccess, Clock,
     CompletedControlCycle, ControllerOwnership, EmergencyContainmentReport, FanArmingError,
     FirmwareAutoRestorationError, FreshSampleGate, HealthyControl, HealthyControlCycleError,
-    IdentityBoundReadAccess, OwnershipSampleReadiness, RequiredInput, RuntimeFault,
-    RuntimeLockAccess, RuntimeState, RuntimeTransition, SampleSetError, SampleSourceError,
-    SampleSources, ShutdownRequest, ValidatedConfig, arm_both_fans_safely_until,
-    diagnostics::sample_fault, emit_fault, emit_state_transition,
-    ownership::FirmwareAutoSafingOutcome, run_healthy_control_cycle,
+    OwnershipSampleReadiness, RequiredInput, RuntimeFault, RuntimeLockAccess, RuntimeState,
+    RuntimeTransition, SampleSetError, SampleSourceError, SampleSources, ShutdownRequest,
+    ValidatedConfig, arm_both_fans_safely_until, diagnostics::sample_fault, emit_fault,
+    emit_state_transition, ownership::FirmwareAutoSafingOutcome, run_healthy_control_cycle,
 };
+
+const SENSOR_REDISCOVERY_WINDOW: Duration = Duration::from_secs(1);
 
 /// Creates replacement CPU/GPU source bindings while Firmware Auto owns both fans.
 ///
@@ -21,7 +22,8 @@ pub trait SensorSourceDiscovery {
 
     fn rediscover(
         &mut self,
-        files: &mut dyn IdentityBoundReadAccess,
+        files: &mut dyn BoundedIdentityBoundFileAccess,
+        deadline: Duration,
     ) -> Result<Self::Sources, SampleSourceError>;
 }
 
@@ -298,7 +300,14 @@ where
                     );
                 }
                 if sources.is_none() {
-                    match self.discovery.rediscover(ownership.platform_mut()) {
+                    let deadline = ownership
+                        .platform_mut()
+                        .monotonic_now()
+                        .saturating_add(SENSOR_REDISCOVERY_WINDOW);
+                    match self
+                        .discovery
+                        .rediscover(ownership.platform_mut(), deadline)
+                    {
                         Ok(rediscovered) => {
                             gate.reset();
                             sources = Some(rediscovered);

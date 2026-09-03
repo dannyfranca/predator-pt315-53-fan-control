@@ -390,17 +390,9 @@ where
         // confirmed. Never let the ownership guard (and its OS lock) drop in that state: retry
         // the bounded recovery cycle forever, holding maximum PWM whenever Custom is observed,
         // until both Firmware Auto readbacks are confirmed.
-        let hwmon_root = device
-            .root()
-            .parent()
-            .expect("a discovered hwmon device always has its hwmon root");
-        let current_device = loop {
-            match ownership.discover_acer_hwmon(hwmon_root) {
-                Ok(current_device) => break current_device,
-                Err(_) => ownership.delay(NORMAL_SAMPLE_CADENCE),
-            }
-        };
-        ownership.recover_firmware_auto(&current_device);
+        // Only the exact controller admitted before entering Custom may authorize release. A
+        // replacement singleton Acer hwmon cannot prove that the original controller is safe.
+        ownership.recover_firmware_auto(&device);
     }
     if let Err(release) = ownership.release() {
         let source = release.platform_error().cloned();

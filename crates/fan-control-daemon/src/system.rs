@@ -1,7 +1,8 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::{Read, Write},
+    io::{self, Read, Write},
+    os::{fd::AsRawFd, unix::process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -11,12 +12,12 @@ use std::{
 use fan_control_core::{
     AcerHwmonDevice, BoundedIdentityBoundFileAccess, CompatibilityDeclarationV1,
     CompatibilityObservation, CoretempDevice, EvidenceCompleteness, ExternalPower, FanWriteBackend,
-    FileIdentity, HardwareIdentity, IdentityBoundReadAccess, ModuleIdentity, ModuleProvenance,
-    NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, ObservedFanAbi,
-    ObservedSample, PackageProvenanceModuleV1, PackageProvenanceV1,
-    RootOwnedQualificationRecordAccess, SampleCapture, SampleSourceError, SampleSources,
-    SensorSourceDiscovery, SystemOwnershipPlatform, TemperatureCelsius, discover_acer_hwmon,
-    discover_coretemp, parse_compatibility_v1, sample_nvidia_gpu,
+    FileIdentity, FilePermissions, HardwareIdentity, IdentityBoundReadAccess, ModuleIdentity,
+    ModuleProvenance, NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample,
+    ObservedFanAbi, ObservedSample, PackageProvenanceModuleV1, PackageProvenanceV1, PlatformError,
+    PlatformErrorKind, RootOwnedQualificationRecordAccess, SampleCapture, SampleSourceError,
+    SampleSources, SensorSourceDiscovery, SystemOwnershipPlatform, TemperatureCelsius,
+    discover_acer_hwmon, discover_coretemp, parse_compatibility_v1, sample_nvidia_gpu,
     validate_package_provenance_compatibility_v1, validate_package_provenance_v1,
 };
 use object::{Object, ObjectSection};
@@ -397,6 +398,121 @@ pub struct SystemSensorSourceDiscovery<S = SystemSampleSources> {
 type RediscoverSources<S> =
     dyn FnMut(&mut dyn IdentityBoundReadAccess) -> Result<S, SampleSourceError>;
 
+struct DeadlineReadAccess<'a> {
+    files: &'a mut dyn BoundedIdentityBoundFileAccess,
+    deadline: Duration,
+}
+
+impl IdentityBoundReadAccess for DeadlineReadAccess<'_> {
+    fn read(&mut self, path: &Path) -> Result<String, PlatformError> {
+        self.files.read_before(path, self.deadline)
+    }
+
+    fn list(&mut self, directory: &Path) -> Result<Vec<PathBuf>, PlatformError> {
+        self.files.list_before(directory, self.deadline)
+    }
+
+    fn permissions(&mut self, path: &Path) -> Result<FilePermissions, PlatformError> {
+        let (directory, child) = direct_child_parts(path)?;
+        let directory_identity = self.files.identity_before(directory, self.deadline)?;
+        let child_identity = self.files.identity_before(path, self.deadline)?;
+        self.files.permissions_bound_before(
+            directory,
+            directory_identity,
+            child,
+            child_identity,
+            self.deadline,
+        )
+    }
+
+    fn identity(&mut self, path: &Path) -> Result<FileIdentity, PlatformError> {
+        self.files.identity_before(path, self.deadline)
+    }
+
+    fn permissions_child_bound(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+    ) -> Result<FilePermissions, PlatformError> {
+        self.files.permissions_bound_before(
+            directory,
+            expected_directory,
+            child,
+            expected_child,
+            self.deadline,
+        )
+    }
+
+    fn read_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+        child: &str,
+    ) -> Result<String, PlatformError> {
+        let path = direct_child_path(directory, child)?;
+        let child_identity = self.files.identity_before(&path, self.deadline)?;
+        self.files
+            .read_bound_before(directory, expected, child, child_identity, self.deadline)
+    }
+
+    fn read_child_bound(
+        &mut self,
+        directory: &Path,
+        expected_directory: FileIdentity,
+        child: &str,
+        expected_child: FileIdentity,
+    ) -> Result<String, PlatformError> {
+        self.files.read_bound_before(
+            directory,
+            expected_directory,
+            child,
+            expected_child,
+            self.deadline,
+        )
+    }
+
+    fn list_bound(
+        &mut self,
+        directory: &Path,
+        expected: FileIdentity,
+    ) -> Result<Vec<PathBuf>, PlatformError> {
+        self.files
+            .list_bound_before(directory, expected, self.deadline)
+    }
+}
+
+fn direct_child_parts(path: &Path) -> Result<(&Path, &str), PlatformError> {
+    let directory = path.parent().ok_or_else(|| {
+        PlatformError::new(
+            PlatformErrorKind::Unavailable,
+            format!("sensor endpoint has no parent: {}", path.display()),
+        )
+    })?;
+    let child = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            PlatformError::new(
+                PlatformErrorKind::Unavailable,
+                format!("sensor endpoint is not UTF-8: {}", path.display()),
+            )
+        })?;
+    Ok((directory, child))
+}
+
+fn direct_child_path(directory: &Path, child: &str) -> Result<PathBuf, PlatformError> {
+    let path = directory.join(child);
+    if path.parent() != Some(directory) {
+        return Err(PlatformError::new(
+            PlatformErrorKind::Unavailable,
+            format!("sensor endpoint is not a direct child: {child}"),
+        ));
+    }
+    Ok(path)
+}
+
 impl std::fmt::Debug for SystemSensorSourceDiscovery<SystemSampleSources> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -437,9 +553,10 @@ where
 
     fn rediscover(
         &mut self,
-        files: &mut dyn IdentityBoundReadAccess,
+        files: &mut dyn BoundedIdentityBoundFileAccess,
+        deadline: Duration,
     ) -> Result<Self::Sources, SampleSourceError> {
-        (self.rediscover)(files)
+        (self.rediscover)(&mut DeadlineReadAccess { files, deadline })
     }
 }
 
@@ -1511,39 +1628,120 @@ fn run_nvidia_smi_command(
     arguments: &[&str],
     timeout: Duration,
 ) -> Result<String, String> {
+    const OUTPUT_LIMIT: usize = 64 * 1024;
     let command_name = command.display();
-    let mut child = Command::new(command)
+    let mut command_builder = Command::new(command);
+    command_builder
         .args(arguments)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: setpgid is async-signal-safe, touches no shared Rust state, and creates a group
+    // containing only this freshly forked command and any descendants it may spawn.
+    unsafe {
+        command_builder.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command_builder
         .spawn()
         .map_err(|error| format!("cannot execute {command_name}: {error}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .expect("piped command stdout must be present");
+    set_nonblocking(&stdout)
+        .map_err(|error| format!("cannot bound {command_name} output: {error}"))?;
     let deadline = Instant::now() + timeout;
-    let status = loop {
+    let cleanup_grace = std::cmp::min(timeout / 4, Duration::from_millis(50));
+    let execution_deadline = deadline - cleanup_grace;
+    let mut output = Vec::new();
+    loop {
+        if let Err(error) = drain_bounded_output(&mut stdout, &mut output, OUTPUT_LIMIT) {
+            kill_and_reap_until(&mut child, deadline);
+            return Err(format!("cannot read {command_name} output: {error}"));
+        }
         if let Some(status) = child
             .try_wait()
             .map_err(|error| format!("cannot wait for {command_name}: {error}"))?
         {
-            break status;
+            // The direct child may have left descendants holding stdout. Terminate the isolated
+            // group and return only bytes already available; never block waiting for pipe EOF.
+            kill_process_group(child.id());
+            drain_bounded_output(&mut stdout, &mut output, OUTPUT_LIMIT)
+                .map_err(|error| format!("cannot read {command_name} output: {error}"))?;
+            if !status.success() {
+                return Err(format!("{command_name} exited with {status}"));
+            }
+            return String::from_utf8(output)
+                .map_err(|_| format!("{command_name} returned non-UTF-8 output"));
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+        if Instant::now() >= execution_deadline {
+            kill_and_reap_until(&mut child, deadline);
             return Err(format!("{command_name} exceeded its execution deadline"));
         }
         thread::sleep(Duration::from_millis(10));
-    };
-    if !status.success() {
-        return Err(format!("{command_name} exited with {status}"));
     }
-    let mut output = String::new();
-    child
-        .stdout
-        .take()
-        .expect("piped command stdout must be present")
-        .read_to_string(&mut output)
-        .map_err(|error| format!("cannot read {command_name} output: {error}"))?;
-    Ok(output)
+}
+
+fn set_nonblocking(file: &impl AsRawFd) -> io::Result<()> {
+    let descriptor = file.as_raw_fd();
+    // SAFETY: fcntl is called on a live owned descriptor and does not retain pointers.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the same live descriptor remains valid for this immediate flag update.
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn drain_bounded_output(
+    stdout: &mut impl Read,
+    output: &mut Vec<u8>,
+    limit: usize,
+) -> io::Result<()> {
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match stdout.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(length) if output.len().saturating_add(length) <= limit => {
+                output.extend_from_slice(&buffer[..length]);
+            }
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "command output exceeded 64 KiB",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn kill_process_group(pid: u32) {
+    if let Ok(pid) = i32::try_from(pid) {
+        // SAFETY: the child was placed in a process group whose id equals its positive pid.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+}
+
+fn kill_and_reap_until(child: &mut std::process::Child, deadline: Instant) {
+    kill_process_group(child.id());
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => thread::sleep(Duration::from_millis(1)),
+        }
+    }
 }
 
 fn configuration_error(path: &str, error: impl std::fmt::Display) -> StartupError {
@@ -1557,7 +1755,7 @@ fn compatibility_error(path: &str, error: impl std::fmt::Display) -> StartupErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fan_control_core::{FakePlatform, FilePermissions, PlatformError};
+    use fan_control_core::{FakePlatform, FakeStep, FilePermissions, PlatformError};
     use std::os::unix::fs::PermissionsExt;
 
     #[derive(Debug)]
@@ -2159,6 +2357,15 @@ mod tests {
                 .contains("exit status: 7")
         );
 
+        let inherited_stdout =
+            executable_script("#!/bin/sh\n(sleep 30) &\nprintf 'GPU-ok, pci, 61\\n'\n");
+        let started = Instant::now();
+        assert_eq!(
+            run_nvidia_smi_command(&inherited_stdout.1, &[], Duration::from_secs(1)).unwrap(),
+            "GPU-ok, pci, 61\n"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+
         let timeout = executable_script("#!/bin/sh\necho $$ > \"$1\"\nwhile :; do :; done\n");
         let pid_path = timeout.0.path().join("pid");
         let started = Instant::now();
@@ -2171,7 +2378,12 @@ mod tests {
         assert!(error.contains("execution deadline"));
         assert!(started.elapsed() < Duration::from_secs(1));
         let pid = fs::read_to_string(&pid_path).unwrap();
-        assert!(!Path::new("/proc").join(pid.trim()).exists());
+        let process_path = Path::new("/proc").join(pid.trim());
+        let disappearance_deadline = Instant::now() + Duration::from_secs(1);
+        while process_path.exists() && Instant::now() < disappearance_deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!process_path.exists());
     }
 
     #[test]
@@ -2240,6 +2452,21 @@ mod tests {
         assert!(
             matches!(error, StartupError::Device(message) if message.contains("identity changed"))
         );
+    }
+
+    #[test]
+    fn runtime_rediscovery_reads_share_one_absolute_deadline() {
+        let path = Path::new("/sys/class/power_supply/ACAD/type");
+        let mut platform = FakePlatform::new();
+        platform.insert_file(path, "Mains\n");
+        platform.queue_file_steps([FakeStep::Advance(Duration::from_secs(2))]);
+        let mut access = DeadlineReadAccess {
+            files: &mut platform,
+            deadline: Duration::from_secs(1),
+        };
+
+        let error = access.read(path).unwrap_err();
+        assert_eq!(error.kind(), PlatformErrorKind::TimedOut);
     }
 
     struct RebindTypeOnRead {

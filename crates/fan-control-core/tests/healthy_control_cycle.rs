@@ -11,9 +11,9 @@ use fan_control_core::{
     BoundedFileAccess, BoundedIdentityBoundFileAccess, Clock, ControlCycleOperation,
     ControlCycleReadback, ControlCycleSampleGate, ControllerOwnership, DemandPercent,
     ExternalPower, FakePlatform, FakeRuntimeLock, FakeStep, Fan, FileAccess, FileIdentity,
-    FilePermissions, FreshSampleGate, HealthyControl, HealthyControlCycleError,
-    IdentityBoundFileAccess, ObservedSample, OwnershipSampleReadiness, PlatformError,
-    PlatformErrorKind, PlatformOperation, Pwm, QUALIFICATION_RECORD_PATH,
+    FilePermissions, FirmwareAutoRestorationError, FreshSampleGate, HealthyControl,
+    HealthyControlCycleError, IdentityBoundFileAccess, ObservedSample, OwnershipSampleReadiness,
+    PlatformError, PlatformErrorKind, PlatformOperation, Pwm, QUALIFICATION_RECORD_PATH,
     RootOwnedQualificationRecordAccess, RuntimeLockAccess, RuntimeLockError,
     SUPERVISED_ENDURANCE_EVIDENCE_PATH, SampleCapture, SampleSetError, SampleSourceError,
     SampleSources, SensorControlState, SensorControlStep, SensorSourceDiscovery, ServiceAccess,
@@ -279,7 +279,8 @@ impl SensorSourceDiscovery for RecoveryDiscovery {
 
     fn rediscover(
         &mut self,
-        files: &mut dyn fan_control_core::IdentityBoundReadAccess,
+        files: &mut dyn fan_control_core::BoundedIdentityBoundFileAccess,
+        _deadline: Duration,
     ) -> Result<Self::Sources, SampleSourceError> {
         files
             .identity(Path::new(ACER_ROOT))
@@ -978,8 +979,18 @@ fn backing_device_rebind_is_rejected_before_normal_output() {
     let current = ownership
         .discover_acer_hwmon(Path::new(HWMON_ROOT))
         .unwrap();
-    ownership.restore_firmware_auto(&current).unwrap();
-    ownership.release().unwrap();
+    assert!(matches!(
+        ownership.restore_firmware_auto(&current),
+        Err(FirmwareAutoRestorationError::DifferentController { .. })
+    ));
+    let ownership = ownership.release().unwrap_err().into_ownership();
+    assert!(
+        !ownership
+            .platform()
+            .operations()
+            .iter()
+            .any(|operation| { matches!(operation, PlatformOperation::ReleaseRuntimeLock(_)) })
+    );
 }
 
 #[test]
@@ -1138,9 +1149,21 @@ fn run_interfered_cycle(
         let current = ownership
             .discover_acer_hwmon(Path::new(HWMON_ROOT))
             .unwrap();
-        ownership.restore_firmware_auto(&current).unwrap();
+        assert!(matches!(
+            ownership.restore_firmware_auto(&current),
+            Err(FirmwareAutoRestorationError::DifferentController { .. })
+        ));
+        let ownership = ownership.release().unwrap_err().into_ownership();
+        assert!(
+            !ownership
+                .platform()
+                .operations()
+                .iter()
+                .any(|operation| { matches!(operation, PlatformOperation::ReleaseRuntimeLock(_)) })
+        );
+    } else {
+        ownership.release().unwrap();
     }
-    ownership.release().unwrap();
     (error, operations)
 }
 
@@ -1865,7 +1888,10 @@ fn control_path_fault_classes_restore_auto_and_permanently_latch() {
                 let current = ownership
                     .discover_acer_hwmon(Path::new(HWMON_ROOT))
                     .unwrap();
-                ownership.restore_firmware_auto(&current).unwrap();
+                assert!(matches!(
+                    ownership.restore_firmware_auto(&current),
+                    Err(FirmwareAutoRestorationError::DifferentController { .. })
+                ));
                 fault
             }
             _ => panic!("{interference:?} must report its latched control fault"),
@@ -1951,7 +1977,11 @@ fn control_path_fault_classes_restore_auto_and_permanently_latch() {
         );
         assert_eq!(script.borrow().rediscoveries, 0);
 
-        ownership.release().unwrap();
+        if interference == RuntimeInterference::RebindRootOnIdentity {
+            assert!(ownership.release().is_err());
+        } else {
+            ownership.release().unwrap();
+        }
     }
 }
 
