@@ -1,3 +1,5 @@
+#![cfg(debug_assertions)]
+
 use std::{
     os::unix::net::UnixDatagram,
     process::{Child, Command, Output, Stdio},
@@ -19,7 +21,7 @@ fn production_binary_runs_real_cycles_and_recovers_before_readiness() {
             &output,
             false,
             false,
-            false,
+            if scenario == "rediscovery" { 3 } else { 1 },
             if scenario == "rediscovery" { 2 } else { 1 },
             true,
             "ok",
@@ -47,7 +49,7 @@ fn production_binary_signals_restore_before_release() {
             "signal {signal}: {}",
             stderr(&output)
         );
-        assert_state(&output, false, false, false, 1, true, "ok");
+        assert_state(&output, false, false, 1, 1, true, "ok");
     }
 }
 
@@ -68,7 +70,7 @@ fn production_binary_systemd_stop_used_by_sleep_guard_restores_before_release() 
     assert!(output.status.success(), "{}", stderr(&output));
     // The sleep guard's systemd transaction and fresh-resume gate are covered in sleep_guard.rs;
     // this proves the production daemon side of its synchronous SIGTERM stop boundary.
-    assert_state(&output, false, false, false, 1, true, "ok");
+    assert_state(&output, false, false, 1, 1, true, "ok");
 }
 
 #[test]
@@ -80,7 +82,7 @@ fn production_binary_restores_on_real_notification_transport_failures() {
         !output.status.success(),
         "initial READY unexpectedly succeeded"
     );
-    assert_state(&output, false, false, false, 1, true, "error");
+    assert_state(&output, false, false, 1, 1, true, "error");
 
     let watchdog = Harness::new("notification-transport-failure");
     let child = watchdog
@@ -97,16 +99,17 @@ fn production_binary_restores_on_real_notification_transport_failures() {
         !output.status.success(),
         "WATCHDOG transport unexpectedly succeeded"
     );
-    assert_state(&output, false, false, false, 1, true, "error");
+    assert_state(&output, false, false, 1, 1, true, "error");
 }
 
 #[test]
 fn production_binary_restores_on_control_notification_timeout_and_authority_faults() {
-    for scenario in [
-        "control-fault",
-        "watchdog-failure",
-        "timeout",
-        "lost-authority",
+    for (scenario, completed_samples) in [
+        ("sample-fault", 0),
+        ("actuator-fault", 1),
+        ("watchdog-failure", 1),
+        ("timeout", 1),
+        ("lost-authority", 0),
     ] {
         let harness = Harness::new(scenario);
         let output = harness.run();
@@ -115,13 +118,37 @@ fn production_binary_restores_on_control_notification_timeout_and_authority_faul
             !output.status.success(),
             "{scenario} unexpectedly succeeded"
         );
-        assert_state(&output, false, false, false, 1, true, "error");
+        assert_state(&output, false, false, completed_samples, 1, true, "error");
         if scenario == "watchdog-failure" {
             assert_eq!(harness.notifications(1), ["READY=1"]);
         } else {
             harness.assert_no_notifications();
         }
     }
+}
+
+#[test]
+fn production_binary_retains_ownership_when_the_controller_device_changes() {
+    let harness = Harness::new("device-change");
+    let mut child = harness
+        .command()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(250));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "device-change recovery released ownership and exited"
+    );
+    harness.assert_no_notifications();
+    child.kill().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.stdout.is_empty(),
+        "fixture reached release reporting"
+    );
 }
 
 #[test]
@@ -144,8 +171,8 @@ fn production_binary_preserves_containment_and_release_ordering() {
         assert_state(
             &output,
             maximum_containment,
-            maximum_containment,
             maximum_unconfirmed,
+            0,
             1,
             release_attempted,
             "error",
@@ -247,16 +274,16 @@ impl Harness {
 
 fn assert_state(
     output: &Output,
-    cpu_max: bool,
-    gpu_max: bool,
+    maximum_containment: bool,
     maximum_unconfirmed: bool,
+    completed_samples: usize,
     cpu_custom_writes: usize,
     release_attempted: bool,
     result: &str,
 ) {
     let stdout = String::from_utf8(output.stdout.clone()).unwrap();
     let expected = format!(
-        "fixture-state cpu_auto=true gpu_auto=true cpu_max={cpu_max} gpu_max={gpu_max} cpu_max_unconfirmed={maximum_unconfirmed} gpu_max_unconfirmed={maximum_unconfirmed} cpu_custom_writes={cpu_custom_writes} release_attempted={release_attempted} release_ordered=true result={result}\n"
+        "fixture-state cpu_auto=true gpu_auto=true cpu_max={maximum_containment} gpu_max={maximum_containment} cpu_max_unconfirmed={maximum_unconfirmed} gpu_max_unconfirmed={maximum_unconfirmed} completed_samples={completed_samples} cpu_custom_writes={cpu_custom_writes} release_attempted={release_attempted} release_ordered=true result={result}\n"
     );
     assert_eq!(stdout, expected, "stderr: {}", stderr(output));
 }

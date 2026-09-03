@@ -120,7 +120,7 @@ pub enum PolicyAuthorityAdmissionError {
     Rejected(PolicyAuthorityError),
     RestorationFailed {
         reason: PolicyAuthorityError,
-        restoration: FirmwareAutoRestorationError,
+        restoration: Box<FirmwareAutoRestorationError>,
     },
 }
 
@@ -362,7 +362,7 @@ where
             Ok(()) => Err(PolicyAuthorityAdmissionError::Rejected(reason)),
             Err(restoration) => Err(PolicyAuthorityAdmissionError::RestorationFailed {
                 reason,
-                restoration,
+                restoration: Box::new(restoration),
             }),
         },
     }

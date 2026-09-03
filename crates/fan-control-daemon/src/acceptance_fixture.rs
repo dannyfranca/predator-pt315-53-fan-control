@@ -87,16 +87,22 @@ pub fn run_acceptance_fixture(
         shutdown.request();
     }
     let request = shutdown.request_handle();
+    let (sources, discovery, completed_samples) = runtime_inputs(scenario);
     let notifier = FixtureNotifier {
         inner: notifier,
         shutdown: request,
         stop_after_watchdog: matches!(scenario, Scenario::Normal | Scenario::Rediscovery),
         fail_watchdog: scenario == Scenario::WatchdogFailure,
+        completed_samples: Rc::clone(&completed_samples),
+        minimum_samples_before_ready: if scenario == Scenario::Rediscovery {
+            3
+        } else {
+            1
+        },
         ready_barrier: (scenario == Scenario::NotificationTransportFailure)
             .then(|| std::env::var_os("PT31553_ACCEPTANCE_READY_ACK").map(PathBuf::from))
             .flatten(),
     };
-    let (sources, discovery) = runtime_inputs(scenario);
     let result = run_production_control_loop(startup, sources, discovery, shutdown, notifier);
 
     let cpu_auto = platform.file_contents(Path::new(ACER_ROOT).join("pwm1_enable")) == Some("2");
@@ -121,7 +127,8 @@ pub fn run_acceptance_fixture(
     let (cpu_max, gpu_max, cpu_max_unconfirmed, gpu_max_unconfirmed) =
         cleanup_containment_confirmation(&result);
     println!(
-        "fixture-state cpu_auto={cpu_auto} gpu_auto={gpu_auto} cpu_max={cpu_max} gpu_max={gpu_max} cpu_max_unconfirmed={cpu_max_unconfirmed} gpu_max_unconfirmed={gpu_max_unconfirmed} cpu_custom_writes={cpu_custom_writes} release_attempted={release_attempted} release_ordered={release_ordered} result={}",
+        "fixture-state cpu_auto={cpu_auto} gpu_auto={gpu_auto} cpu_max={cpu_max} gpu_max={gpu_max} cpu_max_unconfirmed={cpu_max_unconfirmed} gpu_max_unconfirmed={gpu_max_unconfirmed} completed_samples={} cpu_custom_writes={cpu_custom_writes} release_attempted={release_attempted} release_ordered={release_ordered} result={}",
+        completed_samples.get(),
         if result.is_ok() { "ok" } else { "error" }
     );
 
@@ -278,7 +285,8 @@ enum Scenario {
     Signal,
     SleepStop,
     Rediscovery,
-    ControlFault,
+    SampleFault,
+    ActuatorFault,
     WatchdogFailure,
     NotificationTransportFailure,
     Timeout,
@@ -299,7 +307,8 @@ impl Scenario {
             "signal" => Ok(Self::Signal),
             "sleep-stop" => Ok(Self::SleepStop),
             "rediscovery" => Ok(Self::Rediscovery),
-            "control-fault" => Ok(Self::ControlFault),
+            "sample-fault" => Ok(Self::SampleFault),
+            "actuator-fault" => Ok(Self::ActuatorFault),
             "watchdog-failure" => Ok(Self::WatchdogFailure),
             "notification-transport-failure" => Ok(Self::NotificationTransportFailure),
             "timeout" => Ok(Self::Timeout),
@@ -330,6 +339,9 @@ fn prepare_exit_fault(platform: &mut FakePlatform, scenario: Scenario) {
         Scenario::Timeout => platform.queue_file_steps([FakeStep::Advance(Duration::from_secs(3))]),
         Scenario::DeviceChange => platform.rebind_path_identity(ACER_ROOT),
         Scenario::LostAuthority => {}
+        Scenario::ActuatorFault => {
+            platform.insert_file(Path::new(ACER_ROOT).join("fan1_input"), "0\n");
+        }
         Scenario::CleanupContained => {
             let mut steps = Vec::new();
             for _ in 0..3 {
@@ -398,30 +410,40 @@ fn prepare_exit_fault(platform: &mut FakePlatform, scenario: Scenario) {
 
 fn runtime_inputs(
     scenario: Scenario,
-) -> (RuntimeSources, SystemSensorSourceDiscovery<RuntimeSources>) {
+) -> (
+    RuntimeSources,
+    SystemSensorSourceDiscovery<RuntimeSources>,
+    Rc<Cell<usize>>,
+) {
     let rediscoveries = Rc::new(Cell::new(0));
+    let completed_samples = Rc::new(Cell::new(0));
+    let rediscovered_samples = Rc::clone(&completed_samples);
     let mut failures_remaining = usize::from(scenario == Scenario::Rediscovery);
-    let adapter = SystemSensorSourceDiscovery::injected(move |_files| {
+    let adapter = SystemSensorSourceDiscovery::injected(move |_files, _window| {
         rediscoveries.set(rediscoveries.get() + 1);
         if failures_remaining > 0 {
             failures_remaining -= 1;
             Err(SampleSourceError::new("injected rediscovery failure"))
         } else {
-            Ok(RuntimeSources::healthy())
+            Ok(RuntimeSources::healthy_tracked(Rc::clone(
+                &rediscovered_samples,
+            )))
         }
     });
     let sources = match scenario {
-        Scenario::Rediscovery => RuntimeSources::cpu_failure(),
-        Scenario::ControlFault => RuntimeSources::power_failure(),
+        Scenario::Rediscovery => RuntimeSources::cpu_failure(Rc::clone(&completed_samples)),
+        Scenario::SampleFault => RuntimeSources::power_failure(Rc::clone(&completed_samples)),
         Scenario::CleanupContained
         | Scenario::CleanupCritical
         | Scenario::CleanupCriticalReleaseFailure
         | Scenario::CleanupContainmentUnconfirmed
         | Scenario::CleanupReadbackUnconfirmed
-        | Scenario::ReleaseFailure => RuntimeSources::healthy(),
-        _ => RuntimeSources::healthy(),
+        | Scenario::ReleaseFailure => {
+            RuntimeSources::healthy_tracked(Rc::clone(&completed_samples))
+        }
+        _ => RuntimeSources::healthy_tracked(Rc::clone(&completed_samples)),
     };
-    (sources, adapter)
+    (sources, adapter, completed_samples)
 }
 
 #[derive(Debug)]
@@ -430,6 +452,8 @@ struct FixtureNotifier {
     shutdown: fan_control_core::ShutdownRequest,
     stop_after_watchdog: bool,
     fail_watchdog: bool,
+    completed_samples: Rc<Cell<usize>>,
+    minimum_samples_before_ready: usize,
     ready_barrier: Option<PathBuf>,
 }
 
@@ -437,6 +461,13 @@ impl ServiceNotifier for FixtureNotifier {
     type Error = io::Error;
 
     fn notify(&mut self, notification: ServiceNotification) -> Result<(), Self::Error> {
+        if notification == ServiceNotification::Ready
+            && self.completed_samples.get() < self.minimum_samples_before_ready
+        {
+            return Err(io::Error::other(
+                "readiness preceded the required completed runtime sample sets",
+            ));
+        }
         if self.fail_watchdog && notification == ServiceNotification::Watchdog {
             return Err(io::Error::other("injected watchdog notification failure"));
         }
@@ -469,27 +500,35 @@ impl ServiceNotifier for FixtureNotifier {
 struct RuntimeSources {
     fail_cpu: bool,
     fail_power: bool,
+    completed_samples: Rc<Cell<usize>>,
 }
 
 impl RuntimeSources {
-    const fn healthy() -> Self {
+    fn healthy() -> Self {
+        Self::healthy_tracked(Rc::new(Cell::new(0)))
+    }
+
+    fn healthy_tracked(completed_samples: Rc<Cell<usize>>) -> Self {
         Self {
             fail_cpu: false,
             fail_power: false,
+            completed_samples,
         }
     }
 
-    const fn cpu_failure() -> Self {
+    fn cpu_failure(completed_samples: Rc<Cell<usize>>) -> Self {
         Self {
             fail_cpu: true,
-            ..Self::healthy()
+            fail_power: false,
+            completed_samples,
         }
     }
 
-    const fn power_failure() -> Self {
+    fn power_failure(completed_samples: Rc<Cell<usize>>) -> Self {
         Self {
+            fail_cpu: false,
             fail_power: true,
-            ..Self::healthy()
+            completed_samples,
         }
     }
 }
@@ -520,6 +559,8 @@ impl SampleSources for RuntimeSources {
         if self.fail_power {
             Err(SampleSourceError::new("injected power failure"))
         } else {
+            self.completed_samples
+                .set(self.completed_samples.get().saturating_add(1));
             Ok(capture.capture(ExternalPower::Connected))
         }
     }

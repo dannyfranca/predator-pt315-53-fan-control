@@ -89,6 +89,13 @@ impl SampleCapture<'_> {
         self.deadline
     }
 
+    /// Returns the time still available for the source read in this capture cycle.
+    pub fn remaining(&mut self) -> Option<Duration> {
+        self.deadline
+            .checked_sub(self.clock.monotonic_now())
+            .filter(|remaining| !remaining.is_zero())
+    }
+
     /// Stamps a value at the instant the source captured it.
     pub fn capture<T>(&mut self, value: T) -> ObservedSample<T> {
         ObservedSample {

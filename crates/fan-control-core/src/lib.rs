@@ -183,8 +183,8 @@ pub use sampling::{
     SampleSetError, SampleSourceError, SampleSources,
 };
 pub use sensor_recovery::{
-    SensorControlState, SensorControlStep, SensorSourceDiscovery, TransientSensorControl,
-    TransientSensorControlError,
+    SENSOR_REDISCOVERY_WINDOW, SensorControlState, SensorControlStep, SensorSourceDiscovery,
+    TransientSensorControl, TransientSensorControlError,
 };
 pub use supervision::{
     ControlLoopHeartbeat, ServiceNotification, ServiceNotifier, SupervisedControlIterationError,

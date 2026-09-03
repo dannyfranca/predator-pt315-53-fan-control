@@ -10,7 +10,7 @@ use crate::{
     emit_state_transition, ownership::FirmwareAutoSafingOutcome, run_healthy_control_cycle,
 };
 
-const SENSOR_REDISCOVERY_WINDOW: Duration = Duration::from_secs(1);
+pub const SENSOR_REDISCOVERY_WINDOW: Duration = Duration::from_secs(1);
 
 /// Creates replacement CPU/GPU source bindings while Firmware Auto owns both fans.
 ///

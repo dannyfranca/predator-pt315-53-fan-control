@@ -10,15 +10,16 @@ use std::{
 };
 
 use fan_control_core::{
-    AcerHwmonDevice, BoundedIdentityBoundFileAccess, CompatibilityDeclarationV1,
+    AcerHwmonDevice, BoundedIdentityBoundFileAccess, Clock, CompatibilityDeclarationV1,
     CompatibilityObservation, CoretempDevice, EvidenceCompleteness, ExternalPower, FanWriteBackend,
     FileIdentity, FilePermissions, HardwareIdentity, IdentityBoundReadAccess, ModuleIdentity,
     ModuleProvenance, NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample,
     ObservedFanAbi, ObservedSample, PackageProvenanceModuleV1, PackageProvenanceV1, PlatformError,
-    PlatformErrorKind, RootOwnedQualificationRecordAccess, SampleCapture, SampleSourceError,
-    SampleSources, SensorSourceDiscovery, SystemOwnershipPlatform, TemperatureCelsius,
-    discover_acer_hwmon, discover_coretemp, parse_compatibility_v1, sample_nvidia_gpu,
-    validate_package_provenance_compatibility_v1, validate_package_provenance_v1,
+    PlatformErrorKind, RootOwnedQualificationRecordAccess, SENSOR_REDISCOVERY_WINDOW,
+    SampleCapture, SampleSourceError, SampleSources, SensorSourceDiscovery,
+    SystemOwnershipPlatform, TemperatureCelsius, discover_acer_hwmon, discover_coretemp,
+    parse_compatibility_v1, sample_nvidia_gpu, validate_package_provenance_compatibility_v1,
+    validate_package_provenance_v1,
 };
 use object::{Object, ObjectSection};
 use sha2::{Digest, Sha256};
@@ -345,10 +346,15 @@ impl SystemSampleSources {
     fn rediscover_with(
         files: &mut dyn IdentityBoundReadAccess,
         expected_nvidia: &NvidiaGpuSelector,
+        window: Duration,
     ) -> Result<Self, StartupError> {
+        let started = Instant::now();
         let coretemp = discover_coretemp(files, Path::new(HWMON_ROOT))
             .map_err(|error| StartupError::Device(error.to_string()))?;
-        let nvidia = NvidiaSmi::rediscover(expected_nvidia)?;
+        let remaining = window.checked_sub(started.elapsed()).ok_or_else(|| {
+            StartupError::Device("sensor rediscovery exceeded its deadline".into())
+        })?;
+        let nvidia = NvidiaSmi::rediscover_with_timeout(expected_nvidia, remaining)?;
         let power = BoundExternalPower::discover_readonly(files, Path::new(POWER_SUPPLY_ROOT))?;
         Ok(Self {
             platform: SystemOwnershipPlatform::new(),
@@ -364,9 +370,13 @@ impl SampleSources for SystemSampleSources {
         &mut self,
         capture: &mut SampleCapture<'_>,
     ) -> Result<ObservedSample<TemperatureCelsius>, SampleSourceError> {
+        let deadline = source_platform_deadline(capture, &mut self.platform)?;
         let value = self
             .coretemp
-            .sample(&mut self.platform)
+            .sample(&mut DeadlineReadAccess {
+                files: &mut self.platform,
+                deadline,
+            })
             .map_err(|error| SampleSourceError::new(error.to_string()))?;
         Ok(capture.capture(value))
     }
@@ -376,8 +386,17 @@ impl SampleSources for SystemSampleSources {
         capture: &mut SampleCapture<'_>,
     ) -> Result<ObservedSample<TemperatureCelsius>, SampleSourceError> {
         let selector = self.nvidia.selector.clone();
-        let value = sample_nvidia_gpu(&mut self.nvidia, &selector)
-            .map_err(|error| SampleSourceError::new(error.to_string()))?;
+        let timeout = capture
+            .remaining()
+            .ok_or_else(|| SampleSourceError::new("GPU sample deadline expired"))?;
+        let value = sample_nvidia_gpu(
+            &mut TimedNvidiaSmi {
+                inner: &mut self.nvidia,
+                timeout,
+            },
+            &selector,
+        )
+        .map_err(|error| SampleSourceError::new(error.to_string()))?;
         Ok(capture.capture(value))
     }
 
@@ -385,9 +404,23 @@ impl SampleSources for SystemSampleSources {
         &mut self,
         capture: &mut SampleCapture<'_>,
     ) -> Result<ObservedSample<ExternalPower>, SampleSourceError> {
-        let value = self.power.observe(&mut self.platform);
+        let deadline = source_platform_deadline(capture, &mut self.platform)?;
+        let value = self.power.observe_before(&mut self.platform, deadline);
         Ok(capture.capture(value))
     }
+}
+
+fn source_platform_deadline(
+    capture: &mut SampleCapture<'_>,
+    platform: &mut SystemOwnershipPlatform,
+) -> Result<Duration, SampleSourceError> {
+    let remaining = capture
+        .remaining()
+        .ok_or_else(|| SampleSourceError::new("sample deadline expired"))?;
+    platform
+        .monotonic_now()
+        .checked_add(remaining)
+        .ok_or_else(|| SampleSourceError::new("sample deadline overflowed"))
 }
 
 /// Fresh production CPU/GPU/power source discovery used after a recoverable sensor fault.
@@ -396,7 +429,7 @@ pub struct SystemSensorSourceDiscovery<S = SystemSampleSources> {
 }
 
 type RediscoverSources<S> =
-    dyn FnMut(&mut dyn IdentityBoundReadAccess) -> Result<S, SampleSourceError>;
+    dyn FnMut(&mut dyn IdentityBoundReadAccess, Duration) -> Result<S, SampleSourceError>;
 
 struct DeadlineReadAccess<'a> {
     files: &'a mut dyn BoundedIdentityBoundFileAccess,
@@ -525,8 +558,8 @@ impl SystemSensorSourceDiscovery<SystemSampleSources> {
     pub fn for_admitted_sources(sources: &SystemSampleSources) -> Self {
         let expected_nvidia = sources.nvidia.selector.clone();
         Self {
-            rediscover: Box::new(move |files| {
-                SystemSampleSources::rediscover_with(files, &expected_nvidia)
+            rediscover: Box::new(move |files, window| {
+                SystemSampleSources::rediscover_with(files, &expected_nvidia, window)
                     .map_err(|error| SampleSourceError::new(error.to_string()))
             }),
         }
@@ -536,7 +569,10 @@ impl SystemSensorSourceDiscovery<SystemSampleSources> {
 impl<S> SystemSensorSourceDiscovery<S> {
     #[cfg(debug_assertions)]
     pub(crate) fn injected(
-        rediscover: impl FnMut(&mut dyn IdentityBoundReadAccess) -> Result<S, SampleSourceError>
+        rediscover: impl FnMut(
+            &mut dyn IdentityBoundReadAccess,
+            Duration,
+        ) -> Result<S, SampleSourceError>
         + 'static,
     ) -> Self {
         Self {
@@ -556,7 +592,10 @@ where
         files: &mut dyn BoundedIdentityBoundFileAccess,
         deadline: Duration,
     ) -> Result<Self::Sources, SampleSourceError> {
-        (self.rediscover)(&mut DeadlineReadAccess { files, deadline })
+        (self.rediscover)(
+            &mut DeadlineReadAccess { files, deadline },
+            SENSOR_REDISCOVERY_WINDOW,
+        )
     }
 }
 
@@ -695,11 +734,20 @@ impl BoundExternalPower {
         })
     }
 
+    #[cfg(test)]
     fn observe(&self, files: &mut (impl BoundedIdentityBoundFileAccess + ?Sized)) -> ExternalPower {
-        let Some(first) = self.observe_once(files) else {
+        self.observe_before(files, Duration::MAX)
+    }
+
+    fn observe_before(
+        &self,
+        files: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
+        deadline: Duration,
+    ) -> ExternalPower {
+        let Some(first) = self.observe_once(files, deadline) else {
             return ExternalPower::Unknown;
         };
-        let Some(second) = self.observe_once(files) else {
+        let Some(second) = self.observe_once(files, deadline) else {
             return ExternalPower::Unknown;
         };
         if first != second {
@@ -717,9 +765,10 @@ impl BoundExternalPower {
     fn observe_once(
         &self,
         files: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
+        deadline: Duration,
     ) -> Option<BTreeMap<PathBuf, bool>> {
         let mut current = files
-            .list_bound_before(&self.root, self.root_identity, Duration::MAX)
+            .list_bound_before(&self.root, self.root_identity, deadline)
             .ok()?;
         current.sort();
         if current
@@ -733,9 +782,9 @@ impl BoundExternalPower {
         }
         let mut mains = BTreeMap::new();
         for supply in &self.supplies {
-            if files.identity_before(&supply.path, Duration::MAX).ok()? != supply.identity
+            if files.identity_before(&supply.path, deadline).ok()? != supply.identity
                 || files
-                    .identity_before(&supply.path.join("type"), Duration::MAX)
+                    .identity_before(&supply.path.join("type"), deadline)
                     .ok()?
                     != supply.type_identity
                 || files
@@ -744,7 +793,7 @@ impl BoundExternalPower {
                         supply.identity,
                         "type",
                         supply.type_identity,
-                        Duration::MAX,
+                        deadline,
                     )
                     .ok()?
                     != supply.kind
@@ -755,7 +804,7 @@ impl BoundExternalPower {
                 continue;
             };
             if files
-                .identity_before(&supply.path.join("online"), Duration::MAX)
+                .identity_before(&supply.path.join("online"), deadline)
                 .ok()?
                 != online_identity
             {
@@ -767,7 +816,7 @@ impl BoundExternalPower {
                     supply.identity,
                     "online",
                     online_identity,
-                    Duration::MAX,
+                    deadline,
                 )
                 .ok()?
                 .as_str()
@@ -828,15 +877,55 @@ impl NvidiaSmi {
         Ok(Self { selector })
     }
 
-    fn rediscover(expected: &NvidiaGpuSelector) -> Result<Self, StartupError> {
+    fn rediscover_with_timeout(
+        expected: &NvidiaGpuSelector,
+        timeout: Duration,
+    ) -> Result<Self, StartupError> {
         let id = format!("--id={}", expected.value());
-        let output = run_nvidia_smi(&[
-            id.as_str(),
-            "--query-gpu=uuid,pci.bus_id,temperature.gpu",
-            "--format=csv,noheader,nounits",
-        ])
+        let output = run_nvidia_smi_command(
+            Path::new("nvidia-smi"),
+            &[
+                id.as_str(),
+                "--query-gpu=uuid,pci.bus_id,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            timeout,
+        )
         .map_err(StartupError::Device)?;
         Self::from_rediscovery_output(&output, expected)
+    }
+
+    fn sample_by_identity_with_timeout(
+        &mut self,
+        selector: &NvidiaGpuSelector,
+        timeout: Duration,
+    ) -> Result<NvmlGpuSample, NvmlError> {
+        let id = format!("--id={}", selector.value());
+        let output = run_nvidia_smi_command(
+            Path::new("nvidia-smi"),
+            &[
+                id.as_str(),
+                "--query-gpu=uuid,pci.bus_id,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            timeout,
+        )
+        .map_err(|message| NvmlError::new(NvmlErrorKind::LibraryFailure, message))?;
+        let rows = output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        if rows.len() != 1 {
+            return Err(NvmlError::new(
+                NvmlErrorKind::InvalidState,
+                format!(
+                    "identity-directed NVIDIA query returned {} rows",
+                    rows.len()
+                ),
+            ));
+        }
+        parse_nvidia_smi_row_raw(rows[0])
+            .map_err(|message| NvmlError::new(NvmlErrorKind::InvalidState, message))
     }
 
     fn from_rediscovery_output(
@@ -874,28 +963,22 @@ impl NvmlAccess for NvidiaSmi {
         &mut self,
         selector: &NvidiaGpuSelector,
     ) -> Result<NvmlGpuSample, NvmlError> {
-        let id = format!("--id={}", selector.value());
-        let output = run_nvidia_smi(&[
-            id.as_str(),
-            "--query-gpu=uuid,pci.bus_id,temperature.gpu",
-            "--format=csv,noheader,nounits",
-        ])
-        .map_err(|message| NvmlError::new(NvmlErrorKind::LibraryFailure, message))?;
-        let rows = output
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .collect::<Vec<_>>();
-        if rows.len() != 1 {
-            return Err(NvmlError::new(
-                NvmlErrorKind::InvalidState,
-                format!(
-                    "identity-directed NVIDIA query returned {} rows",
-                    rows.len()
-                ),
-            ));
-        }
-        parse_nvidia_smi_row_raw(rows[0])
-            .map_err(|message| NvmlError::new(NvmlErrorKind::InvalidState, message))
+        self.sample_by_identity_with_timeout(selector, Duration::from_secs(1))
+    }
+}
+
+struct TimedNvidiaSmi<'a> {
+    inner: &'a mut NvidiaSmi,
+    timeout: Duration,
+}
+
+impl NvmlAccess for TimedNvidiaSmi<'_> {
+    fn sample_by_identity(
+        &mut self,
+        selector: &NvidiaGpuSelector,
+    ) -> Result<NvmlGpuSample, NvmlError> {
+        self.inner
+            .sample_by_identity_with_timeout(selector, self.timeout)
     }
 }
 
@@ -1628,8 +1711,31 @@ fn run_nvidia_smi_command(
     arguments: &[&str],
     timeout: Duration,
 ) -> Result<String, String> {
+    run_nvidia_smi_command_with(
+        command,
+        arguments,
+        timeout,
+        set_nonblocking,
+        std::process::Child::try_wait,
+    )
+}
+
+fn run_nvidia_smi_command_with<SetNonblocking, TryWait>(
+    command: &Path,
+    arguments: &[&str],
+    timeout: Duration,
+    set_nonblocking_fn: SetNonblocking,
+    mut try_wait_fn: TryWait,
+) -> Result<String, String>
+where
+    SetNonblocking: FnOnce(&std::process::ChildStdout) -> io::Result<()>,
+    TryWait: FnMut(&mut std::process::Child) -> io::Result<Option<std::process::ExitStatus>>,
+{
     const OUTPUT_LIMIT: usize = 64 * 1024;
     let command_name = command.display();
+    if timeout.is_zero() {
+        return Err(format!("{command_name} received no execution budget"));
+    }
     let mut command_builder = Command::new(command);
     command_builder
         .args(arguments)
@@ -1652,9 +1758,11 @@ fn run_nvidia_smi_command(
         .stdout
         .take()
         .expect("piped command stdout must be present");
-    set_nonblocking(&stdout)
-        .map_err(|error| format!("cannot bound {command_name} output: {error}"))?;
     let deadline = Instant::now() + timeout;
+    if let Err(error) = set_nonblocking_fn(&stdout) {
+        kill_and_reap_until(&mut child, deadline);
+        return Err(format!("cannot bound {command_name} output: {error}"));
+    }
     let cleanup_grace = std::cmp::min(timeout / 4, Duration::from_millis(50));
     let execution_deadline = deadline - cleanup_grace;
     let mut output = Vec::new();
@@ -1663,10 +1771,14 @@ fn run_nvidia_smi_command(
             kill_and_reap_until(&mut child, deadline);
             return Err(format!("cannot read {command_name} output: {error}"));
         }
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("cannot wait for {command_name}: {error}"))?
-        {
+        let status = match try_wait_fn(&mut child) {
+            Ok(status) => status,
+            Err(error) => {
+                kill_and_reap_until(&mut child, deadline);
+                return Err(format!("cannot wait for {command_name}: {error}"));
+            }
+        };
+        if let Some(status) = status {
             // The direct child may have left descendants holding stdout. Terminate the isolated
             // group and return only bytes already available; never block waiting for pipe EOF.
             kill_process_group(child.id());
@@ -2387,6 +2499,55 @@ mod tests {
     }
 
     #[test]
+    fn nvidia_process_runner_kills_children_after_post_spawn_setup_or_wait_errors() {
+        for fault in ["setup", "wait"] {
+            let fixture = executable_script(
+                "#!/bin/sh\nprintf '%s' \"$$\" > \"$1\"\nwhile :; do sleep 1; done\n",
+            );
+            let pid_path = fixture.0.path().join(format!("{fault}.pid"));
+            let wait_for_pid = || {
+                let deadline = Instant::now() + Duration::from_millis(250);
+                while !pid_path.exists() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            };
+            let error = if fault == "setup" {
+                run_nvidia_smi_command_with(
+                    &fixture.1,
+                    &[pid_path.to_str().unwrap()],
+                    Duration::from_secs(1),
+                    |_| {
+                        wait_for_pid();
+                        Err(io::Error::other("injected setup failure"))
+                    },
+                    std::process::Child::try_wait,
+                )
+                .unwrap_err()
+            } else {
+                run_nvidia_smi_command_with(
+                    &fixture.1,
+                    &[pid_path.to_str().unwrap()],
+                    Duration::from_secs(1),
+                    set_nonblocking,
+                    |_| {
+                        wait_for_pid();
+                        Err(io::Error::other("injected wait failure"))
+                    },
+                )
+                .unwrap_err()
+            };
+            assert!(error.contains(&format!("injected {fault} failure")));
+            let pid = fs::read_to_string(&pid_path).unwrap();
+            let process_path = Path::new("/proc").join(pid.trim());
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while process_path.exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(!process_path.exists(), "{fault} child survived cleanup");
+        }
+    }
+
+    #[test]
     fn signer_hashes_reject_placeholders() {
         assert!(valid_identity_hash(&"a".repeat(64)));
         assert!(!valid_identity_hash(&"0".repeat(64)));
@@ -2467,6 +2628,41 @@ mod tests {
 
         let error = access.read(path).unwrap_err();
         assert_eq!(error.kind(), PlatformErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn production_cpu_and_power_reads_stop_at_the_shared_sample_deadline() {
+        let hwmon = Path::new(HWMON_ROOT).join("hwmon47");
+        let mut cpu_platform = FakePlatform::new();
+        for (path, contents) in [
+            (hwmon.join("name"), "coretemp\n"),
+            (hwmon.join("temp1_label"), "Package id 0\n"),
+            (hwmon.join("temp1_input"), "68000\n"),
+            (hwmon.join("temp1_crit"), "100000\n"),
+        ] {
+            cpu_platform.insert_file_with_permissions(path, contents, FilePermissions::READ_ONLY);
+        }
+        let cpu = discover_coretemp(&mut cpu_platform, Path::new(HWMON_ROOT)).unwrap();
+        cpu_platform.queue_file_steps([FakeStep::Advance(Duration::from_secs(2))]);
+        let error = cpu
+            .sample(&mut DeadlineReadAccess {
+                files: &mut cpu_platform,
+                deadline: Duration::from_secs(1),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("deadline"));
+
+        let power_root = Path::new(POWER_SUPPLY_ROOT);
+        let mut power_platform = FakePlatform::new();
+        power_platform.insert_file(power_root.join("ACAD/type"), "Mains\n");
+        power_platform.insert_file(power_root.join("ACAD/online"), "1\n");
+        let power = BoundExternalPower::discover(&mut power_platform, power_root).unwrap();
+        power_platform.queue_file_steps([FakeStep::Advance(Duration::from_secs(2))]);
+        assert_eq!(
+            power.observe_before(&mut power_platform, Duration::from_secs(1)),
+            ExternalPower::Unknown
+        );
+        assert_eq!(power_platform.monotonic_now(), Duration::from_secs(1));
     }
 
     struct RebindTypeOnRead {
