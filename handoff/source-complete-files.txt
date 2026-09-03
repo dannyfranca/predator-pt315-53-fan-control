@@ -111,6 +111,7 @@ crates/fan-control-core/tests/supervised_endurance.rs
 crates/fan-control-core/tests/support/mod.rs
 crates/fan-control-daemon/Cargo.toml
 crates/fan-control-daemon/src/acceptance_fixture.rs
+crates/fan-control-daemon/src/bin/fan-control-acceptance-fixture.rs
 crates/fan-control-daemon/src/lib.rs
 crates/fan-control-daemon/src/main.rs
 crates/fan-control-daemon/src/system.rs
