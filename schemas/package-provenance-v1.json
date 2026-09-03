@@ -11,7 +11,7 @@
     "build": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source_commit", "source_lock_sha256", "build_environment_sha256", "build_attestation_sha256", "pkgbuild_sha256", "package_set_srcinfo_sha256", "package_manifest_signer_fingerprint"],
+      "required": ["source_commit", "source_lock_sha256", "build_environment_sha256", "build_attestation_sha256", "pkgbuild_sha256", "package_set_srcinfo_sha256", "package_manifest_signature_sha256", "package_manifest_signer_fingerprint"],
       "properties": {
         "source_commit": { "const": "7a84732fd5e4350c1312fd0ed0c72ffa139fb766" },
         "source_lock_sha256": { "$ref": "#/$defs/sha256" },
@@ -19,7 +19,8 @@
         "build_attestation_sha256": { "$ref": "#/$defs/sha256" },
         "pkgbuild_sha256": { "$ref": "#/$defs/sha256" },
         "package_set_srcinfo_sha256": { "$ref": "#/$defs/sha256" },
-        "package_manifest_signer_fingerprint": { "const": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+        "package_manifest_signature_sha256": { "$ref": "#/$defs/sha256" },
+        "package_manifest_signer_fingerprint": { "$ref": "#/$defs/sha256" }
       }
     },
     "kernel": {
@@ -31,11 +32,11 @@
         "package": { "const": "linux-cachyos-pt31553" },
         "image_path": { "const": "/usr/lib/modules/7.1.8-cachyos-pt31553/vmlinuz" },
         "image_sha256": { "$ref": "#/$defs/sha256" },
-        "image_signer_fingerprint": { "const": "1c549f6b61cc97b1673e9a73b974b63160bea16357be93a533d93382086f17bc" },
+        "image_signer_fingerprint": { "$ref": "#/$defs/sha256" },
         "config_path": { "const": "/usr/lib/modules/7.1.8-cachyos-pt31553/build/.config" },
         "config_sha256": { "$ref": "#/$defs/sha256" },
         "module_trust_certificate_path": { "const": "/usr/lib/modules/7.1.8-cachyos-pt31553/build/certs/signing_key.x509" },
-        "module_trust_certificate_fingerprint": { "const": "0000000000000000000000000000000000000000000000000000000000000000" }
+        "module_trust_certificate_fingerprint": { "$ref": "#/$defs/sha256" }
       }
     },
     "modules": {
@@ -65,7 +66,13 @@
   "$defs": {
     "sha256": {
       "type": "string",
-      "pattern": "^[0-9a-f]{64}$"
+      "pattern": "^[0-9a-f]{64}$",
+      "not": {
+        "enum": [
+          "0000000000000000000000000000000000000000000000000000000000000000",
+          "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        ]
+      }
     },
     "commit": {
       "type": "string",
@@ -79,7 +86,7 @@
         "name": { "type": "string", "pattern": "^[a-z0-9_]+$" },
         "path": { "type": "string", "pattern": "^/usr/lib/modules/7\\.1\\.8-cachyos-pt31553/(kernel/drivers/platform/x86/acer-wmi|extramodules/nvidia(-drm|-modeset|-peermem|-uvm)?)\\.ko\\.zst$" },
         "sha256": { "$ref": "#/$defs/sha256" },
-        "signer_fingerprint": { "const": "0000000000000000000000000000000000000000000000000000000000000000" },
+        "signer_fingerprint": { "$ref": "#/$defs/sha256" },
         "vermagic": { "const": "7.1.8-cachyos-pt31553 SMP preempt mod_unload" },
         "provenance": { "enum": ["in-tree", "nvidia-open"] },
         "package": { "enum": ["linux-cachyos-pt31553", "linux-cachyos-pt31553-nvidia-open"] },

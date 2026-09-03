@@ -126,7 +126,7 @@ impl Fixture {
         compatibility["module"]["path"] =
             "/usr/lib/modules/7.1.8-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst"
                 .into();
-        compatibility["module"]["signer_fingerprint"] = "0".repeat(64).into();
+        compatibility["module"]["signer_fingerprint"] = "2".repeat(64).into();
         compatibility["module"]["vermagic"] = "7.1.8-cachyos-pt31553 SMP preempt mod_unload".into();
         evidence_value["outcome"]["reason"] =
             "token=private hostname=predator /home/operator serial=private".into();
@@ -167,7 +167,7 @@ impl Fixture {
         fs::write(&controller_signature, b"controller package signature").unwrap();
         fs::write(&package_signature, b"kernel package-set signature").unwrap();
         let compatibility = &record["compatibility"];
-        let package_signer = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let package_signer = "9999999999999999999999999999999999999999999999999999999999999999";
         let modules = [
             ("acer_wmi", "/usr/lib/modules/7.1.8-cachyos-pt31553/kernel/drivers/platform/x86/acer-wmi.ko.zst", "in-tree", "linux-cachyos-pt31553", "kernel-tree", "7a84732fd5e4350c1312fd0ed0c72ffa139fb766"),
             ("nvidia", "/usr/lib/modules/7.1.8-cachyos-pt31553/extramodules/nvidia.ko.zst", "nvidia-open", "linux-cachyos-pt31553-nvidia-open", "nvidia-open", "610.57.04"),
@@ -205,6 +205,7 @@ impl Fixture {
                 "build_attestation_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                 "pkgbuild_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
                 "package_set_srcinfo_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "package_manifest_signature_sha256": sha(&fs::read(&package_signature).unwrap()),
                 "package_manifest_signer_fingerprint": package_signer
             },
             "kernel": {
@@ -216,7 +217,7 @@ impl Fixture {
                 "config_path": "/usr/lib/modules/7.1.8-cachyos-pt31553/build/.config",
                 "config_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "module_trust_certificate_path": "/usr/lib/modules/7.1.8-cachyos-pt31553/build/certs/signing_key.x509",
-                "module_trust_certificate_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+                "module_trust_certificate_fingerprint": compatibility["module"]["signer_fingerprint"]
             },
             "modules": modules,
             "packages": packages

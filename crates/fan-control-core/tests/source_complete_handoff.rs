@@ -63,11 +63,21 @@ impl HandoffSandbox {
         assert!(extracted.status.success(), "tar extraction failed");
 
         for overlay in [
+            "README.md",
+            "compatibility/pt315-53.toml",
+            "crates/fan-control-core/tests/candidate_declarations.rs",
             "crates/fan-control-core/tests/source_complete_handoff.rs",
             "handoff/source-complete-files.txt",
+            "packaging/kernel/README.md",
+            "packaging/kernel/provenance-policy.toml",
             "policy/README.md",
             "policy/qualified-envelope.example.toml",
+            "schemas/candidate-identity-v1.json",
+            "schemas/package-provenance-v1.json",
             "schemas/qualification-record.json",
+            "scripts/build-source-candidate",
+            "scripts/generate-candidate-declarations",
+            "scripts/verify-package-provenance",
             "scripts/verify-source-complete-handoff",
             "skills/predator-fan-control/SKILL.md",
             "skills/predator-fan-control/agents/openai.yaml",

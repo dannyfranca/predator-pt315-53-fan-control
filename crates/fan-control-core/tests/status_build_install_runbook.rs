@@ -80,14 +80,10 @@ fn clean_controller_and_kernel_builds_are_checkable() {
         "git clone --no-checkout",
         "git status --porcelain=v1 --untracked-files=all",
         "scripts/check-repository-policy",
-        "makepkg --cleanbuild --noconfirm --syncdeps --sign",
-        "scripts/verify-source-lock --inputs /bundle --exec-verified",
-        "scripts/verify-package-provenance",
+        "scripts/build-source-candidate",
         "pacman-key --verify",
-        "/usr/bin/bash -eu <<'RUNBOOK_CONTROLLER'",
-        "test \"$recipe_revision\" = \"$controller_source_revision\"",
-        "cd \"$source_root\"",
-        "/usr/bin/openssl cms -sign -binary",
+        "candidate-identity-v1.json",
+        "--controller-key REPLACE_WITH_CONTROLLER_PRIMARY_KEY_FINGERPRINT",
     ] {
         assert!(runbook.contains(command), "missing build check: {command}");
     }
@@ -96,7 +92,7 @@ fn clean_controller_and_kernel_builds_are_checkable() {
     let clean_source = section(
         runbook,
         "### 3. Build and verify from a clean source state",
-        "Build the signed controller package",
+        "Assemble `/bundle` exactly as specified",
     );
     assert_ordered(
         clean_source,
@@ -110,54 +106,63 @@ fn clean_controller_and_kernel_builds_are_checkable() {
             "cargo fetch --locked",
             "cargo deny fetch",
             "CARGO_NET_OFFLINE=true scripts/check-repository-policy",
+            "controller_source_revision=$(/usr/bin/sed -n",
+            "git worktree add --detach \"$controller_source_checkout\" \"$controller_source_revision\"",
+            "CARGO_HOME=\"$controller_cargo_home\" cargo fetch --locked",
+            "--manifest-path \"$controller_source_checkout/Cargo.toml\"",
+            "git worktree remove \"$controller_source_checkout\"",
         ],
     );
 
-    let controller = section(
+    let candidate = section(
         runbook,
-        "Invoke Bash explicitly",
-        "For the kernel, first use",
+        "Assemble `/bundle` exactly as specified",
+        "The command fails before publication",
     );
     assert_ordered(
-        controller,
+        candidate,
         &[
-            "/usr/bin/bash -eu <<'RUNBOOK_CONTROLLER'",
-            "case \"$controller_build\" in /absolute/path/*|'') exit 1 ;; esac",
-            "test \"$recipe_revision\" = \"$controller_source_revision\"",
-            "test ! -e \"$controller_build\"",
-            "makepkg --cleanbuild --noconfirm --syncdeps --sign",
-            "/usr/bin/pacman-key --verify \"$controller_package.sig\" \"$controller_package\"",
-            "controller_package_sha256=$(/usr/bin/sha256sum \"$controller_package\"",
-            "controller_package_identity=$(/usr/bin/pacman -Qp \"$controller_package\")",
+            "source_root=$PWD",
+            "test -d /bundle",
+            "candidate_output=/absolute/path/to/new-source-candidate",
+            "test ! -e \"$candidate_output\"",
+            "scripts/build-source-candidate",
+            "--bundle /bundle",
+            "--kernel-signing-dir /secure/signing",
+            "--package-cert-sha256 REPLACE_WITH_APPROVED_PACKAGE_CERT_SHA256",
+            "--package-key /secure/private/package-signing-key.pem",
+            "--module-cert-sha256 REPLACE_WITH_APPROVED_MODULE_CERT_SHA256",
+            "--kernel-cert-sha256 REPLACE_WITH_APPROVED_IMAGE_CERT_SHA256",
+            "--cargo-home /secure/controller-cargo-home",
+            "--controller-gnupg-home /secure/controller-gnupg",
+            "--controller-key REPLACE_WITH_CONTROLLER_PRIMARY_KEY_FINGERPRINT",
+            "--output \"$candidate_output\"",
         ],
     );
-    assert!(controller.contains("Retain the three printed values together"));
-
-    let kernel = section(
-        runbook,
-        "From that clean revision, assemble `/bundle`",
-        "The source-lock wrapper builds exactly",
-    );
-    assert_ordered(
-        kernel,
-        &[
-            "cd \"$source_root\"",
-            "test ! -e \"$PWD/build-output\"",
-            "scripts/verify-source-lock --inputs /bundle --exec-verified",
-            "test ! -e \"$package_manifest_signature\"",
-            "/usr/bin/openssl cms -sign -binary",
-            "scripts/verify-package-provenance",
-        ],
-    );
-    assert!(runbook.contains("reviewed, committed signer-enrollment revision"));
-    assert!(runbook.contains("all-zero/all-`f`"));
-    for enrolled_file in [
-        "packaging/kernel/provenance-policy.toml",
-        "schemas/package-provenance-v1.json",
-        "compatibility/pt315-53.toml",
+    for boundary in [
+        "dirty source revision",
+        "placeholder identity",
+        "reused signer",
+        "never installs a package",
+        "runs Cargo offline",
+        "environment overrides are rejected",
+        "invokes GitHub Actions",
+        "All hashes, signer fingerprints",
+        "explicitly **UNQUALIFIED**",
+        "`disabled-only`",
     ] {
-        assert!(runbook.contains(enrolled_file));
+        assert!(
+            runbook.contains(boundary),
+            "missing candidate boundary: {boundary}"
+        );
     }
+    assert!(
+        runbook
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("changes a boot default")
+    );
 }
 
 #[test]
@@ -189,9 +194,20 @@ fn first_install_and_boot_preserve_recovery_and_disabled_units() {
     assert_ordered(
         install,
         &[
+            "approved_candidate_manifest_sha256=REPLACE_WITH_APPROVED_CANDIDATE_MANIFEST_SHA256",
+            "approved_controller_signer_fingerprint=REPLACE_WITH_APPROVED_CONTROLLER_SIGNER_FINGERPRINT",
+            "candidate_manifest=\"$candidate_output/declarations/candidate-identity-v1.json\"",
+            "sha256sum \"$candidate_manifest\"",
+            "assert record[\"qualification_status\"] == \"unqualified\"",
+            "\"allowed_state\": \"disabled-only\"",
             "test \"$(/usr/bin/sha256sum \"$controller_package\"",
+            "test \"$(/usr/bin/sha256sum \"$controller_signature\"",
             "test \"$(/usr/bin/pacman -Qp \"$controller_package\")\"",
             "/usr/bin/pacman-key --verify \"$controller_signature\" \"$controller_package\"",
+            "--homedir /etc/pacman.d/gnupg --status-fd 1",
+            "test \"$actual_controller_signer\" = \"$controller_signer_fingerprint\"",
+            "usr/share/pt31553-fan-control/source-commit",
+            "cmp \"$candidate_compatibility\" \"$controller_check/compatibility.toml\"",
             "enabled_state=$(/usr/bin/systemctl is-enabled \"$unit\" 2>/dev/null || true)",
             "not-found) ;;",
             "disabled)",
@@ -216,6 +232,26 @@ fn first_install_and_boot_preserve_recovery_and_disabled_units() {
         "### Install without changing the default",
     );
     assert!(!stock_recording.contains("pt31553-fan-restore --restore"));
+
+    let kernel_install = section(
+        README,
+        "### Install without changing the default",
+        "## Canonical runbook: qualification and operation",
+    );
+    assert_ordered(
+        kernel_install,
+        &[
+            "candidate_output=/absolute/path/to/source-candidate",
+            "artifact_dir=\"$candidate_output/kernel\"",
+            "provenance_record=\"$candidate_output/declarations/package-provenance-v1.json\"",
+            "package_manifest_signature=\"$candidate_output/signatures/package-set.p7s\"",
+            "assert candidate[\"qualification_status\"] == \"unqualified\"",
+            "candidate[\"package_set\"][\"provenance_sha256\"]",
+            "candidate[\"package_set\"][\"manifest_signature_sha256\"]",
+            "scripts/verify-package-provenance",
+            "/usr/bin/cmp \"$provenance_record\"",
+        ],
+    );
 }
 
 #[test]

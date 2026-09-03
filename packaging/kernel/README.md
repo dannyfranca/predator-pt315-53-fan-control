@@ -89,13 +89,10 @@ the packaging signer, the certificate embedded by the kernel for module trust,
 and the previously confirmed enrolled Secure-Boot image signer. Keep all
 signing material outside the source tree and build-evidence directory.
 
-Compute each expected fingerprint over the certificate's DER encoding:
-
-```sh
-openssl x509 -in package-signing-certificate.pem -outform DER | sha256sum
-openssl x509 -inform DER -in module-signing-certificate.der -outform DER | sha256sum
-openssl x509 -in enrolled-image-signing-certificate.pem -outform DER | sha256sum
-```
+Obtain the three expected SHA-256 certificate fingerprints from the independent,
+reviewed trust-approval record. Do not derive expected values from the supplied
+certificates; the verifier hashes those certificates and compares them with the
+externally approved identities.
 
 From the verified build handoff, sign the retained package manifest with its
 dedicated packaging key. Keep the signature outside the build-evidence
@@ -132,12 +129,13 @@ It reads no network resource, keyring, MOK database, firmware variable, or
 machine certificate store. The expected fingerprints are mandatory so a
 different public certificate cannot be substituted at verification time.
 
-`provenance-policy.toml` pins the package, module, and kernel-image signer
-fingerprints as well as the exact package set, package versions, kernel
-release, kernel and NVIDIA source identities, image path, `acer_wmi` path, and
-complete bundled NVIDIA module path set. The enrolled `CN=Database Key`
-fingerprint applies only to the EFI image; module and package placeholders are
-replaced by distinct qualified identities. CLI values cannot override policy.
+`provenance-policy.toml` pins the stable package set, versions, kernel release,
+kernel and NVIDIA source identities, image path, `acer_wmi` path, and complete
+bundled NVIDIA module path set. Signer identities are deliberately not
+committed authority: the three mandatory expected DER fingerprints must match
+the three supplied public certificates, must be distinct, are verified against
+the actual package manifest/modules/image, and are recorded in the generated
+unqualified provenance. Placeholder fingerprints are rejected.
 The verifier then:
 
 - rechecks the retained source lock and build environment against this source
@@ -173,6 +171,45 @@ rejected in both retained evidence and package contents. Never pass a private
 key, machine trust-store export, or unredacted machine evidence. A
 successful package-provenance record is a qualification prerequisite; it does
 not itself qualify hardware or authorize fan writes.
+
+## Coherent source-candidate build
+
+The canonical local wrapper performs the authenticated kernel build,
+package-manifest signing and provenance verification, generated compatibility
+binding, controller build/signature verification, and final identity
+declaration as one fail-closed operation. The three expected certificate
+fingerprints must come from independent review outside the repository and
+evidence; they must not be derived from the presented certificates:
+
+```sh
+scripts/build-source-candidate \
+  --bundle /bundle \
+  --kernel-signing-dir /secure/signing \
+  --package-cert /secure/public/package-signing-certificate.pem \
+  --package-cert-sha256 APPROVED_PACKAGE_CERT_SHA256 \
+  --package-key /secure/private/package-signing-key.pem \
+  --module-cert-sha256 APPROVED_MODULE_CERT_SHA256 \
+  --kernel-cert /secure/public/enrolled-image-signing-certificate.pem \
+  --kernel-cert-sha256 APPROVED_IMAGE_CERT_SHA256 \
+  --cargo-home /secure/controller-cargo-home \
+  --controller-gnupg-home /secure/controller-gnupg \
+  --controller-key CONTROLLER_PRIMARY_KEY_FINGERPRINT \
+  --output /absolute/path/to/new-source-candidate
+```
+
+It requires a clean reviewed checkout and a new secure output directory. The
+output contains `package-provenance-v1.json`, the compatibility declaration,
+and `candidate-identity-v1.json` alongside packages and detached signatures.
+The final manifest conforms to `schemas/candidate-identity-v1.json`, is always
+`unqualified` and `disabled-only`, preserves `linux-cachyos-lts` as recovery,
+and cannot designate the candidate as default. Private keys and machine trust
+remain external. The controller source is a local archive of the controller
+recipe's committed source-lock revision, and Cargo runs offline against
+preseeded locked dependencies. Missing dependencies fail rather than being
+installed. The wrapper never installs packages, edits boot state, enables
+services, or invokes GitHub Actions. Seed `--cargo-home` from the exact
+controller `_commit` lock as shown in the top-level runbook. Unsafe inherited
+environment overrides are rejected before signing.
 
 CI also runs `scripts/check-sensitive-history` against every reachable Git
 blob and historical path. Run it locally before publishing; deleting a secret
