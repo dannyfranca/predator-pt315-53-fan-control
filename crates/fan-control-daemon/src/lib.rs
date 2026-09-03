@@ -3,18 +3,26 @@
 use std::{error::Error, fmt, path::Path};
 
 use fan_control_core::{
-    AcerHwmonDevice, ArmedFanControl, BoundedIdentityBoundFileAccess, Clock,
-    CompatibilityObservation, ControllerOwnership, FreshSampleGate, OwnershipSampleReadiness,
+    AcerHwmonDevice, AdmittedPolicyAuthority, ArmedFanControl, BoundedIdentityBoundFileAccess,
+    Clock, CompatibilityObservation, ControlLoopHeartbeat, ControllerOwnership, FreshSampleGate,
+    GracefulShutdownFailure, NORMAL_SAMPLE_CADENCE, OwnershipSampleReadiness, PlatformError,
     RootOwnedQualificationRecordAccess, RuntimeFault, RuntimeLockAccess, SampleSources,
-    ServiceAccess, ValidatedConfig, acquire_controller_ownership, admit_compatibility,
-    admit_policy_authority, arm_both_fans_safely, parse_compatibility_v1, parse_config_v1,
-    validate_config_v1,
+    SensorControlStep, SensorSourceDiscovery, ServiceAccess, ServiceNotifier, ShutdownController,
+    ShutdownRequest, SupervisedControlIterationError, TransientSensorControl,
+    TransientSensorControlError, ValidatedConfig, acquire_controller_ownership,
+    admit_compatibility, admit_policy_authority, arm_both_fans_safely_until,
+    parse_compatibility_v1, parse_config_v1, run_supervised_control_iteration, validate_config_v1,
 };
 
+#[cfg(debug_assertions)]
+mod acceptance_fixture;
 mod system;
+#[cfg(debug_assertions)]
+pub use acceptance_fixture::run_acceptance_fixture;
 pub use system::{
     COMPATIBILITY_DECLARATION_PATH, EDITABLE_CONFIG_PATH, HWMON_ROOT, POWER_SUPPLY_ROOT,
-    SystemSampleSources, SystemStartupDiscovery, discover_system_startup,
+    SystemSampleSources, SystemSensorSourceDiscovery, SystemStartupDiscovery,
+    discover_system_startup,
 };
 
 /// Immutable and editable inputs needed for one fail-closed production admission.
@@ -35,6 +43,7 @@ where
 {
     ownership: ControllerOwnership<'a, P>,
     device: AcerHwmonDevice,
+    authority: AdmittedPolicyAuthority,
     armed: ArmedFanControl,
 }
 
@@ -67,8 +76,15 @@ where
         &self.device
     }
 
-    pub fn into_parts(self) -> (ControllerOwnership<'a, P>, AcerHwmonDevice, ArmedFanControl) {
-        (self.ownership, self.device, self.armed)
+    fn into_parts(
+        self,
+    ) -> (
+        ControllerOwnership<'a, P>,
+        AcerHwmonDevice,
+        AdmittedPolicyAuthority,
+        ArmedFanControl,
+    ) {
+        (self.ownership, self.device, self.authority, self.armed)
     }
 
     /// Safe interim handoff for callers that cannot yet enter the continuous loop.
@@ -97,6 +113,7 @@ pub enum StartupError {
     Sampling(String),
     Arming(String),
     Release(String),
+    ShutdownRequested,
 }
 
 impl StartupError {
@@ -110,6 +127,7 @@ impl StartupError {
             Self::Safing(_) => "firmware-auto-unconfirmed",
             Self::Arming(_) => "arming-rejected",
             Self::Release(_) => "platform-operation-failed",
+            Self::ShutdownRequested => "shutdown-requested",
         }
     }
 
@@ -123,6 +141,7 @@ impl StartupError {
             Self::Safing(_) => RuntimeFault::FirmwareAutoUnconfirmed,
             Self::Arming(_) => RuntimeFault::ArmingRejected,
             Self::Release(_) => RuntimeFault::PlatformOperation,
+            Self::ShutdownRequested => RuntimeFault::ShutdownRequested,
         }
     }
 }
@@ -139,6 +158,9 @@ impl fmt::Display for StartupError {
             Self::Sampling(reason) => ("startup sampling", reason),
             Self::Arming(reason) => ("arming", reason),
             Self::Release(reason) => ("ownership release", reason),
+            Self::ShutdownRequested => {
+                return formatter.write_str("shutdown requested during startup");
+            }
         };
         write!(formatter, "{stage} rejected: {reason}")
     }
@@ -156,6 +178,7 @@ pub fn qualified_startup<'a, P>(
     discovered_device: &AcerHwmonDevice,
     sources: &mut dyn SampleSources,
     inputs: QualifiedStartupInputs<'_>,
+    shutdown: &ShutdownRequest,
 ) -> Result<QualifiedStartup<'a, P>, StartupError>
 where
     P: BoundedIdentityBoundFileAccess
@@ -164,6 +187,9 @@ where
         + RuntimeLockAccess
         + ServiceAccess,
 {
+    if shutdown.is_requested() {
+        return Err(StartupError::ShutdownRequested);
+    }
     let candidate = parse_candidate(inputs.editable_config)?;
     let compatibility = parse_compatibility_v1(inputs.compatibility_declaration)
         .map_err(|error| StartupError::Compatibility(error.to_string()))?;
@@ -189,6 +215,13 @@ where
             ));
         }
     };
+    if shutdown.is_requested() {
+        return Err(reject_owned(
+            ownership,
+            &device,
+            StartupError::ShutdownRequested,
+        ));
+    }
     if let Err(error) = ownership.restore_firmware_auto(&device) {
         return Err(recover_after_restore_failure(
             ownership,
@@ -213,6 +246,13 @@ where
             ));
         }
     };
+    if shutdown.is_requested() {
+        return Err(reject_owned(
+            ownership,
+            &device,
+            StartupError::ShutdownRequested,
+        ));
+    }
 
     let mut gate = FreshSampleGate::new();
     match ownership.collect_fresh_sample(&device, &mut gate, sources) {
@@ -225,6 +265,13 @@ where
                 StartupError::Sampling(error.to_string()),
             ));
         }
+    }
+    if shutdown.is_requested() {
+        return Err(reject_owned(
+            ownership,
+            &device,
+            StartupError::ShutdownRequested,
+        ));
     }
     if let Err(error) = ownership.wait_for_next_fresh_sample(&gate) {
         return Err(reject_owned(
@@ -250,18 +297,221 @@ where
             ));
         }
     };
+    if shutdown.is_requested() {
+        return Err(reject_owned(
+            ownership,
+            &device,
+            StartupError::ShutdownRequested,
+        ));
+    }
 
-    match arm_both_fans_safely(&mut ownership, &device, &authority, &candidate, ready) {
+    match arm_both_fans_safely_until(
+        &mut ownership,
+        &device,
+        &authority,
+        &candidate,
+        ready,
+        shutdown,
+    ) {
+        Ok(armed) if shutdown.is_requested() => {
+            drop(armed);
+            Err(reject_owned(
+                ownership,
+                &device,
+                StartupError::ShutdownRequested,
+            ))
+        }
         Ok(armed) => Ok(QualifiedStartup {
             ownership,
             device,
+            authority,
             armed,
         }),
+        Err(_) if shutdown.is_requested() => Err(reject_owned(
+            ownership,
+            &device,
+            StartupError::ShutdownRequested,
+        )),
         Err(error) => Err(reject_owned(
             ownership,
             &device,
             StartupError::Arming(error.to_string()),
         )),
+    }
+}
+
+/// Runs the admitted production controller until shutdown or a latched fault.
+///
+/// The admitted authority and armed state stay in one capability chain. Every watchdog advance is
+/// downstream of a successful real control/recovery iteration. All exits request permanent
+/// cancellation, restore both fans to Firmware Auto, and only then release exclusive ownership.
+pub fn run_production_control_loop<'a, P, D, N>(
+    startup: QualifiedStartup<'a, P>,
+    sources: D::Sources,
+    discovery: D,
+    shutdown: &mut ShutdownController,
+    notifier: N,
+) -> Result<(), ProductionControlLoopError<N::Error>>
+where
+    P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
+    D: SensorSourceDiscovery,
+    N: ServiceNotifier,
+    N::Error: fmt::Display,
+{
+    let (mut ownership, device, authority, armed) = startup.into_parts();
+    let mut control = TransientSensorControl::from_armed(
+        armed,
+        authority,
+        shutdown.request_handle(),
+        discovery,
+        sources,
+    );
+    let mut heartbeat = ControlLoopHeartbeat::new(notifier);
+
+    let iteration_failure = loop {
+        match run_supervised_control_iteration(&mut control, &mut ownership, &mut heartbeat) {
+            Ok(SensorControlStep::AwaitingRediscovery(_)) => {
+                ownership.delay(NORMAL_SAMPLE_CADENCE);
+            }
+            Ok(_) => {}
+            Err(SupervisedControlIterationError::Control(
+                TransientSensorControlError::ShutdownRequested,
+            )) if shutdown.is_requested() => break None,
+            Err(error) => break Some(Box::new(error)),
+        }
+    };
+
+    let cleanup_failure = shutdown.cleanup(&mut ownership, &device).err();
+    if matches!(
+        &cleanup_failure,
+        Some(GracefulShutdownFailure::Critical { .. })
+    ) {
+        // A critical result means neither Firmware Auto nor emergency containment could be
+        // confirmed. Never let the ownership guard (and its OS lock) drop in that state: retry
+        // the bounded recovery cycle forever, holding maximum PWM whenever Custom is observed,
+        // until both Firmware Auto readbacks are confirmed.
+        let hwmon_root = device
+            .root()
+            .parent()
+            .expect("a discovered hwmon device always has its hwmon root");
+        let current_device = loop {
+            match ownership.discover_acer_hwmon(hwmon_root) {
+                Ok(current_device) => break current_device,
+                Err(_) => ownership.delay(NORMAL_SAMPLE_CADENCE),
+            }
+        };
+        ownership.recover_firmware_auto(&current_device);
+    }
+    if let Err(release) = ownership.release() {
+        let source = release.platform_error().cloned();
+        return Err(ProductionControlLoopError::Release {
+            iteration: iteration_failure,
+            reason: release.to_string(),
+            source,
+        });
+    }
+    if let Some(cleanup) = cleanup_failure {
+        return Err(ProductionControlLoopError::Cleanup {
+            iteration: iteration_failure,
+            cleanup,
+        });
+    }
+    match iteration_failure {
+        Some(error) => Err(ProductionControlLoopError::Iteration(error)),
+        None => Ok(()),
+    }
+}
+
+#[derive(Debug)]
+pub enum ProductionControlLoopError<N> {
+    Iteration(Box<SupervisedControlIterationError<N>>),
+    Cleanup {
+        iteration: Option<Box<SupervisedControlIterationError<N>>>,
+        cleanup: GracefulShutdownFailure,
+    },
+    Release {
+        iteration: Option<Box<SupervisedControlIterationError<N>>>,
+        reason: String,
+        source: Option<PlatformError>,
+    },
+}
+
+impl<N> ProductionControlLoopError<N> {
+    pub const fn diagnostic_id(&self) -> &'static str {
+        match self {
+            Self::Cleanup {
+                cleanup: GracefulShutdownFailure::Critical { .. },
+                ..
+            } => "firmware-auto-unconfirmed",
+            Self::Cleanup {
+                cleanup: GracefulShutdownFailure::Contained { .. },
+                ..
+            } => "platform-operation-failed",
+            Self::Iteration(_) | Self::Release { .. } => "platform-operation-failed",
+        }
+    }
+
+    pub const fn runtime_fault(&self) -> RuntimeFault {
+        match self {
+            Self::Cleanup {
+                cleanup: GracefulShutdownFailure::Critical { .. },
+                ..
+            } => RuntimeFault::FirmwareAutoUnconfirmed,
+            Self::Cleanup {
+                cleanup: GracefulShutdownFailure::Contained { .. },
+                ..
+            } => RuntimeFault::PlatformOperation,
+            Self::Iteration(_) | Self::Release { .. } => RuntimeFault::PlatformOperation,
+        }
+    }
+}
+
+impl<N> fmt::Display for ProductionControlLoopError<N>
+where
+    N: fmt::Display,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Iteration(error) => write!(formatter, "production control stopped: {error}"),
+            Self::Cleanup { iteration, cleanup } => {
+                if let Some(iteration) = iteration {
+                    write!(formatter, "{iteration}; cleanup failed: {cleanup}")
+                } else {
+                    write!(formatter, "cleanup failed: {cleanup}")
+                }
+            }
+            Self::Release {
+                iteration, reason, ..
+            } => {
+                if let Some(iteration) = iteration {
+                    write!(formatter, "{iteration}; ownership release failed: {reason}")
+                } else {
+                    write!(formatter, "ownership release failed: {reason}")
+                }
+            }
+        }
+    }
+}
+
+impl<N> Error for ProductionControlLoopError<N>
+where
+    N: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Cleanup { cleanup, .. } => Some(cleanup),
+            Self::Iteration(error) => Some(error.as_ref()),
+            Self::Release {
+                source: Some(error),
+                ..
+            } => Some(error),
+            Self::Release {
+                iteration: Some(error),
+                source: None,
+                ..
+            } => Some(error),
+            Self::Release { .. } => None,
+        }
     }
 }
 

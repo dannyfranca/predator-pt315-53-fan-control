@@ -3,18 +3,20 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use fan_control_core::{
     AcerHwmonDevice, BoundedIdentityBoundFileAccess, CompatibilityDeclarationV1,
     CompatibilityObservation, CoretempDevice, EvidenceCompleteness, ExternalPower, FanWriteBackend,
-    FileIdentity, HardwareIdentity, ModuleIdentity, ModuleProvenance, NvidiaGpuSelector,
-    NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, ObservedFanAbi, ObservedSample,
-    PackageProvenanceModuleV1, PackageProvenanceV1, RootOwnedQualificationRecordAccess,
-    SampleCapture, SampleSourceError, SampleSources, SystemOwnershipPlatform, TemperatureCelsius,
-    discover_acer_hwmon, discover_coretemp, parse_compatibility_v1, sample_nvidia_gpu,
+    FileIdentity, HardwareIdentity, IdentityBoundReadAccess, ModuleIdentity, ModuleProvenance,
+    NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, ObservedFanAbi,
+    ObservedSample, PackageProvenanceModuleV1, PackageProvenanceV1,
+    RootOwnedQualificationRecordAccess, SampleCapture, SampleSourceError, SampleSources,
+    SensorSourceDiscovery, SystemOwnershipPlatform, TemperatureCelsius, discover_acer_hwmon,
+    discover_coretemp, parse_compatibility_v1, sample_nvidia_gpu,
     validate_package_provenance_compatibility_v1, validate_package_provenance_v1,
 };
 use object::{Object, ObjectSection};
@@ -39,18 +41,18 @@ pub struct SystemStartupDiscovery {
 }
 
 #[derive(Debug)]
-struct StartupDiscovery<S> {
-    editable_config: String,
-    compatibility_declaration: String,
-    protected_policy: String,
-    observation: CompatibilityObservation,
-    device: AcerHwmonDevice,
-    sources: S,
+pub(crate) struct StartupDiscovery<S> {
+    pub(crate) editable_config: String,
+    pub(crate) compatibility_declaration: String,
+    pub(crate) protected_policy: String,
+    pub(crate) observation: CompatibilityObservation,
+    pub(crate) device: AcerHwmonDevice,
+    pub(crate) sources: S,
 }
 
 /// Boundary around host files, package commands, device discovery, and live identity probes.
 /// Keeping the admission orchestration generic makes its exact production wiring fixture-testable.
-trait StartupDiscoveryEnvironment {
+pub(crate) trait StartupDiscoveryEnvironment {
     type Sources: SampleSources;
 
     fn read_editable_config(&mut self) -> Result<String, StartupError>;
@@ -161,7 +163,7 @@ impl ProductionStartupDiscoveryEnvironment {
     }
 }
 
-struct QualifiedArchivePaths {
+pub(crate) struct QualifiedArchivePaths {
     protected_policy: PathBuf,
     package_provenance: PathBuf,
     kernel_image_certificate: PathBuf,
@@ -192,7 +194,7 @@ fn qualified_archive_paths() -> Result<QualifiedArchivePaths, StartupError> {
     Ok(qualified_archive_paths_for_version(version))
 }
 
-fn qualified_archive_paths_for_version(version: &str) -> QualifiedArchivePaths {
+pub(crate) fn qualified_archive_paths_for_version(version: &str) -> QualifiedArchivePaths {
     let root =
         Path::new(QUALIFIED_ARCHIVE_PARENT).join(format!("pt31553-last-qualified-{version}"));
     QualifiedArchivePaths {
@@ -219,7 +221,7 @@ pub fn discover_system_startup() -> Result<SystemStartupDiscovery, StartupError>
     })
 }
 
-fn discover_startup_with<E>(
+pub(crate) fn discover_startup_with<E>(
     environment: &mut E,
 ) -> Result<StartupDiscovery<E::Sources>, StartupError>
 where
@@ -338,6 +340,19 @@ impl SystemSampleSources {
     fn platform_mut(&mut self) -> &mut SystemOwnershipPlatform {
         &mut self.platform
     }
+
+    fn rediscover_with(files: &mut dyn IdentityBoundReadAccess) -> Result<Self, StartupError> {
+        let coretemp = discover_coretemp(files, Path::new(HWMON_ROOT))
+            .map_err(|error| StartupError::Device(error.to_string()))?;
+        let nvidia = NvidiaSmi::discover()?;
+        let power = BoundExternalPower::discover_readonly(files, Path::new(POWER_SUPPLY_ROOT))?;
+        Ok(Self {
+            platform: SystemOwnershipPlatform::new(),
+            coretemp,
+            nvidia,
+            power,
+        })
+    }
 }
 
 impl SampleSources for SystemSampleSources {
@@ -371,6 +386,59 @@ impl SampleSources for SystemSampleSources {
     }
 }
 
+/// Fresh production CPU/GPU/power source discovery used after a recoverable sensor fault.
+pub struct SystemSensorSourceDiscovery<S = SystemSampleSources> {
+    rediscover: Box<RediscoverSources<S>>,
+}
+
+type RediscoverSources<S> =
+    dyn FnMut(&mut dyn IdentityBoundReadAccess) -> Result<S, SampleSourceError>;
+
+impl std::fmt::Debug for SystemSensorSourceDiscovery<SystemSampleSources> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SystemSensorSourceDiscovery")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for SystemSensorSourceDiscovery<SystemSampleSources> {
+    fn default() -> Self {
+        Self {
+            rediscover: Box::new(|files| {
+                SystemSampleSources::rediscover_with(files)
+                    .map_err(|error| SampleSourceError::new(error.to_string()))
+            }),
+        }
+    }
+}
+
+impl<S> SystemSensorSourceDiscovery<S> {
+    #[cfg(debug_assertions)]
+    pub(crate) fn injected(
+        rediscover: impl FnMut(&mut dyn IdentityBoundReadAccess) -> Result<S, SampleSourceError>
+        + 'static,
+    ) -> Self {
+        Self {
+            rediscover: Box::new(rediscover),
+        }
+    }
+}
+
+impl<S> SensorSourceDiscovery for SystemSensorSourceDiscovery<S>
+where
+    S: SampleSources,
+{
+    type Sources = S;
+
+    fn rediscover(
+        &mut self,
+        files: &mut dyn IdentityBoundReadAccess,
+    ) -> Result<Self::Sources, SampleSourceError> {
+        (self.rediscover)(files)
+    }
+}
+
 struct BoundExternalPower {
     root: PathBuf,
     root_identity: FileIdentity,
@@ -386,6 +454,66 @@ struct BoundPowerSupply {
 }
 
 impl BoundExternalPower {
+    fn discover_readonly(
+        files: &mut dyn IdentityBoundReadAccess,
+        root: &Path,
+    ) -> Result<Self, StartupError> {
+        let root_identity = files
+            .identity(root)
+            .map_err(|error| StartupError::Device(error.to_string()))?;
+        let mut candidates = files
+            .list_bound(root, root_identity)
+            .map_err(|error| StartupError::Device(error.to_string()))?;
+        candidates.sort();
+        let mut supplies = Vec::with_capacity(candidates.len());
+        for path in candidates {
+            if path.parent() != Some(root) {
+                return Err(StartupError::Device(
+                    "power-supply discovery returned a non-child path".into(),
+                ));
+            }
+            let identity = files
+                .identity(&path)
+                .map_err(|error| StartupError::Device(error.to_string()))?;
+            let type_path = path.join("type");
+            let type_identity = files
+                .identity(&type_path)
+                .map_err(|error| StartupError::Device(error.to_string()))?;
+            let kind = files
+                .read_bound(&path, identity, "type")
+                .map_err(|error| StartupError::Device(error.to_string()))?;
+            let online_identity = if kind == "Mains\n" {
+                Some(
+                    files
+                        .identity(&path.join("online"))
+                        .map_err(|error| StartupError::Device(error.to_string()))?,
+                )
+            } else {
+                None
+            };
+            supplies.push(BoundPowerSupply {
+                path,
+                identity,
+                type_identity,
+                kind,
+                online_identity,
+            });
+        }
+        if !supplies
+            .iter()
+            .any(|supply| supply.online_identity.is_some())
+        {
+            return Err(StartupError::Device(
+                "no identity-bound Mains power supply found".into(),
+            ));
+        }
+        Ok(Self {
+            root: root.to_path_buf(),
+            root_identity,
+            supplies,
+        })
+    }
+
     fn discover(
         files: &mut (impl BoundedIdentityBoundFileAccess + ?Sized),
         root: &Path,
@@ -540,9 +668,15 @@ struct NvidiaSmi {
 
 impl NvidiaSmi {
     fn discover() -> Result<Self, StartupError> {
-        Self::discover_with(&mut SystemLiveIdentityAccess)
+        let output = run_nvidia_smi(&[
+            "--query-gpu=uuid,pci.bus_id,temperature.gpu",
+            "--format=csv,noheader,nounits",
+        ])
+        .map_err(StartupError::Device)?;
+        Self::from_discovery_output(&output)
     }
 
+    #[cfg(test)]
     fn discover_with(access: &mut impl LiveIdentityAccess) -> Result<Self, StartupError> {
         let output = access
             .run_command(
@@ -553,6 +687,10 @@ impl NvidiaSmi {
                 ],
             )
             .map_err(|error| StartupError::Device(error.to_string()))?;
+        Self::from_discovery_output(&output)
+    }
+
+    fn from_discovery_output(output: &str) -> Result<Self, StartupError> {
         let rows = output
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -576,14 +714,11 @@ impl NvmlAccess for NvidiaSmi {
         selector: &NvidiaGpuSelector,
     ) -> Result<NvmlGpuSample, NvmlError> {
         let id = format!("--id={}", selector.value());
-        let output = run_command_raw(
-            "nvidia-smi",
-            &[
-                id.as_str(),
-                "--query-gpu=uuid,pci.bus_id,temperature.gpu",
-                "--format=csv,noheader,nounits",
-            ],
-        )
+        let output = run_nvidia_smi(&[
+            id.as_str(),
+            "--query-gpu=uuid,pci.bus_id,temperature.gpu",
+            "--format=csv,noheader,nounits",
+        ])
         .map_err(|message| NvmlError::new(NvmlErrorKind::LibraryFailure, message))?;
         let rows = output
             .lines()
@@ -1320,6 +1455,42 @@ fn run_command_bytes(command: &str, arguments: &[&str]) -> Result<Vec<u8>, Strin
         return Err(format!("{command} exited with {}", output.status));
     }
     Ok(output.stdout)
+}
+
+fn run_nvidia_smi(arguments: &[&str]) -> Result<String, String> {
+    const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
+    let mut child = Command::new("nvidia-smi")
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("cannot execute nvidia-smi: {error}"))?;
+    let deadline = Instant::now() + QUERY_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("cannot wait for nvidia-smi: {error}"))?
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("nvidia-smi exceeded its one-second deadline".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    if !status.success() {
+        return Err(format!("nvidia-smi exited with {status}"));
+    }
+    let mut output = String::new();
+    child
+        .stdout
+        .take()
+        .expect("piped nvidia-smi stdout must be present")
+        .read_to_string(&mut output)
+        .map_err(|error| format!("cannot read nvidia-smi output: {error}"))?;
+    Ok(output)
 }
 
 fn configuration_error(path: &str, error: impl std::fmt::Display) -> StartupError {

@@ -3,8 +3,8 @@ use std::{path::Path, time::Duration};
 use fan_control_core::{
     ExternalPower, FakePlatform, FilePermissions, ObservedSample, PlatformOperation,
     QUALIFICATION_RECORD_PATH, SUPERVISED_ENDURANCE_EVIDENCE_PATH, SampleCapture,
-    SampleSourceError, SampleSources, TemperatureCelsius, acquire_controller_ownership,
-    discover_acer_hwmon,
+    SampleSourceError, SampleSources, ShutdownRequest, TemperatureCelsius,
+    acquire_controller_ownership, discover_acer_hwmon,
 };
 use fan_control_daemon::{QualifiedStartupInputs, StartupError, qualified_startup};
 
@@ -33,6 +33,7 @@ fn exact_qualified_startup_returns_current_armed_control() {
             compatibility_observations: &[support::matching_observation_for_policy(policy)],
             hwmon_root: Path::new(HWMON_ROOT),
         },
+        &ShutdownRequest::new(),
     )
     .unwrap();
 
@@ -59,6 +60,7 @@ fn post_lock_rediscovery_precedes_the_first_fan_write() {
             compatibility_observations: &[support::matching_observation_for_policy(policy)],
             hwmon_root: Path::new(HWMON_ROOT),
         },
+        &ShutdownRequest::new(),
     )
     .unwrap();
     startup.restore_and_release().unwrap();
@@ -112,6 +114,7 @@ fn changed_post_lock_device_is_safed_using_its_current_identity() {
             compatibility_observations: &[support::matching_observation_for_policy(policy)],
             hwmon_root: Path::new(HWMON_ROOT),
         },
+        &ShutdownRequest::new(),
     )
     .unwrap_err();
 
@@ -151,6 +154,7 @@ fn malformed_config_is_rejected_before_ownership() {
             compatibility_observations: &[support::matching_observation_for_policy(policy)],
             hwmon_root: Path::new(HWMON_ROOT),
         },
+        &ShutdownRequest::new(),
     )
     .unwrap_err();
 
@@ -184,6 +188,7 @@ fn mismatched_live_identity_is_rejected_before_ownership() {
             compatibility_observations: &[observation],
             hwmon_root: Path::new(HWMON_ROOT),
         },
+        &ShutdownRequest::new(),
     )
     .unwrap_err();
 
@@ -216,10 +221,62 @@ fn missing_qualification_restores_auto_and_releases_without_custom_mode() {
             compatibility_observations: &[support::matching_observation_for_policy(policy)],
             hwmon_root: Path::new(HWMON_ROOT),
         },
+        &ShutdownRequest::new(),
     )
     .unwrap_err();
 
     assert!(matches!(error, StartupError::Authority(_)));
+    assert!(
+        platform
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, PlatformOperation::ReleaseRuntimeLock(_)))
+    );
+    assert!(!platform.operations().iter().any(|operation| {
+        matches!(
+            operation,
+            PlatformOperation::Write { path, contents }
+                if path.file_name().is_some_and(|name| name == "pwm1_enable" || name == "pwm2_enable")
+                    && contents == "1"
+        )
+    }));
+}
+
+#[test]
+fn shutdown_during_admission_restores_and_releases_without_custom_mode() {
+    let mut platform = qualified_platform();
+    let device = discover_acer_hwmon(&mut platform, Path::new(HWMON_ROOT)).unwrap();
+    let shutdown = ShutdownRequest::new();
+    let mut sources = ShutdownDuringSample {
+        shutdown: shutdown.clone(),
+    };
+    let policy = support::PROTECTED_POLICY;
+
+    let error = qualified_startup(
+        &mut platform,
+        &device,
+        &mut sources,
+        QualifiedStartupInputs {
+            editable_config: &editable_config(policy),
+            compatibility_declaration: &compatibility_source(policy),
+            protected_policy: policy,
+            qualification_record_path: Path::new(QUALIFICATION_RECORD_PATH),
+            compatibility_observations: &[support::matching_observation_for_policy(policy)],
+            hwmon_root: Path::new(HWMON_ROOT),
+        },
+        &shutdown,
+    )
+    .unwrap_err();
+
+    assert_eq!(error, StartupError::ShutdownRequested);
+    assert_eq!(
+        platform.file_contents(Path::new(ACER_ROOT).join("pwm1_enable")),
+        Some("2")
+    );
+    assert_eq!(
+        platform.file_contents(Path::new(ACER_ROOT).join("pwm2_enable")),
+        Some("2")
+    );
     assert!(
         platform
             .operations()
@@ -263,6 +320,7 @@ fn startup_diagnostics_are_stable_by_rejection_stage() {
             StartupError::Release(String::new()),
             "platform-operation-failed",
         ),
+        (StartupError::ShutdownRequested, "shutdown-requested"),
     ];
 
     for (error, expected) in cases {
@@ -332,6 +390,35 @@ impl SampleSources for FixedSources {
         &mut self,
         capture: &mut SampleCapture<'_>,
     ) -> Result<ObservedSample<TemperatureCelsius>, SampleSourceError> {
+        Ok(capture.capture(TemperatureCelsius::try_from(60.0).unwrap()))
+    }
+
+    fn sample_gpu(
+        &mut self,
+        capture: &mut SampleCapture<'_>,
+    ) -> Result<ObservedSample<TemperatureCelsius>, SampleSourceError> {
+        Ok(capture.capture(TemperatureCelsius::try_from(55.0).unwrap()))
+    }
+
+    fn observe_external_power(
+        &mut self,
+        capture: &mut SampleCapture<'_>,
+    ) -> Result<ObservedSample<ExternalPower>, SampleSourceError> {
+        Ok(capture.capture(ExternalPower::Connected))
+    }
+}
+
+#[derive(Debug)]
+struct ShutdownDuringSample {
+    shutdown: ShutdownRequest,
+}
+
+impl SampleSources for ShutdownDuringSample {
+    fn sample_cpu(
+        &mut self,
+        capture: &mut SampleCapture<'_>,
+    ) -> Result<ObservedSample<TemperatureCelsius>, SampleSourceError> {
+        self.shutdown.request();
         Ok(capture.capture(TemperatureCelsius::try_from(60.0).unwrap()))
     }
 

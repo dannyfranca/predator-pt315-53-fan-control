@@ -1,16 +1,18 @@
 use std::{env, error::Error, fmt, path::Path};
 
 use fan_control_core::{
-    QUALIFICATION_RECORD_PATH, RuntimeFault, StartupStatus, SystemOwnershipPlatform,
-    SystemdNotifier,
+    QUALIFICATION_RECORD_PATH, RuntimeFault, ShutdownController, StartupStatus,
+    SystemOwnershipPlatform, SystemdNotifier, TerminationSignalHandlers,
 };
 use fan_control_daemon::{
-    HWMON_ROOT, QualifiedStartupInputs, StartupError, discover_system_startup, qualified_startup,
+    HWMON_ROOT, ProductionControlLoopError, QualifiedStartupInputs, StartupError,
+    SystemSensorSourceDiscovery, discover_system_startup, qualified_startup,
+    run_production_control_loop,
 };
 
 fn main() {
+    fan_control_core::init_journald_diagnostics();
     if let Err(error) = run() {
-        fan_control_core::init_journald_diagnostics();
         fan_control_core::emit_fault(error.runtime_fault(), None);
         eprintln!(
             "fan-control-daemon: supervision failed [{}]: {error}",
@@ -21,20 +23,23 @@ fn main() {
 }
 
 fn run() -> Result<(), DaemonError> {
-    match env::args().skip(1).collect::<Vec<_>>().as_slice() {
-        [argument] if argument == "--status" => {
-            report_unqualified_status();
-            return Ok(());
-        }
-        [] => {}
-        _ => {
-            return Err(DaemonError::Startup(StartupError::Configuration(
-                "usage: pt31553-fand [--status]".into(),
-            )));
-        }
-    }
+    let acceptance_scenario: Option<String> =
+        match env::args().skip(1).collect::<Vec<_>>().as_slice() {
+            [argument] if argument == "--status" => {
+                report_unqualified_status();
+                return Ok(());
+            }
+            #[cfg(debug_assertions)]
+            [argument, scenario] if argument == "--acceptance-fixture" => Some(scenario.clone()),
+            [] => None,
+            _ => {
+                return Err(DaemonError::Startup(StartupError::Configuration(
+                    "usage: pt31553-fand [--status]".into(),
+                )));
+            }
+        };
 
-    let _notifier = SystemdNotifier::from_environment().map_err(DaemonError::Supervision)?;
+    let notifier = SystemdNotifier::from_environment().map_err(DaemonError::Supervision)?;
     // Do not let child identity probes inherit the manager's notify socket and emit unrelated
     // READY/WATCHDOG datagrams.
     unsafe {
@@ -43,10 +48,24 @@ fn run() -> Result<(), DaemonError> {
         env::remove_var("WATCHDOG_PID");
     }
 
+    let mut shutdown = ShutdownController::new();
+    let shutdown_request = shutdown.request_handle();
+    let _signal_handlers = TerminationSignalHandlers::install(shutdown_request.clone())
+        .map_err(DaemonError::Supervision)?;
+
+    #[cfg(debug_assertions)]
+    if let Some(scenario) = acceptance_scenario {
+        return fan_control_daemon::run_acceptance_fixture(&scenario, notifier, &mut shutdown)
+            .map_err(DaemonError::Supervision);
+    }
+
+    #[cfg(not(debug_assertions))]
+    let _ = acceptance_scenario;
+
     let mut discovery = discover_system_startup().map_err(DaemonError::Startup)?;
     let observations = [discovery.observation];
     let mut platform = SystemOwnershipPlatform::new();
-    let startup = qualified_startup(
+    let startup = match qualified_startup(
         &mut platform,
         &discovery.device,
         &mut discovery.sources,
@@ -58,15 +77,21 @@ fn run() -> Result<(), DaemonError> {
             compatibility_observations: &observations,
             hwmon_root: Path::new(HWMON_ROOT),
         },
-    )
-    .map_err(DaemonError::Startup)?;
+        &shutdown_request,
+    ) {
+        Ok(startup) => startup,
+        Err(StartupError::ShutdownRequested) => return Ok(()),
+        Err(error) => return Err(DaemonError::Startup(error)),
+    };
 
-    // Issue #129 will consume this capability into the supervised continuous loop. Until then,
-    // never leave Custom active or claim service readiness.
-    startup
-        .restore_and_release()
-        .map_err(DaemonError::Startup)?;
-    Err(DaemonError::ControlLoopUnavailable)
+    run_production_control_loop(
+        startup,
+        discovery.sources,
+        SystemSensorSourceDiscovery::default(),
+        &mut shutdown,
+        notifier,
+    )
+    .map_err(DaemonError::ControlLoop)
 }
 
 fn report_unqualified_status() {
@@ -80,21 +105,23 @@ fn report_unqualified_status() {
 enum DaemonError {
     Supervision(std::io::Error),
     Startup(StartupError),
-    ControlLoopUnavailable,
+    ControlLoop(ProductionControlLoopError<std::io::Error>),
 }
 
 impl DaemonError {
     const fn runtime_fault(&self) -> RuntimeFault {
         match self {
-            Self::Supervision(_) | Self::ControlLoopUnavailable => RuntimeFault::PlatformOperation,
+            Self::Supervision(_) => RuntimeFault::PlatformOperation,
             Self::Startup(error) => error.runtime_fault(),
+            Self::ControlLoop(error) => error.runtime_fault(),
         }
     }
 
     const fn diagnostic_id(&self) -> &'static str {
         match self {
-            Self::Supervision(_) | Self::ControlLoopUnavailable => "platform-operation-failed",
+            Self::Supervision(_) => "platform-operation-failed",
             Self::Startup(error) => error.diagnostic_id(),
+            Self::ControlLoop(error) => error.diagnostic_id(),
         }
     }
 }
@@ -104,9 +131,7 @@ impl fmt::Display for DaemonError {
         match self {
             Self::Supervision(error) => write!(formatter, "notification setup: {error}"),
             Self::Startup(error) => error.fmt(formatter),
-            Self::ControlLoopUnavailable => {
-                formatter.write_str("continuous production control is not available in this build")
-            }
+            Self::ControlLoop(error) => error.fmt(formatter),
         }
     }
 }
@@ -116,7 +141,7 @@ impl Error for DaemonError {
         match self {
             Self::Supervision(error) => Some(error),
             Self::Startup(error) => Some(error),
-            Self::ControlLoopUnavailable => None,
+            Self::ControlLoop(error) => Some(error),
         }
     }
 }

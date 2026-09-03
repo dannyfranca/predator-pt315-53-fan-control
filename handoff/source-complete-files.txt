@@ -110,9 +110,12 @@ crates/fan-control-core/tests/status_build_install_runbook.rs
 crates/fan-control-core/tests/supervised_endurance.rs
 crates/fan-control-core/tests/support/mod.rs
 crates/fan-control-daemon/Cargo.toml
+crates/fan-control-daemon/src/acceptance_fixture.rs
 crates/fan-control-daemon/src/lib.rs
 crates/fan-control-daemon/src/main.rs
 crates/fan-control-daemon/src/system.rs
+crates/fan-control-daemon/tests/production_binary_control_loop.rs
+crates/fan-control-daemon/tests/production_control_loop.rs
 crates/fan-control-daemon/tests/qualified_startup.rs
 crates/fan-control-daemon/tests/service_supervision.rs
 crates/fan-control-daemon/tests/sleep_guard.rs
