@@ -21,21 +21,24 @@ use std::{
 
 use fan_control_core::{
     BaselineCleanupAttestation, BaselineObservation, BaselineStartingConditions,
-    CapturedBaselineStartingConditions, CapturedMatchedWorkloadStartingConditions,
-    CompatibilityObservation, EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceTimestamp,
-    FileAccess, FirmwareAutoBaselineEnvironment, FirmwareAutoBaselinePlan,
-    MatchedWorkloadFanRestoration, MatchedWorkloadObservation,
-    MatchedWorkloadTachometerCalibrations, NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind,
-    NvmlGpuSample, PlatformError, PlatformErrorKind, PreflightArtifact, PreflightEnvironment,
-    PreflightInputs, PreflightRequirements, ProtectedFileRequirement, QUALIFICATION_RECORD_PATH,
+    CalibrationLevelObservation, CalibrationStep, CapturedBaselineStartingConditions,
+    CapturedMatchedWorkloadStartingConditions, CompatibilityObservation,
+    ConservativeFanCalibration, EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceTimestamp,
+    Fan, FanCalibrationEvidence, FanHoldObservation, FileAccess, FirmwareAutoBaselineEnvironment,
+    FirmwareAutoBaselinePlan, MatchedWorkloadEnvironment, MatchedWorkloadFanRestoration,
+    MatchedWorkloadObservation, MatchedWorkloadPlan, MatchedWorkloadTachometerCalibrations,
+    NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, PlatformError,
+    PlatformErrorKind, PreflightArtifact, PreflightEnvironment, PreflightInputs,
+    PreflightRequirements, ProtectedFileRequirement, QUALIFICATION_RECORD_PATH,
     QualificationEnvelopeIdentityV1, RestorationOutcome, RootOwnedQualificationRecordAccess,
-    RunOutcomeStatus, SUPERVISED_ENDURANCE_WORKLOAD_ID, StartupStatus,
+    RunOutcomeStatus, SUPERVISED_ENDURANCE_WORKLOAD_ID, ShutdownRequest, StartupStatus,
     SupervisedEnduranceEnvironment, SupervisedEndurancePlan,
     SupervisedEnduranceProcessStopConfirmation, SupervisedEnduranceSegment,
     SupervisedEnduranceSegmentConfirmation, SystemOwnershipPlatform, TelemetrySampleEvidence,
-    WorkloadEvidence, discover_acer_hwmon, parse_compatibility_v1, parse_evidence_v2,
-    path_has_extended_acl, run_firmware_auto_baseline, run_read_only_preflight,
-    run_supervised_endurance, validate_firmware_auto_baseline_resume,
+    TerminationSignalHandlers, WorkloadEvidence, discover_acer_hwmon, parse_compatibility_v1,
+    parse_evidence_v2, path_has_extended_acl, run_firmware_auto_baseline,
+    run_matched_custom_workload, run_read_only_preflight, run_supervised_endurance,
+    validate_firmware_auto_baseline_resume, validate_matched_workload_plan,
     validate_qualification_evidence_v2, validate_root_owned_output_destination,
     validate_root_owned_protected_file, write_qualification_record_after_endurance,
     write_root_owned_evidence_atomically,
@@ -79,6 +82,18 @@ struct StageArguments {
     harness: PathBuf,
 }
 
+const OBSERVER_APPROVAL: &str = "I-AM-PHYSICALLY-OBSERVING";
+
+struct SupervisedStageArguments {
+    stage: StageArguments,
+    observer_approval: String,
+}
+
+struct CalibrationArguments {
+    supervised: SupervisedStageArguments,
+    fan: Fan,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HarnessNvmlResponse {
@@ -117,6 +132,27 @@ struct HarnessQualificationReadiness {
     recovery_ready: bool,
     stock_boot_fallback_ready: bool,
     qualification_workload_absent: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarnessObserved<T> {
+    observer_present: bool,
+    observation: T,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarnessConfirmation {
+    observer_present: bool,
+    confirmed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarnessStartedWorkload {
+    observer_present: bool,
+    started_at: EvidenceTimestamp,
 }
 
 struct Arguments {
@@ -160,6 +196,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     if command == "firmware-auto-baselines" {
         return firmware_auto_baselines_command(remaining);
+    }
+    if command == "fan-calibration" {
+        return fan_calibration_command(remaining);
+    }
+    if command == "matched-workload" {
+        return matched_workload_command(remaining);
     }
     if command != "supervised-endurance" {
         return Err(format!("unknown qualification command: {command}").into());
@@ -379,6 +421,409 @@ fn firmware_auto_baselines_command(values: Vec<OsString>) -> Result<(), Box<dyn 
     Ok(())
 }
 
+fn fan_calibration_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> {
+    if values.iter().any(|value| value == "--help") {
+        println!(
+            "usage: pt31553-fan-qualify fan-calibration --fan cpu|gpu --manifest FILE \
+             --harness FILE --observer-approval {OBSERVER_APPROVAL}"
+        );
+        return Ok(());
+    }
+    require_root("fan calibration")?;
+    let arguments = parse_calibration_arguments(values)?;
+    require_observer_approval(&arguments.supervised.observer_approval)?;
+    validate_protected_executable(&arguments.supervised.stage.harness)?;
+    let manifest = read_stages_manifest(&arguments.supervised.stage.manifest)?;
+    let mut read_only_harness =
+        HarnessEnvironment::new(arguments.supervised.stage.harness.clone())?;
+    read_only_harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
+    let (_, baselines) = load_custom_prerequisites(&manifest, &read_only_harness)?;
+
+    let output = manifest
+        .evidence_root
+        .join(format!("{}-calibration.json", arguments.fan.name()));
+    if output.exists() {
+        let record = read_evidence(&output)?;
+        require_calibration_record(&manifest, &record, arguments.fan)?;
+        require_calibration_after_baselines(&record, &baselines)?;
+        if arguments.fan == Fan::Gpu {
+            let cpu = read_evidence(&manifest.evidence_root.join("cpu-calibration.json"))?;
+            require_calibration_record(&manifest, &cpu, Fan::Cpu)?;
+            require_calibration_after_baselines(&cpu, &baselines)?;
+            if record.started_at.wall_unix_millis < cpu.completed_at.wall_unix_millis {
+                return Err("GPU calibration predates CPU calibration completion; start a new protected evidence directory".into());
+            }
+        }
+        println!(
+            "RESUME {} calibration: complete matching evidence",
+            arguments.fan.name()
+        );
+        return Ok(());
+    }
+    if arguments.fan == Fan::Gpu {
+        let cpu = read_evidence(&manifest.evidence_root.join("cpu-calibration.json"))?;
+        require_calibration_record(&manifest, &cpu, Fan::Cpu)?;
+        require_calibration_after_baselines(&cpu, &baselines)?;
+    }
+    validate_root_owned_output_destination(&output)?;
+
+    let shutdown = ShutdownRequest::new();
+    let _signal_handlers = TerminationSignalHandlers::install(shutdown.clone())?;
+    let mut harness =
+        HarnessEnvironment::new_control(arguments.supervised.stage.harness, shutdown)?;
+    harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
+    let fan_name = arguments.fan.name();
+    let mut session = ConservativeFanCalibration::start(arguments.fan);
+    println!("START {fan_name} calibration: observer approved; other fan fixed at maximum");
+
+    let run_result = (|| -> Result<FanCalibrationEvidence, Box<dyn Error>> {
+        let started: HarnessConfirmation = harness.invoke(
+            "begin-fan-calibration",
+            json!({ "fan": fan_name }),
+            harness.deadline(5_000),
+        )?;
+        require_observer_confirmation(&started, "calibration start")?;
+        loop {
+            let step = session.next_step();
+            match step {
+                CalibrationStep::Complete => {
+                    return session
+                        .evidence()
+                        .cloned()
+                        .ok_or_else(|| "completed calibration has no evidence".into());
+                }
+                CalibrationStep::Failed => return Err("calibration protocol failed".into()),
+                CalibrationStep::HoldFloor { .. } => {
+                    let response: HarnessObserved<FanHoldObservation> = harness.invoke(
+                        "observe-calibration-hold",
+                        json!({ "fan": fan_name, "step": step }),
+                        calibration_step_deadline(&harness, step),
+                    )?;
+                    require_observer_present(response.observer_present, "calibration hold")?;
+                    session.record_hold(response.observation)?;
+                }
+                _ => {
+                    let response: HarnessObserved<CalibrationLevelObservation> = harness.invoke(
+                        "observe-calibration-level",
+                        json!({ "fan": fan_name, "step": step }),
+                        calibration_step_deadline(&harness, step),
+                    )?;
+                    require_observer_present(response.observer_present, "calibration step")?;
+                    session.record_level(response.observation)?;
+                }
+            }
+        }
+    })();
+
+    restore_calibration_fans(&harness)?;
+    let calibration = run_result?;
+
+    let record: EvidenceRecord = harness.invoke_cleanup(
+        "finalize-fan-calibration",
+        json!({
+            "fan": fan_name,
+            "calibration": calibration,
+            "qualification_envelope": manifest.qualification_envelope,
+        }),
+        harness.deadline(5_000),
+    )?;
+    require_calibration_record(&manifest, &record, arguments.fan)?;
+    if record.calibration.as_slice() != [calibration] {
+        return Err("calibration evidence does not exactly match the validated protocol".into());
+    }
+    write_root_owned_evidence_atomically(&output, &record)?;
+    println!(
+        "PASS {fan_name} calibration: Firmware Auto reconfirmed; evidence: {}",
+        output.display()
+    );
+    Ok(())
+}
+
+fn calibration_step_deadline(harness: &HarnessEnvironment, step: CalibrationStep) -> u64 {
+    let budget = match step {
+        CalibrationStep::HoldFloor {
+            required_duration_millis,
+            ..
+        } => required_duration_millis.saturating_add(10_000),
+        _ => 20_000,
+    };
+    harness.deadline(budget)
+}
+
+fn restore_calibration_fans(harness: &HarnessEnvironment) -> Result<(), Box<dyn Error>> {
+    let mut failures = Vec::new();
+    for fan in ["cpu", "gpu"] {
+        let result: Result<MatchedWorkloadFanRestoration, String> = harness.invoke_cleanup(
+            "restore-fan-calibration",
+            json!({ "fan": fan }),
+            harness.deadline(5_000),
+        );
+        match result {
+            Ok(result)
+                if result.auto_write_succeeded
+                    && result.enable_readback == Some(2)
+                    && result.outcome == RestorationOutcome::FirmwareAutoConfirmed => {}
+            Ok(_) => failures.push(format!("{fan} Firmware Auto unconfirmed")),
+            Err(error) => failures.push(format!("{fan} cleanup failed: {error}")),
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!(
+            "CRITICAL: {}; shut down immediately and independently verify Firmware Auto",
+            failures.join("; ")
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn require_observer_confirmation(
+    confirmation: &HarnessConfirmation,
+    stage: &str,
+) -> Result<(), Box<dyn Error>> {
+    require_observer_present(confirmation.observer_present, stage)?;
+    if !confirmation.confirmed {
+        return Err(format!("{stage} was not confirmed by the protected harness").into());
+    }
+    Ok(())
+}
+
+fn require_observer_present(present: bool, stage: &str) -> Result<(), Box<dyn Error>> {
+    if !present {
+        return Err(format!("observer withdrew approval during {stage}; run is no-go").into());
+    }
+    Ok(())
+}
+
+fn require_observer_approval(value: &str) -> Result<(), Box<dyn Error>> {
+    if value != OBSERVER_APPROVAL {
+        return Err(format!(
+            "physical observation approval required: --observer-approval {OBSERVER_APPROVAL}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+struct MatchedStageSpec {
+    baseline_index: usize,
+    run: usize,
+}
+
+fn matched_stage_specs() -> [MatchedStageSpec; 12] {
+    [
+        MatchedStageSpec {
+            baseline_index: 0,
+            run: 1,
+        },
+        MatchedStageSpec {
+            baseline_index: 1,
+            run: 1,
+        },
+        MatchedStageSpec {
+            baseline_index: 1,
+            run: 2,
+        },
+        MatchedStageSpec {
+            baseline_index: 2,
+            run: 1,
+        },
+        MatchedStageSpec {
+            baseline_index: 2,
+            run: 2,
+        },
+        MatchedStageSpec {
+            baseline_index: 3,
+            run: 1,
+        },
+        MatchedStageSpec {
+            baseline_index: 3,
+            run: 2,
+        },
+        MatchedStageSpec {
+            baseline_index: 4,
+            run: 1,
+        },
+        MatchedStageSpec {
+            baseline_index: 5,
+            run: 1,
+        },
+        MatchedStageSpec {
+            baseline_index: 5,
+            run: 2,
+        },
+        MatchedStageSpec {
+            baseline_index: 6,
+            run: 1,
+        },
+        MatchedStageSpec {
+            baseline_index: 6,
+            run: 2,
+        },
+    ]
+}
+
+fn matched_output_path(
+    manifest: &QualificationStagesManifest,
+    position: usize,
+    spec: &MatchedStageSpec,
+) -> PathBuf {
+    manifest.evidence_root.join(format!(
+        "matched-{:02}-{}-run-{}.json",
+        position + 1,
+        required_baselines()[spec.baseline_index].workload_id,
+        spec.run
+    ))
+}
+
+fn matched_workload_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> {
+    if values.iter().any(|value| value == "--help") {
+        println!(
+            "usage: pt31553-fan-qualify matched-workload --manifest FILE --harness FILE \
+             --observer-approval {OBSERVER_APPROVAL}\nRuns exactly the next required matched stage. Reapprove and rerun for each of 12 stages."
+        );
+        return Ok(());
+    }
+    require_root("matched workload")?;
+    let (arguments, extra) = parse_supervised_stage_arguments(values, &[])?;
+    debug_assert!(extra.is_empty());
+    require_observer_approval(&arguments.observer_approval)?;
+    validate_protected_executable(&arguments.stage.harness)?;
+    let manifest = read_stages_manifest(&arguments.stage.manifest)?;
+    let mut read_only_harness = HarnessEnvironment::new(arguments.stage.harness.clone())?;
+    read_only_harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
+    let (preflight, baselines) = load_custom_prerequisites(&manifest, &read_only_harness)?;
+    let cpu_calibration = read_evidence(&manifest.evidence_root.join("cpu-calibration.json"))?;
+    let gpu_calibration = read_evidence(&manifest.evidence_root.join("gpu-calibration.json"))?;
+    require_calibration_record(&manifest, &cpu_calibration, Fan::Cpu)?;
+    require_calibration_record(&manifest, &gpu_calibration, Fan::Gpu)?;
+    require_calibration_after_baselines(&cpu_calibration, &baselines)?;
+    require_calibration_after_baselines(&gpu_calibration, &baselines)?;
+    if gpu_calibration.started_at.wall_unix_millis < cpu_calibration.completed_at.wall_unix_millis {
+        return Err("GPU calibration predates CPU calibration completion; start a new protected evidence directory".into());
+    }
+
+    let specs = matched_stage_specs();
+    let mut completed = Vec::<EvidenceRecord>::new();
+    let mut previous_stage_completed_at = cpu_calibration
+        .completed_at
+        .wall_unix_millis
+        .max(gpu_calibration.completed_at.wall_unix_millis);
+    let mut next = None;
+    for (position, spec) in specs.iter().enumerate() {
+        let path = matched_output_path(&manifest, position, spec);
+        if !path.exists() {
+            if specs
+                .iter()
+                .enumerate()
+                .skip(position + 1)
+                .any(|(later_position, later)| {
+                    matched_output_path(&manifest, later_position, later).exists()
+                })
+            {
+                return Err("matched workload evidence has an ordering gap; start a new protected evidence directory".into());
+            }
+            next = Some((position, spec, path));
+            break;
+        }
+        let record = read_evidence(&path)?;
+        require_recent_stage(&record, &preflight, "matched workload")?;
+        if record.started_at.wall_unix_millis < previous_stage_completed_at {
+            return Err(format!(
+                "{} predates its prerequisite stage; start a new protected evidence directory",
+                path.display()
+            )
+            .into());
+        }
+        let mut same_baseline = completed
+            .iter()
+            .enumerate()
+            .filter(|(prior_position, _)| {
+                specs[*prior_position].baseline_index == spec.baseline_index
+            })
+            .map(|(_, record)| record)
+            .collect::<Vec<_>>();
+        same_baseline.push(&record);
+        let plan = MatchedWorkloadPlan {
+            baseline: &baselines[spec.baseline_index],
+            previous_passing_runs: &same_baseline,
+            tachometer_calibrations: MatchedWorkloadTachometerCalibrations {
+                cpu: &cpu_calibration,
+                gpu: &gpu_calibration,
+            },
+        };
+        validate_matched_workload_plan(&plan)?;
+        let should_require_another =
+            spec.run == 1 && required_baselines()[spec.baseline_index].workload != "idle";
+        if record.outcome.another_passing_run_required != should_require_another {
+            return Err(format!("{} has the wrong repeat-run decision", path.display()).into());
+        }
+        println!(
+            "RESUME matched stage {:02}: complete matching evidence",
+            position + 1
+        );
+        previous_stage_completed_at = record.completed_at.wall_unix_millis;
+        completed.push(record);
+    }
+    let Some((position, spec, output)) = next else {
+        println!("all 12 matched Firmware-Auto-vs-Custom stages passed; Firmware Auto confirmed");
+        return Ok(());
+    };
+    validate_root_owned_output_destination(&output)?;
+    let prior = completed
+        .iter()
+        .enumerate()
+        .filter(|(prior_position, _)| specs[*prior_position].baseline_index == spec.baseline_index)
+        .map(|(_, record)| record)
+        .collect::<Vec<_>>();
+    let plan = MatchedWorkloadPlan {
+        baseline: &baselines[spec.baseline_index],
+        previous_passing_runs: &prior,
+        tachometer_calibrations: MatchedWorkloadTachometerCalibrations {
+            cpu: &cpu_calibration,
+            gpu: &gpu_calibration,
+        },
+    };
+    validate_matched_workload_plan(&plan)?;
+
+    let shutdown = ShutdownRequest::new();
+    let _signal_handlers = TerminationSignalHandlers::install(shutdown.clone())?;
+    let mut harness = HarnessEnvironment::new_control(arguments.stage.harness, shutdown)?;
+    harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
+    let workload_id = required_baselines()[spec.baseline_index].workload_id;
+    println!(
+        "START matched stage {:02}/12: {} run {}; observer approved",
+        position + 1,
+        workload_id,
+        spec.run
+    );
+    let report = run_matched_custom_workload(&mut harness, &plan)?;
+    let accepted = report.accepted();
+    let record = report.into_record();
+    write_root_owned_evidence_atomically(&output, &record)?;
+    if !accepted {
+        return Err(format!(
+            "matched stage no-go: {}; final Firmware Auto confirmed={}; evidence: {}; recovery: {}",
+            record.outcome.reason,
+            record.outcome.final_firmware_auto_confirmed,
+            output.display(),
+            firmware_auto_recovery(record.outcome.final_firmware_auto_confirmed)
+        )
+        .into());
+    }
+    println!(
+        "PASS matched stage {:02}/12: Firmware Auto reconfirmed; evidence: {}",
+        position + 1,
+        output.display()
+    );
+    if position + 1 < specs.len() {
+        println!("next stage requires a new physical-observer approval and command invocation");
+    } else {
+        println!("all 12 matched Firmware-Auto-vs-Custom stages passed");
+    }
+    Ok(())
+}
+
 fn firmware_auto_recovery(confirmed: bool) -> &'static str {
     if confirmed {
         "keep both fans in Firmware Auto; stop and repair the failed prerequisite; start a new protected evidence directory"
@@ -425,6 +870,76 @@ fn parse_stage_arguments(values: Vec<OsString>) -> Result<StageArguments, Box<dy
     })
 }
 
+fn parse_calibration_arguments(
+    values: Vec<OsString>,
+) -> Result<CalibrationArguments, Box<dyn Error>> {
+    let (supervised, extra) = parse_supervised_stage_arguments(values, &["--fan"])?;
+    let fan = match extra.get("--fan").map(String::as_str) {
+        Some("cpu") => Fan::Cpu,
+        Some("gpu") => Fan::Gpu,
+        Some(value) => {
+            return Err(format!("invalid --fan value: {value}; expected cpu or gpu").into());
+        }
+        None => return Err("--fan is required".into()),
+    };
+    Ok(CalibrationArguments { supervised, fan })
+}
+
+fn parse_supervised_stage_arguments(
+    values: Vec<OsString>,
+    extra_flags: &[&str],
+) -> Result<
+    (
+        SupervisedStageArguments,
+        std::collections::HashMap<String, String>,
+    ),
+    Box<dyn Error>,
+> {
+    let values = values
+        .into_iter()
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| "stage arguments must be UTF-8")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut manifest = None;
+    let mut harness = None;
+    let mut observer_approval = None;
+    let mut extra = std::collections::HashMap::new();
+    let mut values = values.into_iter();
+    while let Some(flag) = values.next() {
+        let value = values
+            .next()
+            .ok_or_else(|| format!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--manifest" if manifest.is_none() => manifest = Some(value.into()),
+            "--harness" if harness.is_none() => harness = Some(value.into()),
+            "--observer-approval" if observer_approval.is_none() => observer_approval = Some(value),
+            "--manifest" | "--harness" | "--observer-approval" => {
+                return Err(format!("duplicate argument: {flag}").into());
+            }
+            _ if extra_flags.contains(&flag.as_str()) && !extra.contains_key(&flag) => {
+                extra.insert(flag, value);
+            }
+            _ if extra_flags.contains(&flag.as_str()) => {
+                return Err(format!("duplicate argument: {flag}").into());
+            }
+            _ => return Err(format!("unknown argument: {flag}").into()),
+        }
+    }
+    Ok((
+        SupervisedStageArguments {
+            stage: StageArguments {
+                manifest: manifest.ok_or("--manifest is required")?,
+                harness: harness.ok_or("--harness is required")?,
+            },
+            observer_approval: observer_approval.ok_or("--observer-approval is required")?,
+        },
+        extra,
+    ))
+}
+
 fn read_stages_manifest(path: &Path) -> Result<QualificationStagesManifest, Box<dyn Error>> {
     let mut manifest: QualificationStagesManifest =
         serde_json::from_str(&read_protected_file(path)?)?;
@@ -433,6 +948,112 @@ fn read_stages_manifest(path: &Path) -> Result<QualificationStagesManifest, Box<
     }
     canonicalize_manifest_gpu_uuid(&mut manifest.nvidia_gpu_uuid);
     Ok(manifest)
+}
+
+fn load_custom_prerequisites(
+    manifest: &QualificationStagesManifest,
+    harness: &HarnessEnvironment,
+) -> Result<(EvidenceRecord, Vec<EvidenceRecord>), Box<dyn Error>> {
+    let preflight_path = manifest.evidence_root.join("preflight.json");
+    let preflight_source = read_protected_file(&preflight_path)?;
+    let preflight = parse_evidence_v2(&preflight_source)?;
+    require_matching_recent_preflight(manifest, &preflight)?;
+    let (live_preflight, report) = execute_read_only_preflight(manifest, harness)?;
+    if live_preflight.outcome.status != RunOutcomeStatus::Passed {
+        return Err(format!(
+            "Custom-control start aborted; live preflight failed:\n{report}\nrecovery: {}",
+            firmware_auto_recovery(live_preflight.outcome.final_firmware_auto_confirmed)
+        )
+        .into());
+    }
+    require_same_fan_endpoints(&preflight, &live_preflight)?;
+    let expected_fan_endpoint_identities = preflight
+        .fan_endpoint_identities
+        .clone()
+        .ok_or("complete fan endpoint identities are missing from preflight evidence")?;
+    let preflight_binding_sha256 = evidence_source_sha256(&preflight_source);
+    let mut platform = SystemOwnershipPlatform::new();
+    let mut baselines = Vec::new();
+    for (index, spec) in required_baselines().iter().enumerate() {
+        let path =
+            manifest
+                .evidence_root
+                .join(format!("{:02}-{}.json", index + 1, spec.workload_id));
+        let record = read_evidence(&path)?;
+        require_recent_stage(&record, &preflight, spec.workload_id)?;
+        let workload = WorkloadEvidence {
+            workload_id: spec.workload_id.into(),
+            command: vec![
+                format!("/usr/lib/pt31553-fan-control/workloads/{}", spec.workload),
+                "--fixed".into(),
+            ],
+            version: "1.0.0".into(),
+            power_profile: spec.profile,
+            ambient_millicelsius: 0,
+            starting_cpu_millicelsius: 0,
+            starting_gpu_millicelsius: 0,
+        };
+        let plan = FirmwareAutoBaselinePlan {
+            hwmon_root: &manifest.hwmon_root,
+            qualification_envelope: manifest.qualification_envelope.clone(),
+            preflight_binding_sha256: preflight_binding_sha256.clone(),
+            nvidia_gpu_uuid: manifest.nvidia_gpu_uuid.clone(),
+            expected_fan_endpoint_identities: expected_fan_endpoint_identities.clone(),
+            workload,
+            samples_required: spec.samples,
+        };
+        validate_firmware_auto_baseline_resume(&mut platform, &record, &plan).map_err(|error| {
+            format!(
+                "required Firmware Auto baseline {} is not reusable: {error}; Custom control remains forbidden",
+                path.display()
+            )
+        })?;
+        baselines.push(record);
+    }
+    Ok((preflight, baselines))
+}
+
+fn require_calibration_record(
+    manifest: &QualificationStagesManifest,
+    record: &EvidenceRecord,
+    fan: Fan,
+) -> Result<(), Box<dyn Error>> {
+    record.validate()?;
+    let evidence_fan = match fan {
+        Fan::Cpu => EvidenceFan::Cpu,
+        Fan::Gpu => EvidenceFan::Gpu,
+    };
+    if record.stage != "fan-calibration"
+        || record.qualification_envelope != manifest.qualification_envelope
+        || record.outcome.status != RunOutcomeStatus::Passed
+        || record.outcome.another_passing_run_required
+        || !record.outcome.final_firmware_auto_confirmed
+        || record.calibration.len() != 1
+        || record.calibration[0].fan != evidence_fan
+    {
+        return Err(format!(
+            "{} calibration evidence is incomplete or belongs to another identity",
+            fan.name()
+        )
+        .into());
+    }
+    require_fresh_wall_time(record.completed_at.wall_unix_millis, "calibration evidence")?;
+    reject_future_evidence_timestamps(record, "calibration evidence")
+}
+
+fn require_calibration_after_baselines(
+    record: &EvidenceRecord,
+    baselines: &[EvidenceRecord],
+) -> Result<(), Box<dyn Error>> {
+    let latest = baselines
+        .iter()
+        .map(|baseline| baseline.completed_at.wall_unix_millis)
+        .max()
+        .ok_or("all seven Firmware Auto baselines are required")?;
+    if record.started_at.wall_unix_millis < latest {
+        return Err("calibration predates a required Firmware Auto baseline; start a new protected evidence directory".into());
+    }
+    Ok(())
 }
 
 fn canonicalize_manifest_gpu_uuid(uuid: &mut String) {
@@ -886,6 +1507,14 @@ struct HarnessEnvironment {
     harness: PathBuf,
     cgroup: Option<HarnessCgroup>,
     nvidia_gpu_uuid: Option<String>,
+    privilege: HarnessPrivilege,
+    shutdown: Option<ShutdownRequest>,
+}
+
+#[derive(Clone, Copy)]
+enum HarnessPrivilege {
+    ReadOnlySandbox,
+    RootControl,
 }
 
 impl HarnessEnvironment {
@@ -897,7 +1526,16 @@ impl HarnessEnvironment {
             harness,
             cgroup,
             nvidia_gpu_uuid: None,
+            privilege: HarnessPrivilege::ReadOnlySandbox,
+            shutdown: None,
         })
+    }
+
+    fn new_control(harness: PathBuf, shutdown: ShutdownRequest) -> std::io::Result<Self> {
+        let mut environment = Self::new(harness)?;
+        environment.privilege = HarnessPrivilege::RootControl;
+        environment.shutdown = Some(shutdown);
+        Ok(environment)
     }
 
     fn select_nvidia_gpu(&mut self, uuid: String) {
@@ -923,10 +1561,16 @@ impl HarnessEnvironment {
     }
 
     fn wait_until_deadline(&self, target: u64, deadline: u64) -> Result<(), String> {
-        let now = self.now_millis();
-        let delay = wait_delay_millis(now, target, deadline)?;
-        if delay > 0 {
-            thread::sleep(Duration::from_millis(delay));
+        loop {
+            if self.shutdown_requested() {
+                return Err("termination signal received; restoring Firmware Auto".into());
+            }
+            let now = self.now_millis();
+            let delay = wait_delay_millis(now, target, deadline)?;
+            if delay == 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(delay.min(50)));
         }
         (self.now_millis() <= deadline)
             .then_some(())
@@ -939,10 +1583,38 @@ impl HarnessEnvironment {
         request: Value,
         deadline: u64,
     ) -> Result<T, String> {
+        self.invoke_inner(operation, request, deadline, true)
+    }
+
+    fn invoke_cleanup<T: DeserializeOwned>(
+        &self,
+        operation: &str,
+        request: Value,
+        deadline: u64,
+    ) -> Result<T, String> {
+        self.invoke_inner(operation, request, deadline, false)
+    }
+
+    fn shutdown_requested(&self) -> bool {
+        self.shutdown
+            .as_ref()
+            .is_some_and(ShutdownRequest::is_requested)
+    }
+
+    fn invoke_inner<T: DeserializeOwned>(
+        &self,
+        operation: &str,
+        request: Value,
+        deadline: u64,
+        interruptible: bool,
+    ) -> Result<T, String> {
         #[cfg(test)]
         let _test_harness_guard = TEST_HARNESS_INVOKE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if interruptible && self.shutdown_requested() {
+            return Err(format!("{operation} cancelled by termination signal"));
+        }
         if self.now_millis() >= deadline {
             return Err(format!("{operation} deadline expired before launch"));
         }
@@ -954,11 +1626,12 @@ impl HarnessEnvironment {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .process_group(0);
-        sandbox_harness_if_privileged(
+        configure_root_harness(
             &mut command,
             self.cgroup
                 .as_ref()
                 .map(|cgroup| cgroup.processes_path.clone()),
+            self.privilege,
         );
         let mut child = command
             .spawn()
@@ -1032,6 +1705,12 @@ impl HarnessEnvironment {
             }
             if status.is_some() && output.is_some() {
                 break;
+            }
+            if interruptible && self.shutdown_requested() {
+                return Err(self.terminate_process_tree(
+                    &mut child,
+                    format!("{operation} cancelled by termination signal"),
+                ));
             }
             if self.now_millis() >= deadline {
                 return Err(self.terminate_process_tree(
@@ -1143,7 +1822,11 @@ impl Drop for HarnessCgroup {
     }
 }
 
-fn sandbox_harness_if_privileged(command: &mut Command, cgroup_procs: Option<CString>) {
+fn configure_root_harness(
+    command: &mut Command,
+    cgroup_procs: Option<CString>,
+    privilege: HarnessPrivilege,
+) {
     if unsafe { libc::geteuid() } != 0 {
         return;
     }
@@ -1167,11 +1850,14 @@ fn sandbox_harness_if_privileged(command: &mut Command, cgroup_procs: Option<CSt
             if let Some(error) = move_error.or(close_error) {
                 return Err(error);
             }
-            if libc::setgroups(0, std::ptr::null()) != 0
-                || libc::setgid(65_534) != 0
-                || libc::setuid(65_534) != 0
-                || libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+            if matches!(privilege, HarnessPrivilege::ReadOnlySandbox)
+                && (libc::setgroups(0, std::ptr::null()) != 0
+                    || libc::setgid(65_534) != 0
+                    || libc::setuid(65_534) != 0)
             {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -1260,6 +1946,115 @@ impl NvmlAccess for HarnessNvml<'_> {
                 "malformed NVIDIA response: expected either complete telemetry or error_kind plus error",
             )),
         }
+    }
+}
+
+impl MatchedWorkloadEnvironment for HarnessEnvironment {
+    fn timestamp(&mut self) -> EvidenceTimestamp {
+        self.timestamp_now()
+    }
+
+    fn capture_starting_conditions(
+        &mut self,
+        deadline_monotonic_millis: u64,
+    ) -> Result<CapturedMatchedWorkloadStartingConditions, String> {
+        let response: HarnessObserved<CapturedMatchedWorkloadStartingConditions> = self.invoke(
+            "capture-matched-starting-conditions",
+            json!({}),
+            deadline_monotonic_millis,
+        )?;
+        if !response.observer_present {
+            return Err("observer withdrew approval".into());
+        }
+        Ok(response.observation)
+    }
+
+    fn enter_custom_control(&mut self, deadline_monotonic_millis: u64) -> Result<(), String> {
+        let response: HarnessConfirmation = self.invoke(
+            "enter-matched-custom-control",
+            json!({}),
+            deadline_monotonic_millis,
+        )?;
+        if !response.observer_present {
+            return Err("observer withdrew approval".into());
+        }
+        response
+            .confirmed
+            .then_some(())
+            .ok_or_else(|| "Custom control was not confirmed".into())
+    }
+
+    fn start_workload(
+        &mut self,
+        workload: &WorkloadEvidence,
+        deadline_monotonic_millis: u64,
+    ) -> Result<EvidenceTimestamp, String> {
+        let response: HarnessStartedWorkload = self.invoke(
+            "start-matched-workload",
+            json!({ "workload": workload }),
+            deadline_monotonic_millis,
+        )?;
+        if !response.observer_present {
+            return Err("observer withdrew approval".into());
+        }
+        Ok(response.started_at)
+    }
+
+    fn wait_until(
+        &mut self,
+        target_monotonic_millis: u64,
+        deadline_monotonic_millis: u64,
+    ) -> Result<(), String> {
+        self.wait_until_deadline(target_monotonic_millis, deadline_monotonic_millis)
+    }
+
+    fn capture_observation(
+        &mut self,
+        deadline_monotonic_millis: u64,
+    ) -> Result<MatchedWorkloadObservation, String> {
+        let response: HarnessObserved<MatchedWorkloadObservation> = self.invoke(
+            "capture-matched-observation",
+            json!({ "nvidia_gpu_uuid": self.selected_nvidia_gpu()? }),
+            deadline_monotonic_millis,
+        )?;
+        if !response.observer_present {
+            return Err("observer withdrew approval".into());
+        }
+        Ok(response.observation)
+    }
+
+    fn stop_workload(&mut self, deadline_monotonic_millis: u64) -> Result<(), String> {
+        let response: HarnessConfirmation = self.invoke_cleanup(
+            "stop-matched-workload",
+            json!({}),
+            deadline_monotonic_millis,
+        )?;
+        response
+            .confirmed
+            .then_some(())
+            .ok_or_else(|| "workload termination was not confirmed".into())
+    }
+
+    fn restore_fan(
+        &mut self,
+        fan: EvidenceFan,
+        deadline_monotonic_millis: u64,
+    ) -> MatchedWorkloadFanRestoration {
+        let fan = match fan {
+            EvidenceFan::Cpu => "cpu",
+            EvidenceFan::Gpu => "gpu",
+        };
+        self.invoke_cleanup(
+            "restore-matched-fan",
+            json!({ "fan": fan }),
+            deadline_monotonic_millis,
+        )
+        .unwrap_or_else(|_| MatchedWorkloadFanRestoration {
+            auto_write_succeeded: false,
+            enable_readback: None,
+            endpoint_identity: format!("{fan}-restoration-unavailable"),
+            outcome: RestorationOutcome::ContainmentFailed,
+        })
     }
 }
 
@@ -1690,7 +2485,10 @@ mod tests {
     #[test]
     fn unix_socket_validation_rejects_default_acl_ancestors() {
         let owner = unsafe { libc::geteuid() };
-        let root = Path::new("target").join(format!(
+        let writable_root = env::var_os("PT31553_TEST_WRITABLE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("target"));
+        let root = writable_root.join(format!(
             "fc-socket-acl-{}-{}",
             process::id(),
             NEXT_HARNESS_ID.fetch_add(1, Ordering::Relaxed)
@@ -1804,6 +2602,124 @@ printf '{"deadline":%s}' "$2""#,
                 ("gpu-battery-v1", EvidenceProfile::Battery, 300),
             ]
         );
+    }
+
+    #[test]
+    fn matched_matrix_is_fixed_complete_and_ordered() {
+        assert_eq!(
+            matched_stage_specs()
+                .iter()
+                .map(|spec| (spec.baseline_index, spec.run))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 1),
+                (1, 1),
+                (1, 2),
+                (2, 1),
+                (2, 2),
+                (3, 1),
+                (3, 2),
+                (4, 1),
+                (5, 1),
+                (5, 2),
+                (6, 1),
+                (6, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn physical_observer_approval_is_exact() {
+        assert!(require_observer_approval(OBSERVER_APPROVAL).is_ok());
+        for rejected in ["", "yes", "I-AM-PHYSICALLY-OBSERVING "] {
+            assert!(require_observer_approval(rejected).is_err());
+        }
+    }
+
+    #[test]
+    fn calibration_arguments_require_one_fan_and_one_approval() {
+        let arguments = parse_calibration_arguments(
+            [
+                "--fan",
+                "cpu",
+                "--manifest",
+                "/manifest",
+                "--harness",
+                "/harness",
+                "--observer-approval",
+                OBSERVER_APPROVAL,
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        )
+        .unwrap();
+        assert_eq!(arguments.fan, Fan::Cpu);
+        assert!(
+            parse_calibration_arguments(
+                [
+                    "--fan",
+                    "cpu",
+                    "--fan",
+                    "gpu",
+                    "--manifest",
+                    "/manifest",
+                    "--harness",
+                    "/harness",
+                    "--observer-approval",
+                    OBSERVER_APPROVAL,
+                ]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn termination_cancels_stage_work_but_not_firmware_auto_cleanup() {
+        let script = TestHarness::new("printf '{\"confirmed\":true}'");
+        let shutdown = ShutdownRequest::new();
+        shutdown.request();
+        let harness = HarnessEnvironment::new_control(script.path.clone(), shutdown).unwrap();
+        assert!(
+            harness
+                .invoke::<Value>("ordinary", json!({}), harness.deadline(5_000))
+                .unwrap_err()
+                .contains("termination signal")
+        );
+        let response: Value = harness
+            .invoke_cleanup("cleanup", json!({}), harness.deadline(5_000))
+            .unwrap();
+        assert_eq!(response, json!({"confirmed": true}));
+    }
+
+    #[test]
+    fn calibration_cleanup_attempts_both_fans_after_the_first_failure() {
+        let marker = env::temp_dir().join(format!(
+            "fan-control-qualify-cleanup-{}-{}",
+            process::id(),
+            NEXT_HARNESS_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let script = TestHarness::new(&format!(
+            r#"request=$(cat)
+case "$request" in
+  *'"fan":"cpu"'*) printf 'cpu\n' >> {marker}; exit 9 ;;
+  *'"fan":"gpu"'*)
+    printf 'gpu\n' >> {marker}
+    printf '%s' '{{"auto_write_succeeded":true,"enable_readback":2,"endpoint_identity":"gpu-enable","outcome":"firmware-auto-confirmed"}}'
+    ;;
+esac"#,
+            marker = marker.display()
+        ));
+        let harness =
+            HarnessEnvironment::new_control(script.path.clone(), ShutdownRequest::new()).unwrap();
+
+        let error = restore_calibration_fans(&harness).unwrap_err();
+        assert!(error.to_string().contains("cpu cleanup failed"), "{error}");
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "cpu\ngpu\n");
+        let _ = fs::remove_file(marker);
     }
 
     #[test]
