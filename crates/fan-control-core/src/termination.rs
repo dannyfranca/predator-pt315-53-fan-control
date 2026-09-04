@@ -3,7 +3,7 @@ use std::{
     fmt, io,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, Ordering},
     },
 };
 
@@ -21,8 +21,12 @@ use crate::{
 /// A cloneable, async-signal-safe latch that permanently cancels normal control.
 #[derive(Debug, Clone)]
 pub struct ShutdownRequest {
-    requested: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
 }
+
+const SHUTDOWN_OPEN: u8 = 0;
+const SHUTDOWN_REQUESTED: u8 = 1;
+const PUBLICATION_COMMITTED: u8 = 2;
 
 impl Default for ShutdownRequest {
     fn default() -> Self {
@@ -33,16 +37,32 @@ impl Default for ShutdownRequest {
 impl ShutdownRequest {
     pub fn new() -> Self {
         Self {
-            requested: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(AtomicU8::new(SHUTDOWN_OPEN)),
         }
     }
 
     pub fn request(&self) {
-        self.requested.store(true, Ordering::Release);
+        self.state.fetch_or(SHUTDOWN_REQUESTED, Ordering::AcqRel);
     }
 
     pub fn is_requested(&self) -> bool {
-        self.requested.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) & SHUTDOWN_REQUESTED != 0
+    }
+
+    /// Establishes the one-way authorization publication boundary.
+    ///
+    /// This and [`Self::request`] race on one atomic state. A request observed first prevents the
+    /// commit. Once committed, a later signal remains permanently observable without retroactively
+    /// withdrawing the authorization.
+    pub fn try_commit_publication(&self) -> bool {
+        self.state
+            .compare_exchange(
+                SHUTDOWN_OPEN,
+                PUBLICATION_COMMITTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 }
 
@@ -175,11 +195,40 @@ pub struct TerminationSignalHandlers {
 
 impl TerminationSignalHandlers {
     pub fn install(request: ShutdownRequest) -> io::Result<Self> {
-        let term = signal_hook::flag::register(SIGTERM, Arc::clone(&request.requested))?;
-        let interrupt = signal_hook::flag::register(SIGINT, Arc::clone(&request.requested))?;
-        let watchdog = signal_hook::flag::register(SIGABRT, request.requested)?;
+        let term_request = request.clone();
+        let interrupt_request = request.clone();
+        // SAFETY: each handler performs only one lock-free atomic fetch-or through
+        // `ShutdownRequest::request`; it neither allocates nor invokes non-signal-safe I/O.
+        let term =
+            unsafe { signal_hook::low_level::register(SIGTERM, move || term_request.request())? };
+        // SAFETY: same atomic-only handler contract as above.
+        let interrupt = unsafe {
+            signal_hook::low_level::register(SIGINT, move || interrupt_request.request())?
+        };
+        // SAFETY: same atomic-only handler contract as above.
+        let watchdog =
+            unsafe { signal_hook::low_level::register(SIGABRT, move || request.request())? };
         Ok(Self {
             _registrations: [term, interrupt, watchdog],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShutdownRequest;
+
+    #[test]
+    fn shutdown_and_publication_have_one_atomic_winner() {
+        let shutdown = ShutdownRequest::new();
+        shutdown.request();
+        assert!(shutdown.is_requested());
+        assert!(!shutdown.try_commit_publication());
+
+        let publication = ShutdownRequest::new();
+        assert!(publication.try_commit_publication());
+        publication.request();
+        assert!(publication.is_requested());
+        assert!(!publication.try_commit_publication());
     }
 }

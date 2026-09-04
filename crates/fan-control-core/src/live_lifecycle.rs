@@ -4,13 +4,15 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::{
     EVIDENCE_SCHEMA_VERSION_V2, EvidenceExternalPower, EvidenceFan, EvidenceProfile,
-    EvidenceRecord, EvidenceTimestamp, EvidenceValidationError, FanReadbackEvidence,
-    FanReadbackField, FaultEvidence, ObservationOutcome, QualificationEnvelopeIdentityV1,
-    RunOutcomeEvidence, RunOutcomeStatus, StateTransitionEvidence, evidence::validate_identity,
+    EvidenceRecord, EvidenceTimestamp, EvidenceValidationError, FanEndpointIdentitiesEvidence,
+    FanReadbackEvidence, FanReadbackField, FaultEvidence, ObservationOutcome,
+    QualificationEnvelopeIdentityV1, RunOutcomeEvidence, RunOutcomeStatus, StateTransitionEvidence,
+    evidence::validate_identity,
 };
 
 pub const LIVE_RESTART_DELAY_MILLIS: u64 = 2_000;
 pub const LIVE_START_LIMIT_BURST: u32 = 2;
+pub const LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS: u64 = 5_000;
 const UNVERIFIED_PRE_REBOOT_BOOT_ID: &str = "unverified-pre-reboot";
 const UNVERIFIED_POST_REBOOT_BOOT_ID: &str = "unverified-post-reboot";
 
@@ -241,10 +243,13 @@ pub enum LiveLifecycleCaseObservation {
         auto_before_arm: Option<LiveLifecycleFanAutoPair>,
         armed_at: Option<EvidenceTimestamp>,
         controller_process_identity: Option<String>,
+        restored_at: Option<EvidenceTimestamp>,
+        auto_after_arm: Option<LiveLifecycleFanAutoPair>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LiveLifecycleRebootContinuation {
     pub reboot_completed: bool,
     pub boot_id_before: String,
@@ -252,10 +257,30 @@ pub struct LiveLifecycleRebootContinuation {
     pub post_boot_at: EvidenceTimestamp,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LiveLifecycleRebootArmObservation {
     pub armed_at: EvidenceTimestamp,
     pub controller_process_identity: String,
+}
+
+/// Continuous physical-observer coverage for one live Custom-control action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveLifecycleObserverAttestation {
+    pub action: String,
+    pub started_at: EvidenceTimestamp,
+    pub completed_at: EvidenceTimestamp,
+    /// Fresh checks made by the protected harness while the action remained live.
+    pub checks: Vec<EvidenceTimestamp>,
+}
+
+/// A live operation plus the observer coverage collected during it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveLifecycleObserved<T> {
+    pub observation: T,
+    pub observer_attestations: Vec<LiveLifecycleObserverAttestation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,19 +302,37 @@ pub struct LiveLifecycleProfileObservation {
 pub trait LiveLifecycleEnvironment {
     fn timestamp(&mut self) -> EvidenceTimestamp;
 
+    /// Returns the coordinator-observed identity of the currently running boot.
+    fn current_boot_id(&mut self) -> Result<String, String>;
+
     /// Performs exactly the guided, non-destructive non-reboot case requested by the
     /// runner and returns a newly collected observation.
     ///
     /// A persisted outer coordinator must resume the reboot case after boot and provide
     /// distinct pre-boot and post-boot IDs. This core stage never initiates a reboot.
-    fn run_case(&mut self, case: LiveLifecycleCase)
-    -> Result<LiveLifecycleCaseObservation, String>;
+    fn run_case(
+        &mut self,
+        case: LiveLifecycleCase,
+    ) -> Result<LiveLifecycleObserved<LiveLifecycleCaseObservation>, String>;
+
+    /// Signal-safe containment after every non-reboot case, including harness failure.
+    fn restore_after_case(
+        &mut self,
+        case: LiveLifecycleCase,
+    ) -> Result<LiveLifecycleObserved<EvidenceTimestamp>, String>;
 
     /// Resumes the persisted reboot case without arming Custom control.
-    fn resume_after_reboot(&mut self) -> Result<LiveLifecycleRebootContinuation, String>;
+    fn resume_after_reboot(
+        &mut self,
+    ) -> Result<LiveLifecycleObserved<LiveLifecycleRebootContinuation>, String>;
 
     /// Arms the post-boot controller only after the runner independently confirms Auto.
-    fn arm_after_reboot(&mut self) -> Result<LiveLifecycleRebootArmObservation, String>;
+    fn arm_after_reboot(
+        &mut self,
+    ) -> Result<LiveLifecycleObserved<LiveLifecycleRebootArmObservation>, String>;
+
+    /// Stops the post-boot controller and restores firmware ownership before the terminal gate.
+    fn restore_after_reboot(&mut self) -> Result<LiveLifecycleObserved<EvidenceTimestamp>, String>;
 
     /// Reads one fan's enable endpoint. The runner always calls this once for each fan.
     fn confirm_firmware_auto(
@@ -301,6 +344,7 @@ pub trait LiveLifecycleEnvironment {
 #[derive(Debug)]
 pub enum LiveLifecyclePlanError {
     InvalidEnvelope(EvidenceValidationError),
+    InvalidCheckpoint(String),
     InvalidGeneratedEvidence(EvidenceValidationError),
 }
 
@@ -309,6 +353,9 @@ impl fmt::Display for LiveLifecyclePlanError {
         match self {
             Self::InvalidEnvelope(error) => {
                 write!(formatter, "invalid qualification envelope: {error}")
+            }
+            Self::InvalidCheckpoint(error) => {
+                write!(formatter, "invalid lifecycle checkpoint: {error}")
             }
             Self::InvalidGeneratedEvidence(error) => {
                 write!(formatter, "invalid generated lifecycle evidence: {error}")
@@ -321,6 +368,7 @@ impl Error for LiveLifecyclePlanError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidEnvelope(error) | Self::InvalidGeneratedEvidence(error) => Some(error),
+            Self::InvalidCheckpoint(_) => None,
         }
     }
 }
@@ -333,6 +381,7 @@ pub struct LiveLifecycleCaseResult {
     started_at: EvidenceTimestamp,
     completed_at: EvidenceTimestamp,
     observation: Option<LiveLifecycleCaseObservation>,
+    observer_attestations: Vec<LiveLifecycleObserverAttestation>,
     passed: bool,
     detail: String,
 }
@@ -344,6 +393,10 @@ impl LiveLifecycleCaseResult {
 
     pub const fn observation(&self) -> Option<&LiveLifecycleCaseObservation> {
         self.observation.as_ref()
+    }
+
+    pub fn observer_attestations(&self) -> &[LiveLifecycleObserverAttestation] {
+        &self.observer_attestations
     }
 
     pub const fn started_at(&self) -> EvidenceTimestamp {
@@ -367,6 +420,179 @@ impl LiveLifecycleCaseResult {
 #[serde(deny_unknown_fields)]
 pub struct LiveLifecycleReport {
     record: EvidenceRecord,
+}
+
+/// Protected state persisted by the production coordinator immediately before reboot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveLifecycleCheckpoint {
+    envelope: QualificationEnvelopeIdentityV1,
+    prerequisite_binding_sha256: String,
+    started_at: EvidenceTimestamp,
+    last_event_at: EvidenceTimestamp,
+    readbacks: Vec<FanReadbackEvidence>,
+    transitions: Vec<StateTransitionEvidence>,
+    faults: Vec<FaultEvidence>,
+    cases: Vec<LiveLifecycleCaseResult>,
+    expected_identities: Option<(String, String)>,
+    final_auto_confirmed: bool,
+    pre_reboot_boot_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveLifecycleCheckpointWire {
+    envelope: QualificationEnvelopeIdentityV1,
+    prerequisite_binding_sha256: String,
+    started_at: EvidenceTimestamp,
+    last_event_at: EvidenceTimestamp,
+    readbacks: Vec<FanReadbackEvidence>,
+    transitions: Vec<StateTransitionEvidence>,
+    faults: Vec<FaultEvidence>,
+    cases: Vec<LiveLifecycleCaseResult>,
+    expected_identities: Option<(String, String)>,
+    final_auto_confirmed: bool,
+    pre_reboot_boot_id: String,
+}
+
+impl<'de> Deserialize<'de> for LiveLifecycleCheckpoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = LiveLifecycleCheckpointWire::deserialize(deserializer)?;
+        let checkpoint = Self {
+            envelope: wire.envelope,
+            prerequisite_binding_sha256: wire.prerequisite_binding_sha256,
+            started_at: wire.started_at,
+            last_event_at: wire.last_event_at,
+            readbacks: wire.readbacks,
+            transitions: wire.transitions,
+            faults: wire.faults,
+            cases: wire.cases,
+            expected_identities: wire.expected_identities,
+            final_auto_confirmed: wire.final_auto_confirmed,
+            pre_reboot_boot_id: wire.pre_reboot_boot_id,
+        };
+        checkpoint.validate().map_err(de::Error::custom)?;
+        Ok(checkpoint)
+    }
+}
+
+impl LiveLifecycleCheckpoint {
+    pub const fn envelope(&self) -> &QualificationEnvelopeIdentityV1 {
+        &self.envelope
+    }
+
+    pub fn prerequisite_binding_sha256(&self) -> &str {
+        &self.prerequisite_binding_sha256
+    }
+
+    pub fn matches_completed_record_prefix(&self, record: &EvidenceRecord) -> bool {
+        self.validate().is_ok()
+            && self.envelope == record.qualification_envelope
+            && record.prerequisite_binding_sha256.as_deref()
+                == Some(self.prerequisite_binding_sha256.as_str())
+            && self.started_at == record.started_at
+            && record.readbacks.starts_with(&self.readbacks)
+            && record.state_transitions.starts_with(&self.transitions)
+            && record
+                .live_lifecycle_cases
+                .as_ref()
+                .is_some_and(|cases| cases.starts_with(&self.cases))
+    }
+
+    pub const fn started_at(&self) -> EvidenceTimestamp {
+        self.started_at
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        validate_identity(&self.envelope).map_err(|error| error.to_string())?;
+        if !crate::evidence::is_lower_hex(&self.prerequisite_binding_sha256, 64) {
+            return Err("valid prerequisite binding required".into());
+        }
+        let expected = &LiveLifecycleCase::ALL[..LiveLifecycleCase::ALL.len() - 1];
+        if self.cases.len() != expected.len()
+            || self
+                .cases
+                .iter()
+                .zip(expected)
+                .any(|(result, expected)| result.case != *expected || !result.passed)
+        {
+            return Err("exact passing pre-reboot lifecycle prefix required".into());
+        }
+        if !self.faults.is_empty()
+            || !self.final_auto_confirmed
+            || !crate::evidence::is_identifier(&self.pre_reboot_boot_id)
+            || self.expected_identities.as_ref().is_none_or(|(cpu, gpu)| {
+                !identity_has_nonblank_character(cpu)
+                    || !identity_has_nonblank_character(gpu)
+                    || cpu == gpu
+            })
+        {
+            return Err("fault-free Firmware Auto with distinct fan identities required".into());
+        }
+        let (expected_cpu, expected_gpu) =
+            self.expected_identities.as_ref().expect("validated above");
+        let final_gate_matches = self
+            .readbacks
+            .get(self.readbacks.len().saturating_sub(2)..)
+            .is_some_and(|pair| match pair {
+                [cpu, gpu] => {
+                    cpu.fan == EvidenceFan::Cpu
+                        && gpu.fan == EvidenceFan::Gpu
+                        && cpu.endpoint_identity == *expected_cpu
+                        && gpu.endpoint_identity == *expected_gpu
+                }
+                _ => false,
+            });
+        if !final_gate_matches
+            || self.readbacks.iter().any(|readback| {
+                readback.boot_id.as_deref() != Some(self.pre_reboot_boot_id.as_str())
+            })
+            || self.transitions.iter().any(|transition| {
+                transition.boot_id.as_deref() != Some(self.pre_reboot_boot_id.as_str())
+            })
+        {
+            return Err("checkpoint identities are not bound to its pre-reboot evidence".into());
+        }
+        if self
+            .transitions
+            .last()
+            .map(|transition| transition.timestamp)
+            != Some(self.last_event_at)
+            || self.started_at.monotonic_millis > self.last_event_at.monotonic_millis
+            || self.cases.windows(2).any(|pair| {
+                pair[0].completed_at.monotonic_millis >= pair[1].started_at.monotonic_millis
+            })
+        {
+            return Err("lifecycle timestamps are not ordered".into());
+        }
+        let mut partial = EvidenceRecord::complete_v2(
+            self.envelope.clone(),
+            "live-lifecycle",
+            self.started_at,
+            self.last_event_at,
+            RunOutcomeEvidence {
+                status: RunOutcomeStatus::Failed,
+                reason: "reboot checkpoint is not authorization".into(),
+                another_passing_run_required: true,
+                final_firmware_auto_confirmed: true,
+            },
+        );
+        partial.readbacks = self.readbacks.clone();
+        partial.state_transitions = self.transitions.clone();
+        partial.faults = self.faults.clone();
+        partial.live_lifecycle_cases = Some(self.cases.clone());
+        partial.prerequisite_binding_sha256 = Some(self.prerequisite_binding_sha256.clone());
+        partial.validate().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
+
+pub enum LiveLifecycleProgress {
+    AwaitingReboot(Box<LiveLifecycleCheckpoint>),
+    Complete(Box<LiveLifecycleReport>),
 }
 
 #[derive(Deserialize)]
@@ -422,84 +648,228 @@ impl LiveLifecycleReport {
     }
 }
 
-/// Validates the full approved live sequence through the supplied environment.
-///
-/// Any failed case or Auto gate prevents later cases. Production command orchestration,
-/// reboot resumption, and root-owned evidence publication belong to the final qualification
-/// coordinator; this core stage defines and validates its live-lifecycle evidence contract.
-pub fn run_live_lifecycle_qualification<E>(
+/// Runs the exact lifecycle prefix and returns before the operator reboots the host.
+pub fn run_live_lifecycle_until_reboot<E>(
     environment: &mut E,
     envelope: &QualificationEnvelopeIdentityV1,
-) -> Result<LiveLifecycleReport, LiveLifecyclePlanError>
+    prerequisite_binding_sha256: &str,
+    prerequisite_fan_endpoints: &FanEndpointIdentitiesEvidence,
+) -> Result<LiveLifecycleProgress, LiveLifecyclePlanError>
 where
     E: LiveLifecycleEnvironment + ?Sized,
 {
     validate_identity(envelope).map_err(LiveLifecyclePlanError::InvalidEnvelope)?;
+    if !crate::evidence::is_lower_hex(prerequisite_binding_sha256, 64) {
+        return Err(LiveLifecyclePlanError::InvalidCheckpoint(
+            "valid prerequisite binding required".into(),
+        ));
+    }
+    if !prerequisite_fan_endpoints.is_valid() {
+        return Err(LiveLifecyclePlanError::InvalidCheckpoint(
+            "valid prerequisite fan endpoint identities required".into(),
+        ));
+    }
 
+    let pre_reboot_boot_id = environment.current_boot_id().map_err(|error| {
+        LiveLifecyclePlanError::InvalidCheckpoint(format!(
+            "cannot capture initial boot identity: {error}"
+        ))
+    })?;
+    if !crate::evidence::is_identifier(&pre_reboot_boot_id) {
+        return Err(LiveLifecyclePlanError::InvalidCheckpoint(
+            "initial boot identity is invalid".into(),
+        ));
+    }
     let started_at = environment.timestamp();
-    let mut last_event_at = started_at;
-    let mut readbacks = Vec::new();
-    let mut transitions = Vec::new();
-    let mut faults = Vec::new();
-    let mut cases = Vec::new();
-
+    let mut state = LiveLifecycleCheckpoint {
+        envelope: envelope.clone(),
+        prerequisite_binding_sha256: prerequisite_binding_sha256.to_owned(),
+        started_at,
+        last_event_at: started_at,
+        readbacks: Vec::new(),
+        transitions: Vec::new(),
+        faults: Vec::new(),
+        cases: Vec::new(),
+        expected_identities: Some((
+            prerequisite_fan_endpoints.cpu_enable.clone(),
+            prerequisite_fan_endpoints.gpu_enable.clone(),
+        )),
+        final_auto_confirmed: false,
+        pre_reboot_boot_id,
+    };
     let initial_gate = confirm_auto_gate(
         environment,
         started_at,
-        None,
-        None,
-        &mut readbacks,
-        &mut faults,
+        state.expected_identities.as_ref(),
+        Some(&state.pre_reboot_boot_id),
+        false,
+        &mut state.readbacks,
+        &mut state.faults,
     );
-    last_event_at = later_timestamp(last_event_at, initial_gate.completed_at);
-    let mut expected_identities = initial_gate.identities;
-    let mut final_auto_confirmed = initial_gate.confirmed;
+    state.last_event_at = later_timestamp(state.last_event_at, initial_gate.completed_at);
+    state.final_auto_confirmed = initial_gate.confirmed;
+    if !initial_gate.confirmed {
+        let cleanup_not_before = initial_gate.completed_at;
+        let cleanup_result =
+            environment.restore_after_case(LiveLifecycleCase::InvalidConfiguration);
+        let cleanup_completed_at = environment.timestamp();
+        match cleanup_result {
+            Ok(restored)
+                if restored.observation.monotonic_millis >= cleanup_not_before.monotonic_millis
+                    && restored.observation.monotonic_millis
+                        <= cleanup_completed_at.monotonic_millis
+                    && restored.observation.wall_unix_millis
+                        >= cleanup_not_before.wall_unix_millis
+                    && restored.observation.wall_unix_millis
+                        <= cleanup_completed_at.wall_unix_millis => {}
+            Ok(_) => state.faults.push(FaultEvidence {
+                timestamp: cleanup_completed_at,
+                boot_id: Some(state.pre_reboot_boot_id.clone()),
+                code: "initial-auto-recovery-failed".into(),
+                detail: "initial Auto-gate recovery evidence was not fresh and ordered".into(),
+            }),
+            Err(error) => state.faults.push(FaultEvidence {
+                timestamp: cleanup_completed_at,
+                boot_id: Some(state.pre_reboot_boot_id.clone()),
+                code: "initial-auto-recovery-failed".into(),
+                detail: format!("cannot restore Firmware Auto after initial gate failure: {error}"),
+            }),
+        }
+        state.last_event_at = later_timestamp(state.last_event_at, cleanup_completed_at);
+        let recovery_gate = confirm_auto_gate(
+            environment,
+            state.last_event_at,
+            state.expected_identities.as_ref(),
+            Some(&state.pre_reboot_boot_id),
+            false,
+            &mut state.readbacks,
+            &mut state.faults,
+        );
+        state.last_event_at = later_timestamp(state.last_event_at, recovery_gate.completed_at);
+        state.final_auto_confirmed = recovery_gate.confirmed;
+    }
+    run_live_lifecycle_phase(environment, state, true)
+}
 
-    if initial_gate.confirmed {
-        for case in LiveLifecycleCase::ALL {
-            let requested_at = strictly_after_timestamp(environment.timestamp(), last_event_at);
+/// Completes the reboot case after validating a protected pre-reboot checkpoint.
+pub fn resume_live_lifecycle_qualification<E>(
+    environment: &mut E,
+    checkpoint: LiveLifecycleCheckpoint,
+) -> Result<LiveLifecycleReport, LiveLifecyclePlanError>
+where
+    E: LiveLifecycleEnvironment + ?Sized,
+{
+    checkpoint
+        .validate()
+        .map_err(LiveLifecyclePlanError::InvalidCheckpoint)?;
+    match run_live_lifecycle_phase(environment, checkpoint, false)? {
+        LiveLifecycleProgress::Complete(report) => Ok(*report),
+        LiveLifecycleProgress::AwaitingReboot(_) => unreachable!("resume phase cannot pause"),
+    }
+}
+
+fn run_live_lifecycle_phase<E>(
+    environment: &mut E,
+    mut state: LiveLifecycleCheckpoint,
+    pause_before_reboot: bool,
+) -> Result<LiveLifecycleProgress, LiveLifecyclePlanError>
+where
+    E: LiveLifecycleEnvironment + ?Sized,
+{
+    let LiveLifecycleCheckpoint {
+        ref envelope,
+        ref prerequisite_binding_sha256,
+        started_at,
+        ref mut last_event_at,
+        ref mut readbacks,
+        ref mut transitions,
+        ref mut faults,
+        ref mut cases,
+        ref mut expected_identities,
+        ref mut final_auto_confirmed,
+        ref pre_reboot_boot_id,
+    } = state;
+
+    if *final_auto_confirmed && faults.is_empty() {
+        for case in LiveLifecycleCase::ALL.into_iter().skip(cases.len()) {
+            if pause_before_reboot && case == LiveLifecycleCase::Reboot {
+                let current_boot_id = environment.current_boot_id().map_err(|error| {
+                    LiveLifecyclePlanError::InvalidCheckpoint(format!(
+                        "cannot verify pre-reboot boot identity: {error}"
+                    ))
+                })?;
+                if current_boot_id != *pre_reboot_boot_id {
+                    return Err(LiveLifecyclePlanError::InvalidCheckpoint(
+                        "boot identity changed during the pre-reboot lifecycle prefix".into(),
+                    ));
+                }
+                let checkpoint = LiveLifecycleCheckpoint {
+                    envelope: envelope.clone(),
+                    prerequisite_binding_sha256: prerequisite_binding_sha256.clone(),
+                    started_at,
+                    last_event_at: *last_event_at,
+                    readbacks: readbacks.clone(),
+                    transitions: transitions.clone(),
+                    faults: faults.clone(),
+                    cases: cases.clone(),
+                    expected_identities: expected_identities.clone(),
+                    final_auto_confirmed: *final_auto_confirmed,
+                    pre_reboot_boot_id: pre_reboot_boot_id.clone(),
+                };
+                checkpoint
+                    .validate()
+                    .map_err(LiveLifecyclePlanError::InvalidCheckpoint)?;
+                return Ok(LiveLifecycleProgress::AwaitingReboot(Box::new(checkpoint)));
+            }
+            let requested_at = strictly_after_timestamp(environment.timestamp(), *last_event_at);
             transitions.push(StateTransitionEvidence {
                 timestamp: requested_at,
-                boot_id: None,
+                boot_id: Some(pre_reboot_boot_id.clone()),
                 from: "firmware-auto".into(),
                 to: case.id().into(),
             });
 
             let case_started_at = strictly_after_timestamp(environment.timestamp(), requested_at);
             let observation_result = if case == LiveLifecycleCase::Reboot {
-                environment.resume_after_reboot().map(|continuation| {
-                    LiveLifecycleCaseObservation::Reboot {
-                        reboot_completed: continuation.reboot_completed,
-                        boot_id_before: continuation.boot_id_before,
-                        boot_id_after: continuation.boot_id_after,
-                        post_boot_at: continuation.post_boot_at,
-                        auto_before_arm: None,
-                        armed_at: None,
-                        controller_process_identity: None,
-                    }
-                })
+                environment
+                    .resume_after_reboot()
+                    .map(|observed| LiveLifecycleObserved {
+                        observation: LiveLifecycleCaseObservation::Reboot {
+                            reboot_completed: observed.observation.reboot_completed,
+                            boot_id_before: observed.observation.boot_id_before,
+                            boot_id_after: observed.observation.boot_id_after,
+                            post_boot_at: observed.observation.post_boot_at,
+                            auto_before_arm: None,
+                            armed_at: None,
+                            controller_process_identity: None,
+                            restored_at: None,
+                            auto_after_arm: None,
+                        },
+                        observer_attestations: observed.observer_attestations,
+                    })
             } else {
                 environment.run_case(case)
             };
             let observed_completed_at = environment.timestamp();
             let mut case_completed_at = observed_completed_at;
-            let completed_at = if case == LiveLifecycleCase::Reboot {
-                case_completed_at
-            } else {
-                strictly_after_timestamp(case_completed_at, requested_at)
-            };
+            let mut observer_attestations = Vec::new();
             let (mut observation, mut observation_error) = match observation_result {
-                Ok(observation) => {
+                Ok(observed) => {
+                    observer_attestations = observed.observer_attestations;
                     let validation = if case == LiveLifecycleCase::Reboot {
-                        validate_reboot_continuation(
-                            &observation,
-                            case_started_at,
-                            case_completed_at,
-                        )
+                        environment.current_boot_id().and_then(|current_boot_id| {
+                            validate_reboot_continuation(
+                                &observed.observation,
+                                case_started_at,
+                                case_completed_at,
+                                pre_reboot_boot_id,
+                                &current_boot_id,
+                            )
+                        })
                     } else {
                         validate_case_observation(
                             case,
-                            &observation,
+                            &observed.observation,
                             case_started_at,
                             case_completed_at,
                             expected_identities
@@ -507,7 +877,7 @@ where
                                 .expect("the initial gate established identities"),
                         )
                     };
-                    (Some(observation), validation.err())
+                    (Some(observed.observation), validation.err())
                 }
                 Err(error) => (None, Some(format!("{} failed: {error}", case.id()))),
             };
@@ -520,7 +890,56 @@ where
                 ));
             }
 
-            let mut gate_boot_id = None;
+            let mut gate_not_before = observed_completed_at;
+            if case != LiveLifecycleCase::Reboot {
+                let cleanup_result = environment.restore_after_case(case);
+                let cleanup_completed_at = environment.timestamp();
+                match cleanup_result {
+                    Ok(restored)
+                        if restored.observation.monotonic_millis
+                            >= observed_completed_at.monotonic_millis
+                            && restored.observation.monotonic_millis
+                                <= cleanup_completed_at.monotonic_millis
+                            && restored.observation.wall_unix_millis
+                                >= observed_completed_at.wall_unix_millis
+                            && restored.observation.wall_unix_millis
+                                <= cleanup_completed_at.wall_unix_millis =>
+                    {
+                        gate_not_before = restored.observation;
+                        observer_attestations.extend(restored.observer_attestations);
+                    }
+                    Ok(_) => {
+                        observation_error.get_or_insert_with(|| {
+                            format!(
+                                "{} failed: lifecycle cleanup evidence was not fresh and ordered",
+                                case.id()
+                            )
+                        });
+                        gate_not_before = cleanup_completed_at;
+                    }
+                    Err(error) => {
+                        observation_error.get_or_insert_with(|| {
+                            format!("{} failed: lifecycle cleanup failed: {error}", case.id())
+                        });
+                        gate_not_before = cleanup_completed_at;
+                    }
+                }
+                gate_not_before = strictly_after_timestamp(gate_not_before, requested_at);
+                case_completed_at = gate_not_before;
+                if let Some(observation) = observation.as_ref()
+                    && let Err(error) = validate_observer_attestations(
+                        case,
+                        &observer_attestations,
+                        observation,
+                        case_started_at,
+                        case_completed_at,
+                    )
+                {
+                    observation_error.get_or_insert(error);
+                }
+            }
+
+            let mut gate_boot_id = Some(pre_reboot_boot_id.clone());
             if case == LiveLifecycleCase::Reboot {
                 let (pre_boot_id, post_boot_id) = match observation.as_ref() {
                     Some(LiveLifecycleCaseObservation::Reboot {
@@ -535,12 +954,12 @@ where
                         UNVERIFIED_POST_REBOOT_BOOT_ID,
                     ),
                 };
-                for readback in &mut readbacks {
+                for readback in readbacks.iter_mut() {
                     readback
                         .boot_id
                         .get_or_insert_with(|| pre_boot_id.to_owned());
                 }
-                for transition in &mut transitions {
+                for transition in transitions.iter_mut() {
                     transition
                         .boot_id
                         .get_or_insert_with(|| pre_boot_id.to_owned());
@@ -550,15 +969,16 @@ where
 
             let gate = confirm_auto_gate(
                 environment,
-                completed_at,
+                gate_not_before,
                 if case == LiveLifecycleCase::Reboot {
                     None
                 } else {
                     expected_identities.as_ref()
                 },
                 gate_boot_id.as_deref(),
-                &mut readbacks,
-                &mut faults,
+                case == LiveLifecycleCase::Reboot,
+                readbacks,
+                faults,
             );
             if case == LiveLifecycleCase::Reboot && observation_error.is_none() && gate.confirmed {
                 let gate_pair = gate
@@ -568,7 +988,9 @@ where
                 if let Some(rebound) = rebound_identities(&gate_pair, expected_identities.as_ref())
                 {
                     match environment.arm_after_reboot() {
-                        Ok(arm) => {
+                        Ok(observed_arm) => {
+                            let arm = observed_arm.observation;
+                            observer_attestations.extend(observed_arm.observer_attestations);
                             let arm_completed_at = environment.timestamp();
                             let arm_is_ordered = arm.armed_at.monotonic_millis
                                 > gate.completed_at.monotonic_millis
@@ -591,7 +1013,7 @@ where
                                     *controller_process_identity =
                                         Some(arm.controller_process_identity);
                                 }
-                                expected_identities = Some(rebound);
+                                *expected_identities = Some(rebound);
                             } else {
                                 observation_error = Some(
                                     "reboot failed: controller arming evidence was not fresh and ordered after the independent Auto gate"
@@ -618,6 +1040,83 @@ where
                         .into(),
                 );
             }
+            if case == LiveLifecycleCase::Reboot {
+                let restore_result = environment.restore_after_reboot();
+                let restore_completed_at = environment.timestamp();
+                let armed_at = observation
+                    .as_ref()
+                    .and_then(|observation| match observation {
+                        LiveLifecycleCaseObservation::Reboot { armed_at, .. } => *armed_at,
+                        _ => None,
+                    });
+                let restored_at = match restore_result {
+                    Ok(observed_restore) => {
+                        observer_attestations.extend(observed_restore.observer_attestations);
+                        let restored = observed_restore.observation;
+                        if restored.monotonic_millis <= restore_completed_at.monotonic_millis
+                            && restored.wall_unix_millis <= restore_completed_at.wall_unix_millis
+                            && armed_at.is_none_or(|armed| {
+                                restored.monotonic_millis > armed.monotonic_millis
+                                    && restored.wall_unix_millis > armed.wall_unix_millis
+                            })
+                        {
+                            if let Some(LiveLifecycleCaseObservation::Reboot {
+                                restored_at, ..
+                            }) = observation.as_mut()
+                            {
+                                *restored_at = Some(restored);
+                            }
+                            restored
+                        } else {
+                            observation_error.get_or_insert_with(|| {
+                                "reboot failed: post-arm restoration evidence was not fresh and ordered"
+                                    .into()
+                            });
+                            restore_completed_at
+                        }
+                    }
+                    Err(error) => {
+                        observation_error.get_or_insert_with(|| {
+                            format!("reboot failed: cannot restore after arming: {error}")
+                        });
+                        restore_completed_at
+                    }
+                };
+                let terminal_gate = confirm_auto_gate(
+                    environment,
+                    restored_at,
+                    gate.identities.as_ref(),
+                    gate_boot_id.as_deref(),
+                    true,
+                    readbacks,
+                    faults,
+                );
+                case_completed_at = terminal_gate.completed_at;
+                if terminal_gate.confirmed {
+                    if let Some(LiveLifecycleCaseObservation::Reboot { auto_after_arm, .. }) =
+                        observation.as_mut()
+                    {
+                        *auto_after_arm = terminal_gate.auto_pair;
+                    }
+                } else {
+                    observation_error.get_or_insert_with(|| {
+                        "reboot failed: terminal Firmware Auto gate failed after post-boot arming"
+                            .into()
+                    });
+                }
+                *final_auto_confirmed = terminal_gate.confirmed;
+                if let Some(observation) = observation.as_ref() {
+                    if let Err(error) = validate_observer_attestations(
+                        case,
+                        &observer_attestations,
+                        observation,
+                        case_started_at,
+                        case_completed_at,
+                    ) {
+                        observation_error.get_or_insert(error);
+                    }
+                }
+            }
             if let Some(detail) = &observation_error {
                 faults.push(FaultEvidence {
                     timestamp: gate.completed_at,
@@ -626,37 +1125,39 @@ where
                     detail: detail.clone(),
                 });
             }
-            let restored_at = if gate_boot_id.is_some() {
+            let restored_at = if case == LiveLifecycleCase::Reboot {
                 environment.timestamp()
             } else {
                 strictly_after_timestamp(environment.timestamp(), gate.completed_at)
             };
-            last_event_at = if gate_boot_id.is_some() {
-                strictly_after_timestamp(restored_at, last_event_at)
+            *last_event_at = if case == LiveLifecycleCase::Reboot {
+                strictly_after_timestamp(restored_at, *last_event_at)
             } else {
                 later_timestamp(
-                    last_event_at,
+                    *last_event_at,
                     later_timestamp(restored_at, gate.completed_at),
                 )
             };
-            final_auto_confirmed = gate.confirmed;
+            if case != LiveLifecycleCase::Reboot {
+                *final_auto_confirmed = gate.confirmed;
+            }
             if gate.confirmed {
-                expected_identities = gate.identities;
+                *expected_identities = gate.identities;
             }
             transitions.push(StateTransitionEvidence {
                 timestamp: restored_at,
                 boot_id: gate_boot_id,
                 from: case.id().into(),
-                to: if gate.confirmed {
+                to: if *final_auto_confirmed {
                     "firmware-auto".into()
                 } else {
                     "lifecycle-blocked".into()
                 },
             });
 
-            let passed = observation_error.is_none() && gate.confirmed;
+            let passed = observation_error.is_none() && *final_auto_confirmed;
             let detail = observation_error.unwrap_or_else(|| {
-                if gate.confirmed {
+                if *final_auto_confirmed {
                     format!("{} passed and both fans confirmed Firmware Auto", case.id())
                 } else {
                     format!(
@@ -670,6 +1171,7 @@ where
                 started_at: case_started_at,
                 completed_at: case_completed_at,
                 observation,
+                observer_attestations,
                 passed,
                 detail,
             });
@@ -679,10 +1181,10 @@ where
         }
     }
 
-    let completed_at = normalize_timestamp(environment.timestamp(), last_event_at);
+    let completed_at = normalize_timestamp(environment.timestamp(), *last_event_at);
     let accepted = cases.len() == LiveLifecycleCase::ALL.len()
         && cases.iter().all(LiveLifecycleCaseResult::passed)
-        && final_auto_confirmed
+        && *final_auto_confirmed
         && faults.is_empty();
     let reason = if accepted {
         "all approved live lifecycle cases passed with Firmware Auto between cases".into()
@@ -707,13 +1209,14 @@ where
             },
             reason,
             another_passing_run_required: !accepted,
-            final_firmware_auto_confirmed: final_auto_confirmed,
+            final_firmware_auto_confirmed: *final_auto_confirmed,
         },
     );
-    record.readbacks = readbacks;
-    record.state_transitions = transitions;
-    record.faults = faults;
+    record.readbacks = readbacks.clone();
+    record.state_transitions = transitions.clone();
+    record.faults = faults.clone();
     record.live_lifecycle_cases = Some(cases.clone());
+    record.prerequisite_binding_sha256 = Some(prerequisite_binding_sha256.clone());
     record
         .validate()
         .map_err(LiveLifecyclePlanError::InvalidGeneratedEvidence)?;
@@ -721,7 +1224,7 @@ where
     report
         .validate()
         .map_err(LiveLifecyclePlanError::InvalidGeneratedEvidence)?;
-    Ok(report)
+    Ok(LiveLifecycleProgress::Complete(Box::new(report)))
 }
 
 struct AutoGate {
@@ -731,27 +1234,38 @@ struct AutoGate {
     confirmed: bool,
 }
 
+#[derive(Clone, Copy)]
+struct AutoGateContext<'a> {
+    boot_id: Option<&'a str>,
+    allow_clock_reset: bool,
+}
+
 fn confirm_auto_gate<E>(
     environment: &mut E,
     not_before: EvidenceTimestamp,
     expected_identities: Option<&(String, String)>,
     boot_id: Option<&str>,
+    allow_clock_reset: bool,
     readbacks: &mut Vec<FanReadbackEvidence>,
     faults: &mut Vec<FaultEvidence>,
 ) -> AutoGate
 where
     E: LiveLifecycleEnvironment + ?Sized,
 {
+    let context = AutoGateContext {
+        boot_id,
+        allow_clock_reset,
+    };
     let cpu = confirm_one_fan(
         environment,
         EvidenceFan::Cpu,
         not_before,
         expected_identities.map(|identities| identities.0.as_str()),
-        boot_id,
+        context,
         readbacks,
         faults,
     );
-    let gpu_not_before = if boot_id.is_some() {
+    let gpu_not_before = if allow_clock_reset {
         cpu.completed_at
     } else {
         later_timestamp(not_before, cpu.completed_at)
@@ -761,7 +1275,7 @@ where
         EvidenceFan::Gpu,
         gpu_not_before,
         expected_identities.map(|identities| identities.1.as_str()),
-        boot_id,
+        context,
         readbacks,
         faults,
     );
@@ -849,7 +1363,7 @@ fn confirm_one_fan<E>(
     fan: EvidenceFan,
     not_before: EvidenceTimestamp,
     expected_identity: Option<&str>,
-    boot_id: Option<&str>,
+    context: AutoGateContext<'_>,
     readbacks: &mut Vec<FanReadbackEvidence>,
     faults: &mut Vec<FaultEvidence>,
 ) -> FanConfirmation
@@ -869,7 +1383,7 @@ where
                 && observation.observed_at.monotonic_millis >= not_before.monotonic_millis
                 && observation.observed_at.wall_unix_millis >= not_before.wall_unix_millis;
             let identity_valid = identity_has_nonblank_character(&observation.endpoint_identity);
-            let completed_at = if boot_id.is_some() {
+            let completed_at = if context.allow_clock_reset {
                 observation.observed_at
             } else {
                 strictly_after_timestamp(observation.observed_at, not_before)
@@ -885,7 +1399,7 @@ where
                 timestamp: completed_at,
                 source_timestamp: Some(observation.observed_at),
                 fresh: Some(observation.fresh),
-                boot_id: boot_id.map(ToOwned::to_owned),
+                boot_id: context.boot_id.map(ToOwned::to_owned),
                 fan,
                 field: FanReadbackField::Enable,
                 value: if identity_valid {
@@ -909,7 +1423,7 @@ where
             if !timestamp_valid || !identity_valid {
                 faults.push(FaultEvidence {
                     timestamp: completed_at,
-                    boot_id: boot_id.map(ToOwned::to_owned),
+                    boot_id: context.boot_id.map(ToOwned::to_owned),
                     code: "firmware-auto-observation-invalid".into(),
                     detail: format!(
                         "{fan:?} Firmware Auto readback has invalid time or endpoint identity"
@@ -923,7 +1437,7 @@ where
             }
         }
         Err(error) => {
-            let completed_at = if boot_id.is_some() {
+            let completed_at = if context.allow_clock_reset {
                 raw_completed_at
             } else {
                 strictly_after_timestamp(raw_completed_at, not_before)
@@ -932,7 +1446,7 @@ where
                 timestamp: completed_at,
                 source_timestamp: Some(raw_completed_at),
                 fresh: Some(false),
-                boot_id: boot_id.map(ToOwned::to_owned),
+                boot_id: context.boot_id.map(ToOwned::to_owned),
                 fan,
                 field: FanReadbackField::Enable,
                 value: None,
@@ -944,7 +1458,7 @@ where
             });
             faults.push(FaultEvidence {
                 timestamp: completed_at,
-                boot_id: boot_id.map(ToOwned::to_owned),
+                boot_id: context.boot_id.map(ToOwned::to_owned),
                 code: "firmware-auto-observation-failed".into(),
                 detail: format!("cannot read {fan:?} Firmware Auto state: {error}"),
             });
@@ -975,6 +1489,8 @@ fn validate_reboot_continuation(
     observation: &LiveLifecycleCaseObservation,
     started_at: EvidenceTimestamp,
     completed_at: EvidenceTimestamp,
+    expected_boot_id_before: &str,
+    expected_boot_id_after: &str,
 ) -> Result<(), String> {
     match observation {
         LiveLifecycleCaseObservation::Reboot {
@@ -985,7 +1501,11 @@ fn validate_reboot_continuation(
             auto_before_arm: None,
             armed_at: None,
             controller_process_identity: None,
+            restored_at: None,
+            auto_after_arm: None,
         } if reboot_boot_ids_are_valid(boot_id_before, boot_id_after)
+            && boot_id_before == expected_boot_id_before
+            && boot_id_after == expected_boot_id_after
             && post_boot_at.wall_unix_millis > started_at.wall_unix_millis
             && post_boot_at.wall_unix_millis <= completed_at.wall_unix_millis
             && post_boot_at.monotonic_millis <= completed_at.monotonic_millis =>
@@ -1224,6 +1744,8 @@ fn validate_case_observation(
                 auto_before_arm: Some(auto_before_arm),
                 armed_at: Some(armed_at),
                 controller_process_identity: Some(controller_process_identity),
+                restored_at: Some(restored_at),
+                auto_after_arm: Some(auto_after_arm),
             },
         ) if reboot_boot_ids_are_valid(boot_id_before, boot_id_after)
             && post_boot_at.wall_unix_millis > started_at.wall_unix_millis
@@ -1241,7 +1763,11 @@ fn validate_case_observation(
             && auto_before_arm.cpu.observed_at.wall_unix_millis < armed_at.wall_unix_millis
             && auto_before_arm.gpu.observed_at.wall_unix_millis < armed_at.wall_unix_millis
             && armed_at.monotonic_millis <= completed_at.monotonic_millis
-            && armed_at.wall_unix_millis <= completed_at.wall_unix_millis =>
+            && armed_at.wall_unix_millis <= completed_at.wall_unix_millis
+            && armed_at.monotonic_millis < restored_at.monotonic_millis
+            && armed_at.wall_unix_millis < restored_at.wall_unix_millis
+            && restored_at.monotonic_millis <= completed_at.monotonic_millis
+            && restored_at.wall_unix_millis <= completed_at.wall_unix_millis =>
         {
             if !identity_has_nonblank_character(controller_process_identity) {
                 return Err("reboot failed: armed controller process identity is empty".into());
@@ -1249,7 +1775,21 @@ fn validate_case_observation(
             validate_rebound_auto_pair(auto_before_arm, expected_identities).map_err(|_| {
                 "reboot failed: both fans must confirm Firmware Auto after boot and before arming"
                     .to_owned()
-            })
+            })?;
+            let rebound = rebound_identities(auto_before_arm, Some(expected_identities))
+                .ok_or_else(|| "reboot failed: endpoint identities did not rebind".to_owned())?;
+            validate_rebound_auto_pair(auto_after_arm, &rebound).map_err(|_| {
+                "reboot failed: both fans must confirm Firmware Auto after post-boot arming"
+                    .to_owned()
+            })?;
+            if auto_after_arm.cpu.observed_at.monotonic_millis < restored_at.monotonic_millis
+                || auto_after_arm.gpu.observed_at.monotonic_millis < restored_at.monotonic_millis
+                || auto_after_arm.cpu.observed_at.wall_unix_millis < restored_at.wall_unix_millis
+                || auto_after_arm.gpu.observed_at.wall_unix_millis < restored_at.wall_unix_millis
+            {
+                return Err("reboot failed: terminal Firmware Auto observations predate restoration".into());
+            }
+            Ok(())
         }
         (LiveLifecycleCase::Reboot, LiveLifecycleCaseObservation::Reboot { .. }) => Err(
             "reboot failed: both fans must confirm Firmware Auto after a verified boot change and before arming"
@@ -1503,8 +2043,16 @@ pub(crate) fn live_lifecycle_cases_are_well_formed(record: &EvidenceRecord) -> b
     if cases.len() > LiveLifecycleCase::ALL.len() {
         return false;
     }
+    let base_readback_count = 2 + cases.len() * 2;
+    let initial_recovery_gate_present = cases.is_empty() && record.readbacks.len() == 4;
+    let terminal_reboot_gate_present = cases
+        .last()
+        .is_some_and(|result| result.case == LiveLifecycleCase::Reboot)
+        && record.readbacks.len() == base_readback_count + 2;
     if record.state_transitions.len() != cases.len() * 2
-        || record.readbacks.len() != 2 + cases.len() * 2
+        || (record.readbacks.len() != base_readback_count
+            && !terminal_reboot_gate_present
+            && !initial_recovery_gate_present)
     {
         return false;
     }
@@ -1523,13 +2071,24 @@ pub(crate) fn live_lifecycle_cases_are_well_formed(record: &EvidenceRecord) -> b
     });
     let initial_gate = &record.readbacks[..2];
     let Some(first_entered) = record.state_transitions.first() else {
-        return cases.is_empty()
-            && readback_pair_sources_fit_gate_window(
+        if !cases.is_empty()
+            || !readback_pair_sources_fit_gate_window(
                 initial_gate,
                 record.started_at,
                 record.completed_at,
                 false,
-            );
+            )
+        {
+            return false;
+        }
+        return !initial_recovery_gate_present
+            || (readback_pair_is_ordered_attempt(&record.readbacks[2..])
+                && readback_pair_sources_fit_gate_window(
+                    &record.readbacks[2..],
+                    initial_gate[1].timestamp,
+                    record.completed_at,
+                    false,
+                ));
     };
     if !readback_pair_sources_fit_gate_window(
         initial_gate,
@@ -1560,6 +2119,15 @@ pub(crate) fn live_lifecycle_cases_are_well_formed(record: &EvidenceRecord) -> b
             || restored.from != expected_case.id()
             || !matches!(restored.to.as_str(), "firmware-auto" | "lifecycle-blocked")
             || result.passed && restored.to != "firmware-auto"
+            || result.passed
+                && validate_observer_attestations(
+                    expected_case,
+                    &result.observer_attestations,
+                    result.observation.as_ref().expect("checked above"),
+                    result.started_at,
+                    result.completed_at,
+                )
+                .is_err()
             || !case_result_fits_transition_window(expected_case, result, entered, restored, record)
         {
             return false;
@@ -1624,7 +2192,199 @@ pub(crate) fn live_lifecycle_cases_are_well_formed(record: &EvidenceRecord) -> b
             }
         }
     }
+    if terminal_reboot_gate_present {
+        let result = cases.last().expect("reboot result exists");
+        let restored = record
+            .state_transitions
+            .last()
+            .expect("reboot transition exists");
+        let terminal_gate = &record.readbacks[record.readbacks.len() - 2..];
+        if !readback_pair_is_ordered_attempt(terminal_gate)
+            || terminal_gate[1].timestamp.monotonic_millis >= restored.timestamp.monotonic_millis
+        {
+            return false;
+        }
+        if result.passed {
+            let Some(LiveLifecycleCaseObservation::Reboot {
+                auto_after_arm: Some(auto_after_arm),
+                restored_at: Some(restored_at),
+                ..
+            }) = result.observation.as_ref()
+            else {
+                return false;
+            };
+            let terminal_identities = (
+                auto_after_arm.cpu.endpoint_identity.clone(),
+                auto_after_arm.gpu.endpoint_identity.clone(),
+            );
+            if !readback_pair_confirms_auto_unscoped(terminal_gate, &terminal_identities)
+                || !readback_pair_sources_fit_gate_window(
+                    terminal_gate,
+                    *restored_at,
+                    restored.timestamp,
+                    true,
+                )
+            {
+                return false;
+            }
+        }
+    }
     true
+}
+
+fn validate_observer_attestations(
+    case: LiveLifecycleCase,
+    attestations: &[LiveLifecycleObserverAttestation],
+    observation: &LiveLifecycleCaseObservation,
+    case_started_at: EvidenceTimestamp,
+    case_completed_at: EvidenceTimestamp,
+) -> Result<(), String> {
+    let point = |value| (value, value);
+    let expected_actions: Vec<(&str, (EvidenceTimestamp, EvidenceTimestamp))> = match observation {
+        LiveLifecycleCaseObservation::InvalidConfiguration { .. } => vec![],
+        LiveLifecycleCaseObservation::DuplicateProcess { observed_at, .. } => vec![
+            ("duplicate-owner-custom", point(*observed_at)),
+            ("duplicate-process-cleanup", point(case_completed_at)),
+        ],
+        LiveLifecycleCaseObservation::NormalStopRestart {
+            stopped_at,
+            restarted_at,
+            ..
+        } => vec![
+            ("normal-owner-before-stop", point(*stopped_at)),
+            ("normal-restart-custom", point(*restarted_at)),
+            ("normal-stop-restart-cleanup", point(case_completed_at)),
+        ],
+        LiveLifecycleCaseObservation::ProcessKillRecovery {
+            killed_at,
+            restarted_at,
+            ..
+        } => vec![
+            ("process-before-kill", point(*killed_at)),
+            ("bounded-restart-custom", point(*restarted_at)),
+            ("process-kill-recovery-cleanup", point(case_completed_at)),
+        ],
+        LiveLifecycleCaseObservation::WatchdogRecovery {
+            expired_at,
+            restarted_at,
+            ..
+        } => vec![
+            ("watchdog-monitored-custom", point(*expired_at)),
+            ("bounded-restart-custom", point(*restarted_at)),
+            ("watchdog-recovery-cleanup", point(case_completed_at)),
+        ],
+        LiveLifecycleCaseObservation::AcToBatteryTransition {
+            before,
+            selected_profile_after,
+            ..
+        } => vec![
+            (
+                "ac-transition-custom",
+                (before.observed_at, selected_profile_after.observed_at),
+            ),
+            ("ac-to-battery-transition-cleanup", point(case_completed_at)),
+        ],
+        LiveLifecycleCaseObservation::SuspendResume {
+            suspended_at,
+            process_started_at,
+            ..
+        } => vec![
+            ("pre-suspend-custom", point(*suspended_at)),
+            ("post-resume-custom", point(*process_started_at)),
+            ("suspend-resume-cleanup", point(case_completed_at)),
+        ],
+        LiveLifecycleCaseObservation::Reboot {
+            armed_at: Some(armed_at),
+            restored_at: Some(restored_at),
+            ..
+        } => vec![
+            ("post-reboot-arm", point(*armed_at)),
+            ("post-reboot-restore", point(*restored_at)),
+        ],
+        LiveLifecycleCaseObservation::Reboot { .. } => vec![],
+    };
+    if attestations.len() != expected_actions.len()
+        || attestations
+            .iter()
+            .zip(&expected_actions)
+            .any(|(attestation, (expected, _))| attestation.action != *expected)
+    {
+        return Err(format!(
+            "{} failed: exact per-action observer coverage is required",
+            case.id()
+        ));
+    }
+    if attestations.windows(2).any(|pair| {
+        let previous = pair[0].completed_at;
+        let next = pair[1].started_at;
+        next.monotonic_millis > previous.monotonic_millis
+            && next.monotonic_millis - previous.monotonic_millis
+                > LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS
+            || next.wall_unix_millis > previous.wall_unix_millis
+                && next.wall_unix_millis - previous.wall_unix_millis
+                    > LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS as i64
+    }) {
+        return Err(format!(
+            "{} failed: observer coverage is not continuous between Custom-control actions",
+            case.id()
+        ));
+    }
+    if case != LiveLifecycleCase::Reboot && !attestations.is_empty() {
+        let first = attestations.first().expect("nonempty above").started_at;
+        let last = attestations.last().expect("nonempty above").completed_at;
+        let starts_promptly = first.monotonic_millis >= case_started_at.monotonic_millis
+            && first.monotonic_millis - case_started_at.monotonic_millis
+                <= LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS
+            && first.wall_unix_millis >= case_started_at.wall_unix_millis
+            && first.wall_unix_millis - case_started_at.wall_unix_millis
+                <= LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS as i64;
+        let ends_promptly = last.monotonic_millis <= case_completed_at.monotonic_millis
+            && case_completed_at.monotonic_millis - last.monotonic_millis
+                <= LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS
+            && last.wall_unix_millis <= case_completed_at.wall_unix_millis
+            && case_completed_at.wall_unix_millis - last.wall_unix_millis
+                <= LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS as i64;
+        if !starts_promptly || !ends_promptly {
+            return Err(format!(
+                "{} failed: observer coverage does not span the complete live case",
+                case.id()
+            ));
+        }
+    }
+    for (attestation, (_, (action_started_at, action_completed_at))) in
+        attestations.iter().zip(expected_actions)
+    {
+        let checks_fit = attestation.checks.len() >= 2
+            && attestation.checks.first() == Some(&attestation.started_at)
+            && attestation.checks.last() == Some(&attestation.completed_at)
+            && (case == LiveLifecycleCase::Reboot
+                || attestation.started_at.monotonic_millis >= case_started_at.monotonic_millis)
+            && attestation.started_at.wall_unix_millis >= case_started_at.wall_unix_millis
+            && attestation.completed_at.monotonic_millis <= case_completed_at.monotonic_millis
+            && attestation.completed_at.wall_unix_millis <= case_completed_at.wall_unix_millis
+            && attestation.started_at.monotonic_millis <= action_started_at.monotonic_millis
+            && attestation.started_at.wall_unix_millis <= action_started_at.wall_unix_millis
+            && attestation.completed_at.monotonic_millis >= action_completed_at.monotonic_millis
+            && attestation.completed_at.wall_unix_millis >= action_completed_at.wall_unix_millis
+            && attestation.checks.windows(2).all(|pair| {
+                pair[0].monotonic_millis < pair[1].monotonic_millis
+                    && pair[0].wall_unix_millis <= pair[1].wall_unix_millis
+                    && pair[1].monotonic_millis - pair[0].monotonic_millis
+                        <= LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS
+                    && pair[1]
+                        .wall_unix_millis
+                        .checked_sub(pair[0].wall_unix_millis)
+                        .is_some_and(|gap| gap <= LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS as i64)
+            });
+        if !checks_fit {
+            return Err(format!(
+                "{} failed: observer coverage for {} is stale, gapped, or outside the action",
+                case.id(),
+                attestation.action
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn observation_values_fit_schema(observation: &LiveLifecycleCaseObservation) -> bool {
@@ -1650,8 +2410,13 @@ fn observation_values_fit_schema(observation: &LiveLifecycleCaseObservation) -> 
             auto_before_sleep, ..
         } => auto_pair_fits(auto_before_sleep),
         LiveLifecycleCaseObservation::Reboot {
-            auto_before_arm, ..
-        } => auto_before_arm.as_ref().is_none_or(auto_pair_fits),
+            auto_before_arm,
+            auto_after_arm,
+            ..
+        } => {
+            auto_before_arm.as_ref().is_none_or(auto_pair_fits)
+                && auto_after_arm.as_ref().is_none_or(auto_pair_fits)
+        }
         _ => true,
     }
 }
@@ -1759,7 +2524,7 @@ pub(crate) fn live_lifecycle_is_complete(record: &EvidenceRecord) -> bool {
                         result.case != case || !result.passed || result.observation.is_none()
                     })
         })
-        || record.readbacks.len() != 2 + LiveLifecycleCase::ALL.len() * 2
+        || record.readbacks.len() != 4 + LiveLifecycleCase::ALL.len() * 2
         || record.state_transitions.len() != LiveLifecycleCase::ALL.len() * 2
     {
         return false;
@@ -1783,7 +2548,7 @@ pub(crate) fn live_lifecycle_is_complete(record: &EvidenceRecord) -> bool {
         return false;
     }
 
-    let (boot_id_before, boot_id_after, reboot_auto_pair) = match record
+    let (boot_id_before, boot_id_after, reboot_auto_pair, terminal_auto_pair) = match record
         .live_lifecycle_cases
         .as_ref()
         .and_then(|cases| cases.last())
@@ -1793,15 +2558,17 @@ pub(crate) fn live_lifecycle_is_complete(record: &EvidenceRecord) -> bool {
             boot_id_before,
             boot_id_after,
             auto_before_arm: Some(auto_before_arm),
+            auto_after_arm: Some(auto_after_arm),
             ..
         }) => (
             boot_id_before.as_str(),
             boot_id_after.as_str(),
             auto_before_arm,
+            auto_after_arm,
         ),
         _ => return false,
     };
-    let pre_reboot_pairs = &record.readbacks[..record.readbacks.len() - 2];
+    let pre_reboot_pairs = &record.readbacks[..record.readbacks.len() - 4];
     if pre_reboot_pairs
         .chunks_exact(2)
         .any(|pair| !readback_pair_confirms_auto(pair, &expected_identities, boot_id_before))
@@ -1816,10 +2583,23 @@ pub(crate) fn live_lifecycle_is_complete(record: &EvidenceRecord) -> bool {
         reboot_auto_pair.gpu.endpoint_identity.clone(),
     );
     if !readback_pair_confirms_auto(
-        &record.readbacks[record.readbacks.len() - 2..],
+        &record.readbacks[record.readbacks.len() - 4..record.readbacks.len() - 2],
         &post_reboot_identities,
         boot_id_after,
     ) {
+        return false;
+    }
+    let terminal_identities = (
+        terminal_auto_pair.cpu.endpoint_identity.clone(),
+        terminal_auto_pair.gpu.endpoint_identity.clone(),
+    );
+    if terminal_identities != post_reboot_identities
+        || !readback_pair_confirms_auto(
+            &record.readbacks[record.readbacks.len() - 2..],
+            &terminal_identities,
+            boot_id_after,
+        )
+    {
         return false;
     }
     let initial_gate_precedes_first_case = record.state_transitions.first().is_some_and(|first| {

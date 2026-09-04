@@ -89,35 +89,37 @@ pub use diagnostics::{
 pub use endurance::{
     SUPERVISED_ENDURANCE_DURATION_MILLIS, SUPERVISED_ENDURANCE_SAMPLE_COUNT,
     SUPERVISED_ENDURANCE_SEGMENTS, SUPERVISED_ENDURANCE_WORKLOAD_ID,
-    SupervisedEnduranceEnvironment, SupervisedEnduranceLoad, SupervisedEndurancePlan,
-    SupervisedEndurancePlanError, SupervisedEnduranceProcessStopConfirmation,
-    SupervisedEnduranceReport, SupervisedEnduranceSegment, SupervisedEnduranceSegmentConfirmation,
-    run_supervised_endurance,
+    SupervisedEnduranceEnvironment, SupervisedEnduranceFanContainment, SupervisedEnduranceLoad,
+    SupervisedEndurancePlan, SupervisedEndurancePlanError,
+    SupervisedEnduranceProcessStopConfirmation, SupervisedEnduranceReport,
+    SupervisedEnduranceSegment, SupervisedEnduranceSegmentConfirmation, run_supervised_endurance,
 };
 pub use envelope::{EnvelopeValidationError, validate_against_protected_envelope};
 pub use evidence::{
-    EVIDENCE_SCHEMA_VERSION, EVIDENCE_SCHEMA_VERSION_V2, EnduranceThermalEnvelopeEvidence,
-    EvidenceExternalPower, EvidenceFan, EvidenceParseError, EvidenceProfile, EvidenceRecord,
-    EvidenceRecordStatus, EvidenceTimestamp, EvidenceValidationError, EvidenceWriteError,
-    FanCalibrationEvidence, FanCommandEvidence, FanControlField, FanEndpointIdentitiesEvidence,
-    FanReadbackEvidence, FanReadbackField, FanReadbackPhase, FaultEvidence,
-    FirmwareAutoCleanupEvidence, ObservationOutcome, PreflightCheckEvidence, ProcessStopEvidence,
-    QualificationEnvelopeIdentityV1, RestorationAttemptEvidence, RestorationOutcome,
-    RpmAnchorEvidence, RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness,
-    StateTransitionEvidence, StoppedProcess, TelemetrySampleEvidence, ThermalSummaryEvidence,
-    WorkloadEvidence, parse_evidence_v1, parse_evidence_v2, validate_root_owned_output_destination,
-    write_evidence_atomically, write_root_owned_bytes_atomically,
-    write_root_owned_evidence_atomically,
+    EVIDENCE_SCHEMA_VERSION, EVIDENCE_SCHEMA_VERSION_V2, EnduranceObserverAttestationEvidence,
+    EnduranceThermalEnvelopeEvidence, EvidenceExternalPower, EvidenceFan, EvidenceParseError,
+    EvidenceProfile, EvidenceRecord, EvidenceRecordStatus, EvidenceTimestamp,
+    EvidenceValidationError, EvidenceWriteError, FanCalibrationEvidence, FanCommandEvidence,
+    FanControlField, FanEndpointIdentitiesEvidence, FanReadbackEvidence, FanReadbackField,
+    FanReadbackPhase, FaultEvidence, FirmwareAutoCleanupEvidence, ObservationOutcome,
+    PreflightCheckEvidence, ProcessStopEvidence, QualificationEnvelopeIdentityV1,
+    RestorationAttemptEvidence, RestorationOutcome, RpmAnchorEvidence, RunOutcomeEvidence,
+    RunOutcomeStatus, SampleFreshness, StateTransitionEvidence, StoppedProcess,
+    TelemetrySampleEvidence, ThermalSummaryEvidence, WorkloadEvidence, parse_evidence_v1,
+    parse_evidence_v2, validate_root_owned_output_destination, write_evidence_atomically,
+    write_root_owned_bytes_atomically, write_root_owned_evidence_atomically,
 };
 pub use external_power::observe_external_power;
 pub use live_lifecycle::{
-    DangerousLiveFaultInjection, LIVE_RESTART_DELAY_MILLIS, LIVE_START_LIMIT_BURST,
-    LiveLifecycleCase, LiveLifecycleCaseObservation, LiveLifecycleCaseResult,
-    LiveLifecycleEnvironment, LiveLifecycleFanAutoObservation, LiveLifecycleFanAutoPair,
-    LiveLifecyclePlanError, LiveLifecyclePowerObservation, LiveLifecycleProfileObservation,
-    LiveLifecycleRebootArmObservation, LiveLifecycleRebootContinuation, LiveLifecycleReport,
-    LiveLifecycleRequest, LiveLifecycleRequestError, classify_live_lifecycle_request,
-    run_live_lifecycle_qualification,
+    DangerousLiveFaultInjection, LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS, LIVE_RESTART_DELAY_MILLIS,
+    LIVE_START_LIMIT_BURST, LiveLifecycleCase, LiveLifecycleCaseObservation,
+    LiveLifecycleCaseResult, LiveLifecycleCheckpoint, LiveLifecycleEnvironment,
+    LiveLifecycleFanAutoObservation, LiveLifecycleFanAutoPair, LiveLifecycleObserved,
+    LiveLifecycleObserverAttestation, LiveLifecyclePlanError, LiveLifecyclePowerObservation,
+    LiveLifecycleProfileObservation, LiveLifecycleProgress, LiveLifecycleRebootArmObservation,
+    LiveLifecycleRebootContinuation, LiveLifecycleReport, LiveLifecycleRequest,
+    LiveLifecycleRequestError, classify_live_lifecycle_request,
+    resume_live_lifecycle_qualification, run_live_lifecycle_until_reboot,
 };
 pub use matched_workload::{
     AMBIENT_COMPARABILITY_MILLICELSIUS, CapturedMatchedWorkloadStartingConditions,
@@ -169,6 +171,7 @@ pub use promotion::{
 pub use qualification::{
     QualificationAuthorizationError, QualificationRecordV2, SupervisedEnduranceAuthorizationV1,
     write_qualification_record_after_endurance,
+    write_qualification_record_after_endurance_with_guard,
 };
 pub use requalification::{
     ABBREVIATED_RECHECKS, AbbreviatedRecheck, AbbreviatedRecheckOutcome, AbbreviatedRecheckResults,

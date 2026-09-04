@@ -80,6 +80,7 @@ impl HandoffSandbox {
             "packaging/kernel/provenance-policy.toml",
             "policy/README.md",
             "policy/qualified-envelope.example.toml",
+            "qualification/live-lifecycle-harness.md",
             "qualification/preflight-baseline-harness.md",
             "schemas/candidate-identity-v1.json",
             "schemas/package-provenance-v1.json",

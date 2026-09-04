@@ -24,26 +24,30 @@ use fan_control_core::{
     CalibrationLevelObservation, CalibrationStep, CapturedBaselineStartingConditions,
     CapturedMatchedWorkloadStartingConditions, CompatibilityObservation,
     ConservativeFanCalibration, EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceTimestamp,
-    Fan, FanCalibrationEvidence, FanHoldObservation, FileAccess, FirmwareAutoBaselineEnvironment,
-    FirmwareAutoBaselinePlan, MatchedWorkloadEnvironment, MatchedWorkloadFanRestoration,
-    MatchedWorkloadObservation, MatchedWorkloadPlan, MatchedWorkloadTachometerCalibrations,
-    NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, PlatformError,
-    PlatformErrorKind, PreflightArtifact, PreflightEnvironment, PreflightInputs,
-    PreflightRequirements, ProtectedFileRequirement, QUALIFICATION_RECORD_PATH,
+    Fan, FanCalibrationEvidence, FanHoldObservation, FanReadbackField, FileAccess,
+    FirmwareAutoBaselineEnvironment, FirmwareAutoBaselinePlan, LiveLifecycleCase,
+    LiveLifecycleCaseObservation, LiveLifecycleCheckpoint, LiveLifecycleEnvironment,
+    LiveLifecycleFanAutoObservation, LiveLifecycleObserved, LiveLifecycleProgress,
+    LiveLifecycleRebootArmObservation, LiveLifecycleRebootContinuation, MatchedWorkloadEnvironment,
+    MatchedWorkloadFanRestoration, MatchedWorkloadObservation, MatchedWorkloadPlan,
+    MatchedWorkloadTachometerCalibrations, NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind,
+    NvmlGpuSample, PlatformError, PlatformErrorKind, PreflightArtifact, PreflightEnvironment,
+    PreflightInputs, PreflightRequirements, ProtectedFileRequirement, QUALIFICATION_RECORD_PATH,
     QualificationEnvelopeIdentityV1, RestorationOutcome, RootOwnedQualificationRecordAccess,
     RunOutcomeStatus, SUPERVISED_ENDURANCE_WORKLOAD_ID, ShutdownRequest, StartupStatus,
-    SupervisedEnduranceEnvironment, SupervisedEndurancePlan,
+    SupervisedEnduranceEnvironment, SupervisedEnduranceFanContainment, SupervisedEndurancePlan,
     SupervisedEnduranceProcessStopConfirmation, SupervisedEnduranceSegment,
     SupervisedEnduranceSegmentConfirmation, SystemOwnershipPlatform, TelemetrySampleEvidence,
     TerminationSignalHandlers, WorkloadEvidence, discover_acer_hwmon, parse_compatibility_v1,
-    parse_evidence_v2, path_has_extended_acl, run_firmware_auto_baseline,
-    run_matched_custom_workload, run_read_only_preflight, run_supervised_endurance,
-    validate_firmware_auto_baseline_resume, validate_matched_workload_plan,
-    validate_qualification_evidence_v2, validate_root_owned_output_destination,
-    validate_root_owned_protected_file, write_qualification_record_after_endurance,
+    parse_evidence_v2, path_has_extended_acl, resume_live_lifecycle_qualification,
+    run_firmware_auto_baseline, run_live_lifecycle_until_reboot, run_matched_custom_workload,
+    run_read_only_preflight, run_supervised_endurance, validate_firmware_auto_baseline_resume,
+    validate_matched_workload_plan, validate_qualification_evidence_v2,
+    validate_root_owned_output_destination, validate_root_owned_protected_file,
+    write_qualification_record_after_endurance_with_guard, write_root_owned_bytes_atomically,
     write_root_owned_evidence_atomically,
 };
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -55,6 +59,7 @@ static TEST_HARNESS_INVOKE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EndurancePlanManifest {
+    qualification_harness_sha256: String,
     preflight: PathBuf,
     baselines: Vec<PathBuf>,
     matched_workload_runs: Vec<PathBuf>,
@@ -66,6 +71,7 @@ struct EndurancePlanManifest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QualificationStagesManifest {
+    qualification_harness_sha256: String,
     qualification_envelope: QualificationEnvelopeIdentityV1,
     compatibility: PathBuf,
     config: PathBuf,
@@ -150,6 +156,14 @@ struct HarnessConfirmation {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct HarnessObserverConfirmation {
+    observer_present: bool,
+    confirmed: bool,
+    observed_at: EvidenceTimestamp,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HarnessStartedWorkload {
     observer_present: bool,
     started_at: EvidenceTimestamp,
@@ -158,6 +172,7 @@ struct HarnessStartedWorkload {
 struct Arguments {
     manifest: PathBuf,
     harness: PathBuf,
+    observer_approval: String,
     evidence_output: PathBuf,
     qualification_record: PathBuf,
 }
@@ -203,13 +218,17 @@ fn run() -> Result<(), Box<dyn Error>> {
     if command == "matched-workload" {
         return matched_workload_command(remaining);
     }
+    if command == "live-lifecycle" {
+        return live_lifecycle_command(remaining);
+    }
     if command != "supervised-endurance" {
         return Err(format!("unknown qualification command: {command}").into());
     }
     if remaining.first().is_some_and(|value| value == "--help") {
         println!(
             "usage: fan-control-qualify supervised-endurance --manifest FILE --harness FILE \
-             --evidence-output FILE [--qualification-record FILE]"
+             --observer-approval {OBSERVER_APPROVAL} --evidence-output FILE \
+             [--qualification-record FILE]"
         );
         return Ok(());
     }
@@ -225,20 +244,74 @@ fn run() -> Result<(), Box<dyn Error>> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let arguments = parse_arguments(remaining.into_iter())?;
+    require_observer_approval(&arguments.observer_approval)?;
     validate_root_owned_output_destination(&arguments.evidence_output)?;
     validate_root_owned_output_destination(&arguments.qualification_record)?;
     validate_protected_executable(&arguments.harness)?;
     let manifest: EndurancePlanManifest =
         serde_json::from_str(&read_protected_file(&arguments.manifest)?)?;
+    require_harness_digest(&arguments.harness, &manifest.qualification_harness_sha256)?;
+    reject_residual_lifecycle_checkpoint(&manifest.live_lifecycle)?;
     let preflight = read_evidence(&manifest.preflight)?;
     let baselines = read_evidence_set(&manifest.baselines)?;
     let matched_runs = read_evidence_set(&manifest.matched_workload_runs)?;
     let cpu_calibration = read_evidence(&manifest.cpu_calibration)?;
     let gpu_calibration = read_evidence(&manifest.gpu_calibration)?;
     let live_lifecycle = read_evidence(&manifest.live_lifecycle)?;
+    let calibration_prerequisite_paths = std::iter::once(manifest.preflight.as_path())
+        .chain(manifest.baselines.iter().map(PathBuf::as_path))
+        .collect::<Vec<_>>();
+    let calibration_binding_sha256 =
+        lifecycle_prerequisite_binding_sha256(&calibration_prerequisite_paths)?;
+    for (fan, record) in [
+        (EvidenceFan::Cpu, &cpu_calibration),
+        (EvidenceFan::Gpu, &gpu_calibration),
+    ] {
+        if record.prerequisite_binding_sha256.as_deref()
+            != Some(calibration_binding_sha256.as_str())
+            || record
+                .calibration
+                .as_slice()
+                .first()
+                .is_none_or(|calibration| calibration.fan != fan)
+        {
+            return Err(
+                format!("{fan:?} calibration is bound to substituted prerequisites").into(),
+            );
+        }
+    }
+    let prerequisite_paths = std::iter::once(manifest.preflight.as_path())
+        .chain(manifest.baselines.iter().map(PathBuf::as_path))
+        .chain([
+            manifest.cpu_calibration.as_path(),
+            manifest.gpu_calibration.as_path(),
+        ])
+        .chain(manifest.matched_workload_runs.iter().map(PathBuf::as_path))
+        .collect::<Vec<_>>();
+    let lifecycle_binding_sha256 = lifecycle_prerequisite_binding_sha256(&prerequisite_paths)?;
+    if live_lifecycle.prerequisite_binding_sha256.as_deref()
+        != Some(lifecycle_binding_sha256.as_str())
+    {
+        return Err("live lifecycle evidence is bound to a substituted prerequisite set".into());
+    }
+    require_endurance_prerequisite_sequence(
+        &preflight,
+        &baselines,
+        &cpu_calibration,
+        &gpu_calibration,
+        &matched_runs,
+        &live_lifecycle,
+    )?;
     let baseline_refs = baselines.iter().collect::<Vec<_>>();
     let matched_refs = matched_runs.iter().collect::<Vec<_>>();
+    let endurance_prerequisite_paths = prerequisite_paths
+        .into_iter()
+        .chain(std::iter::once(manifest.live_lifecycle.as_path()))
+        .collect::<Vec<_>>();
+    let prerequisite_binding_sha256 =
+        lifecycle_prerequisite_binding_sha256(&endurance_prerequisite_paths)?;
     let plan = SupervisedEndurancePlan {
+        prerequisite_binding_sha256,
         preflight: &preflight,
         baselines: &baseline_refs,
         matched_workload_runs: &matched_refs,
@@ -260,13 +333,30 @@ fn run() -> Result<(), Box<dyn Error>> {
             starting_gpu_millicelsius: 0,
         },
     };
-    let mut environment = HarnessEnvironment::new(arguments.harness)?;
+    let shutdown = ShutdownRequest::new();
+    let _signal_handlers = TerminationSignalHandlers::install(shutdown.clone())?;
+    let mut environment = HarnessEnvironment::new_control(arguments.harness, shutdown.clone())?;
+    confirm_endurance_fan_endpoints(&mut environment, &live_lifecycle)?;
     let report = run_supervised_endurance(&mut environment, &plan)?;
-    write_qualification_record_after_endurance(
+    if shutdown.is_requested() {
+        return Err(
+            "termination signal received after endurance cleanup; authorization withheld".into(),
+        );
+    }
+    require_endurance_prerequisite_sequence(
+        &preflight,
+        &baselines,
+        &cpu_calibration,
+        &gpu_calibration,
+        &matched_runs,
+        &live_lifecycle,
+    )?;
+    write_qualification_record_after_endurance_with_guard(
         &arguments.qualification_record,
         &arguments.evidence_output,
         &plan,
         &report,
+        || shutdown.try_commit_publication(),
     )?;
     println!(
         "supervised endurance passed; authorization published at {}",
@@ -284,6 +374,7 @@ fn preflight_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> {
     let arguments = parse_stage_arguments(values)?;
     validate_protected_executable(&arguments.harness)?;
     let manifest = read_stages_manifest(&arguments.manifest)?;
+    require_harness_digest(&arguments.harness, &manifest.qualification_harness_sha256)?;
     let output = manifest.evidence_root.join("preflight.json");
     validate_root_owned_output_destination(&output)?;
     let mut harness = HarnessEnvironment::new(arguments.harness)?;
@@ -318,6 +409,7 @@ fn firmware_auto_baselines_command(values: Vec<OsString>) -> Result<(), Box<dyn 
     let arguments = parse_stage_arguments(values)?;
     validate_protected_executable(&arguments.harness)?;
     let manifest = read_stages_manifest(&arguments.manifest)?;
+    require_harness_digest(&arguments.harness, &manifest.qualification_harness_sha256)?;
     let preflight_path = manifest.evidence_root.join("preflight.json");
     let preflight_source = read_protected_file(&preflight_path)?;
     let preflight = parse_evidence_v2(&preflight_source)?;
@@ -434,23 +526,33 @@ fn fan_calibration_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> 
     require_observer_approval(&arguments.supervised.observer_approval)?;
     validate_protected_executable(&arguments.supervised.stage.harness)?;
     let manifest = read_stages_manifest(&arguments.supervised.stage.manifest)?;
+    require_harness_digest(
+        &arguments.supervised.stage.harness,
+        &manifest.qualification_harness_sha256,
+    )?;
     let mut read_only_harness =
         HarnessEnvironment::new(arguments.supervised.stage.harness.clone())?;
     read_only_harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
     let (_, baselines) = load_custom_prerequisites(&manifest, &read_only_harness)?;
+    let calibration_binding_sha256 = calibration_prerequisite_binding_sha256(&manifest)?;
 
     let output = manifest
         .evidence_root
         .join(format!("{}-calibration.json", arguments.fan.name()));
     if output.exists() {
         let record = read_evidence(&output)?;
-        require_calibration_record(&manifest, &record, arguments.fan)?;
+        require_calibration_record(
+            &manifest,
+            &record,
+            arguments.fan,
+            &calibration_binding_sha256,
+        )?;
         require_calibration_after_baselines(&record, &baselines)?;
         if arguments.fan == Fan::Gpu {
             let cpu = read_evidence(&manifest.evidence_root.join("cpu-calibration.json"))?;
-            require_calibration_record(&manifest, &cpu, Fan::Cpu)?;
+            require_calibration_record(&manifest, &cpu, Fan::Cpu, &calibration_binding_sha256)?;
             require_calibration_after_baselines(&cpu, &baselines)?;
-            if record.started_at.wall_unix_millis < cpu.completed_at.wall_unix_millis {
+            if record.started_at.wall_unix_millis <= cpu.completed_at.wall_unix_millis {
                 return Err("GPU calibration predates CPU calibration completion; start a new protected evidence directory".into());
             }
         }
@@ -462,7 +564,7 @@ fn fan_calibration_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> 
     }
     if arguments.fan == Fan::Gpu {
         let cpu = read_evidence(&manifest.evidence_root.join("cpu-calibration.json"))?;
-        require_calibration_record(&manifest, &cpu, Fan::Cpu)?;
+        require_calibration_record(&manifest, &cpu, Fan::Cpu, &calibration_binding_sha256)?;
         require_calibration_after_baselines(&cpu, &baselines)?;
     }
     validate_root_owned_output_destination(&output)?;
@@ -518,7 +620,7 @@ fn fan_calibration_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> 
     restore_calibration_fans(&harness)?;
     let calibration = run_result?;
 
-    let record: EvidenceRecord = harness.invoke_cleanup(
+    let mut record: EvidenceRecord = harness.invoke_cleanup(
         "finalize-fan-calibration",
         json!({
             "fan": fan_name,
@@ -527,7 +629,13 @@ fn fan_calibration_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> 
         }),
         harness.deadline(5_000),
     )?;
-    require_calibration_record(&manifest, &record, arguments.fan)?;
+    record.prerequisite_binding_sha256 = Some(calibration_binding_sha256.clone());
+    require_calibration_record(
+        &manifest,
+        &record,
+        arguments.fan,
+        &calibration_binding_sha256,
+    )?;
     if record.calibration.as_slice() != [calibration] {
         return Err("calibration evidence does not exactly match the validated protocol".into());
     }
@@ -690,16 +798,32 @@ fn matched_workload_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>>
     require_observer_approval(&arguments.observer_approval)?;
     validate_protected_executable(&arguments.stage.harness)?;
     let manifest = read_stages_manifest(&arguments.stage.manifest)?;
+    require_harness_digest(
+        &arguments.stage.harness,
+        &manifest.qualification_harness_sha256,
+    )?;
     let mut read_only_harness = HarnessEnvironment::new(arguments.stage.harness.clone())?;
     read_only_harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
     let (preflight, baselines) = load_custom_prerequisites(&manifest, &read_only_harness)?;
     let cpu_calibration = read_evidence(&manifest.evidence_root.join("cpu-calibration.json"))?;
     let gpu_calibration = read_evidence(&manifest.evidence_root.join("gpu-calibration.json"))?;
-    require_calibration_record(&manifest, &cpu_calibration, Fan::Cpu)?;
-    require_calibration_record(&manifest, &gpu_calibration, Fan::Gpu)?;
+    let calibration_binding_sha256 = calibration_prerequisite_binding_sha256(&manifest)?;
+    require_calibration_record(
+        &manifest,
+        &cpu_calibration,
+        Fan::Cpu,
+        &calibration_binding_sha256,
+    )?;
+    require_calibration_record(
+        &manifest,
+        &gpu_calibration,
+        Fan::Gpu,
+        &calibration_binding_sha256,
+    )?;
     require_calibration_after_baselines(&cpu_calibration, &baselines)?;
     require_calibration_after_baselines(&gpu_calibration, &baselines)?;
-    if gpu_calibration.started_at.wall_unix_millis < cpu_calibration.completed_at.wall_unix_millis {
+    if gpu_calibration.started_at.wall_unix_millis <= cpu_calibration.completed_at.wall_unix_millis
+    {
         return Err("GPU calibration predates CPU calibration completion; start a new protected evidence directory".into());
     }
 
@@ -728,7 +852,7 @@ fn matched_workload_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>>
         }
         let record = read_evidence(&path)?;
         require_recent_stage(&record, &preflight, "matched workload")?;
-        if record.started_at.wall_unix_millis < previous_stage_completed_at {
+        if record.started_at.wall_unix_millis <= previous_stage_completed_at {
             return Err(format!(
                 "{} predates its prerequisite stage; start a new protected evidence directory",
                 path.display()
@@ -788,7 +912,7 @@ fn matched_workload_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>>
 
     let shutdown = ShutdownRequest::new();
     let _signal_handlers = TerminationSignalHandlers::install(shutdown.clone())?;
-    let mut harness = HarnessEnvironment::new_control(arguments.stage.harness, shutdown)?;
+    let mut harness = HarnessEnvironment::new_control(arguments.stage.harness, shutdown.clone())?;
     harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
     let workload_id = required_baselines()[spec.baseline_index].workload_id;
     println!(
@@ -822,6 +946,293 @@ fn matched_workload_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>>
         println!("all 12 matched Firmware-Auto-vs-Custom stages passed");
     }
     Ok(())
+}
+
+fn live_lifecycle_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> {
+    if values.iter().any(|value| value == "--help") {
+        println!(
+            "usage: pt31553-fan-qualify live-lifecycle --manifest FILE --harness FILE \
+             --observer-approval {OBSERVER_APPROVAL}\nRun once through suspend/resume, reboot normally when prompted, then rerun with fresh approval."
+        );
+        return Ok(());
+    }
+    require_root("live lifecycle")?;
+    let (arguments, extra) = parse_supervised_stage_arguments(values, &[])?;
+    debug_assert!(extra.is_empty());
+    require_observer_approval(&arguments.observer_approval)?;
+    validate_protected_executable(&arguments.stage.harness)?;
+    let manifest = read_stages_manifest(&arguments.stage.manifest)?;
+    require_harness_digest(
+        &arguments.stage.harness,
+        &manifest.qualification_harness_sha256,
+    )?;
+    let output = manifest.evidence_root.join("live-lifecycle.json");
+    let checkpoint_path = manifest
+        .evidence_root
+        .join("live-lifecycle-checkpoint.json");
+    let mut read_only_harness = HarnessEnvironment::new(arguments.stage.harness.clone())?;
+    read_only_harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
+    let (preflight, baselines) = load_custom_prerequisites(&manifest, &read_only_harness)?;
+    let cpu_calibration = read_evidence(&manifest.evidence_root.join("cpu-calibration.json"))?;
+    let gpu_calibration = read_evidence(&manifest.evidence_root.join("gpu-calibration.json"))?;
+    let matched = load_completed_matched_sequence(
+        &manifest,
+        &preflight,
+        &baselines,
+        &cpu_calibration,
+        &gpu_calibration,
+    )?;
+    let prerequisites_completed_at = matched
+        .last()
+        .expect("the exact 12-stage sequence is required")
+        .completed_at
+        .wall_unix_millis;
+    let prerequisite_paths = lifecycle_prerequisite_paths(&manifest);
+    let prerequisite_path_refs = prerequisite_paths
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    let prerequisite_binding_sha256 =
+        lifecycle_prerequisite_binding_sha256(&prerequisite_path_refs)?;
+    if output.exists() {
+        let record = read_evidence(&output)?;
+        require_recent_lifecycle(&manifest, &record)?;
+        if record.started_at.wall_unix_millis <= prerequisites_completed_at {
+            return Err("live lifecycle predates the matched workload sequence".into());
+        }
+        if record.prerequisite_binding_sha256.as_deref()
+            != Some(prerequisite_binding_sha256.as_str())
+        {
+            return Err("live lifecycle evidence is bound to substituted prerequisites".into());
+        }
+        if checkpoint_path.exists() {
+            let checkpoint: LiveLifecycleCheckpoint =
+                serde_json::from_str(&read_protected_file(&checkpoint_path)?)?;
+            reject_future_serialized_timestamps(&checkpoint, "live lifecycle checkpoint")?;
+            checkpoint.validate()?;
+            require_fresh_wall_time(
+                checkpoint.started_at().wall_unix_millis,
+                "live lifecycle checkpoint",
+            )?;
+            if !checkpoint.matches_completed_record_prefix(&record) {
+                return Err(
+                    "accepted lifecycle evidence does not match its residual reboot checkpoint"
+                        .into(),
+                );
+            }
+            remove_lifecycle_checkpoint(&checkpoint_path)?;
+        }
+        println!("RESUME live lifecycle: complete matching evidence");
+        return Ok(());
+    }
+
+    validate_root_owned_output_destination(&output)?;
+    let shutdown = ShutdownRequest::new();
+    let _signal_handlers = TerminationSignalHandlers::install(shutdown.clone())?;
+    let mut harness = HarnessEnvironment::new_control(arguments.stage.harness, shutdown.clone())?;
+    harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
+
+    let report = if checkpoint_path.exists() {
+        let checkpoint: LiveLifecycleCheckpoint =
+            serde_json::from_str(&read_protected_file(&checkpoint_path)?)?;
+        reject_future_serialized_timestamps(&checkpoint, "live lifecycle checkpoint")?;
+        if checkpoint.prerequisite_binding_sha256() != prerequisite_binding_sha256 {
+            return Err("lifecycle checkpoint prerequisite evidence was substituted".into());
+        }
+        if checkpoint.envelope() != &manifest.qualification_envelope {
+            return Err("lifecycle checkpoint belongs to another qualification identity".into());
+        }
+        let checkpoint_started_at = checkpoint.started_at().wall_unix_millis;
+        require_fresh_wall_time(checkpoint_started_at, "live lifecycle checkpoint")?;
+        if checkpoint_started_at <= prerequisites_completed_at {
+            return Err("lifecycle checkpoint predates the matched workload sequence".into());
+        }
+        println!("RESUME live lifecycle after reboot: observer approved");
+        resume_live_lifecycle_qualification(&mut harness, checkpoint)?
+    } else {
+        validate_root_owned_output_destination(&checkpoint_path)?;
+        println!("START live lifecycle through suspend/resume: observer approved");
+        match run_live_lifecycle_until_reboot(
+            &mut harness,
+            &manifest.qualification_envelope,
+            &prerequisite_binding_sha256,
+            preflight
+                .fan_endpoint_identities
+                .as_ref()
+                .expect("custom prerequisites require complete fan endpoint identities"),
+        )? {
+            LiveLifecycleProgress::AwaitingReboot(checkpoint) => {
+                if shutdown.is_requested() {
+                    return Err(
+                        "termination signal received before lifecycle checkpoint publication"
+                            .into(),
+                    );
+                }
+                let bytes = serde_json::to_vec_pretty(&checkpoint)?;
+                write_root_owned_bytes_atomically(&checkpoint_path, &bytes)?;
+                if shutdown.is_requested() {
+                    remove_lifecycle_checkpoint(&checkpoint_path)?;
+                    return Err(
+                        "termination signal received during lifecycle checkpoint publication"
+                            .into(),
+                    );
+                }
+                println!(
+                    "PAUSE live lifecycle: Firmware Auto confirmed; reboot normally, then rerun with fresh observer approval; checkpoint: {}",
+                    checkpoint_path.display()
+                );
+                return Ok(());
+            }
+            LiveLifecycleProgress::Complete(report) => *report,
+        }
+    };
+    let accepted = report.accepted();
+    let record = report.into_record();
+    record.validate()?;
+    if record.started_at.wall_unix_millis <= prerequisites_completed_at {
+        return Err("live lifecycle predates the matched workload sequence".into());
+    }
+    reject_future_evidence_timestamps(&record, "live lifecycle")?;
+    if shutdown.is_requested() {
+        return Err("termination signal received before lifecycle evidence publication".into());
+    }
+    write_root_owned_evidence_atomically(&output, &record)?;
+    if shutdown.is_requested() {
+        remove_lifecycle_checkpoint(&output)?;
+        if checkpoint_path.exists() {
+            remove_lifecycle_checkpoint(&checkpoint_path)?;
+        }
+        return Err("termination signal received during lifecycle evidence publication".into());
+    }
+    if accepted && checkpoint_path.exists() {
+        remove_lifecycle_checkpoint(&checkpoint_path)?;
+    }
+    if shutdown.is_requested() {
+        remove_lifecycle_checkpoint(&output)?;
+        return Err("termination signal received while finalizing lifecycle evidence".into());
+    }
+    if !accepted {
+        return Err(format!(
+            "live lifecycle no-go: {}; final Firmware Auto confirmed={}; evidence: {}; recovery: {}",
+            record.outcome.reason,
+            record.outcome.final_firmware_auto_confirmed,
+            output.display(),
+            firmware_auto_recovery(record.outcome.final_firmware_auto_confirmed)
+        )
+        .into());
+    }
+    println!(
+        "PASS live lifecycle: all cases passed; Firmware Auto reconfirmed; evidence: {}",
+        output.display()
+    );
+    Ok(())
+}
+
+fn remove_lifecycle_checkpoint(checkpoint_path: &Path) -> Result<(), Box<dyn Error>> {
+    fs::remove_file(checkpoint_path)?;
+    fs::File::open(
+        checkpoint_path
+            .parent()
+            .ok_or("lifecycle checkpoint has no parent directory")?,
+    )?
+    .sync_all()?;
+    Ok(())
+}
+
+fn reject_residual_lifecycle_checkpoint(live_lifecycle_path: &Path) -> Result<(), Box<dyn Error>> {
+    let checkpoint_path = live_lifecycle_path.with_file_name("live-lifecycle-checkpoint.json");
+    if checkpoint_path.exists() {
+        return Err(format!(
+            "live lifecycle reboot checkpoint remains at {}; rerun live-lifecycle cleanup before endurance",
+            checkpoint_path.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn load_completed_matched_sequence(
+    manifest: &QualificationStagesManifest,
+    preflight: &EvidenceRecord,
+    baselines: &[EvidenceRecord],
+    cpu_calibration: &EvidenceRecord,
+    gpu_calibration: &EvidenceRecord,
+) -> Result<Vec<EvidenceRecord>, Box<dyn Error>> {
+    let calibration_binding_sha256 = calibration_prerequisite_binding_sha256(manifest)?;
+    require_calibration_record(
+        manifest,
+        cpu_calibration,
+        Fan::Cpu,
+        &calibration_binding_sha256,
+    )?;
+    require_calibration_record(
+        manifest,
+        gpu_calibration,
+        Fan::Gpu,
+        &calibration_binding_sha256,
+    )?;
+    require_calibration_after_baselines(cpu_calibration, baselines)?;
+    require_calibration_after_baselines(gpu_calibration, baselines)?;
+    if gpu_calibration.started_at.wall_unix_millis <= cpu_calibration.completed_at.wall_unix_millis
+    {
+        return Err("GPU calibration predates CPU calibration completion".into());
+    }
+    let specs = matched_stage_specs();
+    let mut completed = Vec::with_capacity(specs.len());
+    let mut previous_completed_at = gpu_calibration.completed_at.wall_unix_millis;
+    for (position, spec) in specs.iter().enumerate() {
+        let path = matched_output_path(manifest, position, spec);
+        let record = read_evidence(&path).map_err(|error| {
+            format!(
+                "required matched stage {} is missing or invalid: {error}",
+                position + 1
+            )
+        })?;
+        require_recent_stage(&record, preflight, "matched workload")?;
+        if record.started_at.wall_unix_millis <= previous_completed_at {
+            return Err(format!("matched stage {} predates its prerequisite", position + 1).into());
+        }
+        let mut same_baseline = completed
+            .iter()
+            .enumerate()
+            .filter(|(prior, _)| specs[*prior].baseline_index == spec.baseline_index)
+            .map(|(_, record)| record)
+            .collect::<Vec<_>>();
+        same_baseline.push(&record);
+        validate_matched_workload_plan(&MatchedWorkloadPlan {
+            baseline: &baselines[spec.baseline_index],
+            previous_passing_runs: &same_baseline,
+            tachometer_calibrations: MatchedWorkloadTachometerCalibrations {
+                cpu: cpu_calibration,
+                gpu: gpu_calibration,
+            },
+        })?;
+        let repeat_required =
+            spec.run == 1 && required_baselines()[spec.baseline_index].workload != "idle";
+        if record.outcome.another_passing_run_required != repeat_required {
+            return Err(format!("matched stage {} has wrong repeat decision", position + 1).into());
+        }
+        previous_completed_at = record.completed_at.wall_unix_millis;
+        completed.push(record);
+    }
+    Ok(completed)
+}
+
+fn require_recent_lifecycle(
+    manifest: &QualificationStagesManifest,
+    record: &EvidenceRecord,
+) -> Result<(), Box<dyn Error>> {
+    record.validate()?;
+    if record.stage != "live-lifecycle"
+        || record.qualification_envelope != manifest.qualification_envelope
+        || record.outcome.status != RunOutcomeStatus::Passed
+        || record.outcome.another_passing_run_required
+        || !record.outcome.final_firmware_auto_confirmed
+    {
+        return Err("live lifecycle evidence is incomplete, failed, or substituted".into());
+    }
+    require_fresh_wall_time(record.completed_at.wall_unix_millis, "live lifecycle")?;
+    reject_future_evidence_timestamps(record, "live lifecycle")
 }
 
 fn firmware_auto_recovery(confirmed: bool) -> &'static str {
@@ -950,6 +1361,56 @@ fn read_stages_manifest(path: &Path) -> Result<QualificationStagesManifest, Box<
     Ok(manifest)
 }
 
+fn require_harness_digest(path: &Path, expected: &str) -> Result<(), Box<dyn Error>> {
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("manifest qualification_harness_sha256 must be lowercase SHA-256".into());
+    }
+    let actual = format!("{:x}", Sha256::digest(fs::read(path)?));
+    if actual != expected {
+        return Err("qualification harness does not match the protected manifest digest".into());
+    }
+    Ok(())
+}
+
+fn confirm_endurance_fan_endpoints(
+    environment: &mut HarnessEnvironment,
+    lifecycle: &EvidenceRecord,
+) -> Result<(), Box<dyn Error>> {
+    let expected = lifecycle
+        .readbacks
+        .get(lifecycle.readbacks.len().saturating_sub(2)..)
+        .ok_or("live lifecycle terminal fan identities are missing")?;
+    for (fan, expected) in [
+        (EvidenceFan::Cpu, &expected[0]),
+        (EvidenceFan::Gpu, &expected[1]),
+    ] {
+        if expected.fan != fan || expected.field != FanReadbackField::Enable {
+            return Err("live lifecycle terminal fan identities are malformed".into());
+        }
+        let requested_at = environment.timestamp_now();
+        let observed = environment.confirm_endurance_firmware_auto(fan)?;
+        let completed_at = environment.timestamp_now();
+        if !observed.fresh
+            || observed.enable_readback != Some(2)
+            || observed.endpoint_identity != expected.endpoint_identity
+            || observed.observed_at.monotonic_millis < requested_at.monotonic_millis
+            || observed.observed_at.wall_unix_millis < requested_at.wall_unix_millis
+            || observed.observed_at.monotonic_millis > completed_at.monotonic_millis
+            || observed.observed_at.wall_unix_millis > completed_at.wall_unix_millis
+        {
+            return Err(format!(
+                "{fan:?} fan endpoint or Firmware Auto state changed before endurance"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn load_custom_prerequisites(
     manifest: &QualificationStagesManifest,
     harness: &HarnessEnvironment,
@@ -974,6 +1435,7 @@ fn load_custom_prerequisites(
     let preflight_binding_sha256 = evidence_source_sha256(&preflight_source);
     let mut platform = SystemOwnershipPlatform::new();
     let mut baselines = Vec::new();
+    let mut previous_completed_at = preflight.completed_at.wall_unix_millis;
     for (index, spec) in required_baselines().iter().enumerate() {
         let path =
             manifest
@@ -981,6 +1443,13 @@ fn load_custom_prerequisites(
                 .join(format!("{:02}-{}.json", index + 1, spec.workload_id));
         let record = read_evidence(&path)?;
         require_recent_stage(&record, &preflight, spec.workload_id)?;
+        if record.started_at.wall_unix_millis <= previous_completed_at {
+            return Err(format!(
+                "required Firmware Auto baseline {} predates its canonical prerequisite",
+                path.display()
+            )
+            .into());
+        }
         let workload = WorkloadEvidence {
             workload_id: spec.workload_id.into(),
             command: vec![
@@ -1008,6 +1477,7 @@ fn load_custom_prerequisites(
                 path.display()
             )
         })?;
+        previous_completed_at = record.completed_at.wall_unix_millis;
         baselines.push(record);
     }
     Ok((preflight, baselines))
@@ -1017,6 +1487,7 @@ fn require_calibration_record(
     manifest: &QualificationStagesManifest,
     record: &EvidenceRecord,
     fan: Fan,
+    prerequisite_binding_sha256: &str,
 ) -> Result<(), Box<dyn Error>> {
     record.validate()?;
     let evidence_fan = match fan {
@@ -1028,6 +1499,7 @@ fn require_calibration_record(
         || record.outcome.status != RunOutcomeStatus::Passed
         || record.outcome.another_passing_run_required
         || !record.outcome.final_firmware_auto_confirmed
+        || record.prerequisite_binding_sha256.as_deref() != Some(prerequisite_binding_sha256)
         || record.calibration.len() != 1
         || record.calibration[0].fan != evidence_fan
     {
@@ -1050,7 +1522,7 @@ fn require_calibration_after_baselines(
         .map(|baseline| baseline.completed_at.wall_unix_millis)
         .max()
         .ok_or("all seven Firmware Auto baselines are required")?;
-    if record.started_at.wall_unix_millis < latest {
+    if record.started_at.wall_unix_millis <= latest {
         return Err("calibration predates a required Firmware Auto baseline; start a new protected evidence directory".into());
     }
     Ok(())
@@ -1235,7 +1707,7 @@ fn require_recent_stage(
     preflight: &EvidenceRecord,
     label: &str,
 ) -> Result<(), Box<dyn Error>> {
-    if record.started_at.wall_unix_millis < preflight.completed_at.wall_unix_millis {
+    if record.started_at.wall_unix_millis <= preflight.completed_at.wall_unix_millis {
         return Err(format!("{label} predates the required preflight").into());
     }
     require_fresh_wall_time(record.completed_at.wall_unix_millis, label)?;
@@ -1246,19 +1718,71 @@ fn reject_future_evidence_timestamps(
     record: &EvidenceRecord,
     label: &str,
 ) -> Result<(), Box<dyn Error>> {
+    reject_future_serialized_timestamps(record, label)
+}
+
+fn reject_future_serialized_timestamps<T: Serialize>(
+    value: &T,
+    label: &str,
+) -> Result<(), Box<dyn Error>> {
     let now: i64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system wall clock is before the Unix epoch")?
         .as_millis()
         .try_into()
         .map_err(|_| "system wall clock does not fit evidence timestamps")?;
-    let value = serde_json::to_value(record)?;
+    let value = serde_json::to_value(value)?;
     let mut timestamps = Vec::new();
     collect_wall_timestamps(&value, &mut timestamps);
     if timestamps.into_iter().any(|timestamp| timestamp > now) {
         return Err(format!("{label} contains a future evidence timestamp").into());
     }
     Ok(())
+}
+
+fn lifecycle_prerequisite_paths(manifest: &QualificationStagesManifest) -> Vec<PathBuf> {
+    let mut paths = vec![manifest.evidence_root.join("preflight.json")];
+    paths.extend(
+        required_baselines()
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| {
+                manifest
+                    .evidence_root
+                    .join(format!("{:02}-{}.json", index + 1, spec.workload_id))
+            }),
+    );
+    paths.push(manifest.evidence_root.join("cpu-calibration.json"));
+    paths.push(manifest.evidence_root.join("gpu-calibration.json"));
+    paths.extend(
+        matched_stage_specs()
+            .iter()
+            .enumerate()
+            .map(|(position, spec)| matched_output_path(manifest, position, spec)),
+    );
+    paths
+}
+
+fn calibration_prerequisite_binding_sha256(
+    manifest: &QualificationStagesManifest,
+) -> Result<String, Box<dyn Error>> {
+    let paths = lifecycle_prerequisite_paths(manifest);
+    let prerequisite_paths = paths
+        .iter()
+        .take(1 + required_baselines().len())
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    lifecycle_prerequisite_binding_sha256(&prerequisite_paths)
+}
+
+fn lifecycle_prerequisite_binding_sha256(paths: &[&Path]) -> Result<String, Box<dyn Error>> {
+    let mut digest = Sha256::new();
+    for path in paths {
+        let source = read_protected_file(path)?;
+        digest.update((source.len() as u64).to_be_bytes());
+        digest.update(source.as_bytes());
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn collect_wall_timestamps(value: &Value, timestamps: &mut Vec<i64>) {
@@ -1287,6 +1811,10 @@ fn require_fresh_wall_time(timestamp: i64, label: &str) -> Result<(), Box<dyn Er
         .as_millis()
         .try_into()
         .map_err(|_| "system wall clock does not fit evidence timestamps")?;
+    require_fresh_wall_time_at(timestamp, label, now)
+}
+
+fn require_fresh_wall_time_at(timestamp: i64, label: &str, now: i64) -> Result<(), Box<dyn Error>> {
     let age = now
         .checked_sub(timestamp)
         .ok_or_else(|| format!("{label} timestamp is in the future"))?;
@@ -1447,6 +1975,7 @@ fn validate_records(mut values: impl Iterator<Item = OsString>) -> Result<(), Bo
 fn parse_arguments(mut values: impl Iterator<Item = String>) -> Result<Arguments, Box<dyn Error>> {
     let mut manifest = None;
     let mut harness = None;
+    let mut observer_approval = None;
     let mut evidence_output = None;
     let mut qualification_record = PathBuf::from(QUALIFICATION_RECORD_PATH);
     while let Some(flag) = values.next() {
@@ -1456,6 +1985,7 @@ fn parse_arguments(mut values: impl Iterator<Item = String>) -> Result<Arguments
         match flag.as_str() {
             "--manifest" => manifest = Some(value.into()),
             "--harness" => harness = Some(value.into()),
+            "--observer-approval" => observer_approval = Some(value),
             "--evidence-output" => evidence_output = Some(value.into()),
             "--qualification-record" => qualification_record = value.into(),
             _ => return Err(format!("unknown argument: {flag}").into()),
@@ -1464,6 +1994,7 @@ fn parse_arguments(mut values: impl Iterator<Item = String>) -> Result<Arguments
     Ok(Arguments {
         manifest: manifest.ok_or("--manifest is required")?,
         harness: harness.ok_or("--harness is required")?,
+        observer_approval: observer_approval.ok_or("--observer-approval is required")?,
         evidence_output: evidence_output.ok_or("--evidence-output is required")?,
         qualification_record,
     })
@@ -1471,6 +2002,82 @@ fn parse_arguments(mut values: impl Iterator<Item = String>) -> Result<Arguments
 
 fn read_evidence(path: &Path) -> Result<EvidenceRecord, Box<dyn Error>> {
     Ok(parse_evidence_v2(&read_protected_file(path)?)?)
+}
+
+fn require_endurance_prerequisite_sequence(
+    preflight: &EvidenceRecord,
+    baselines: &[EvidenceRecord],
+    cpu_calibration: &EvidenceRecord,
+    gpu_calibration: &EvidenceRecord,
+    matched_runs: &[EvidenceRecord],
+    live_lifecycle: &EvidenceRecord,
+) -> Result<(), Box<dyn Error>> {
+    let baseline_specs = required_baselines();
+    if baselines.len() != baseline_specs.len() {
+        return Err("exactly seven canonically ordered baselines are required".into());
+    }
+    for (position, (record, spec)) in baselines.iter().zip(&baseline_specs).enumerate() {
+        if record.workload.as_ref().is_none_or(|workload| {
+            workload.workload_id != spec.workload_id || workload.power_profile != spec.profile
+        }) {
+            return Err(format!(
+                "baseline position {} is not canonical {}; reordered evidence is no-go",
+                position + 1,
+                spec.workload_id
+            )
+            .into());
+        }
+    }
+
+    let matched_specs = matched_stage_specs();
+    if matched_runs.len() != matched_specs.len() {
+        return Err("exactly twelve canonically ordered matched runs are required".into());
+    }
+    for (position, (record, spec)) in matched_runs.iter().zip(&matched_specs).enumerate() {
+        let baseline = &baseline_specs[spec.baseline_index];
+        let repeat_required = spec.run == 1 && baseline.workload != "idle";
+        if record.workload.as_ref().is_none_or(|workload| {
+            workload.workload_id != baseline.workload_id
+                || workload.power_profile != baseline.profile
+        }) || record.outcome.another_passing_run_required != repeat_required
+        {
+            return Err(format!(
+                "matched run position {} is not canonical {} run {}; reordered evidence is no-go",
+                position + 1,
+                baseline.workload_id,
+                spec.run
+            )
+            .into());
+        }
+    }
+
+    let mut records = Vec::with_capacity(4 + baselines.len() + matched_runs.len());
+    records.push(("preflight", preflight));
+    records.extend(baselines.iter().map(|record| ("baseline", record)));
+    records.push(("CPU calibration", cpu_calibration));
+    records.push(("GPU calibration", gpu_calibration));
+    records.extend(
+        matched_runs
+            .iter()
+            .map(|record| ("matched workload", record)),
+    );
+    records.push(("live lifecycle", live_lifecycle));
+
+    let mut previous_completed_at = None;
+    for (label, record) in records {
+        require_fresh_wall_time(record.completed_at.wall_unix_millis, label)?;
+        reject_future_evidence_timestamps(record, label)?;
+        if previous_completed_at
+            .is_some_and(|completed| record.started_at.wall_unix_millis <= completed)
+        {
+            return Err(format!(
+                "{label} predates its exact prerequisite; partial, stale, or reordered evidence is no-go"
+            )
+            .into());
+        }
+        previous_completed_at = Some(record.completed_at.wall_unix_millis);
+    }
+    Ok(())
 }
 
 fn evidence_source_sha256(source: &str) -> String {
@@ -1558,6 +2165,17 @@ impl HarnessEnvironment {
 
     fn timestamp_now(&self) -> EvidenceTimestamp {
         system_timestamp()
+    }
+
+    fn confirm_endurance_firmware_auto(
+        &mut self,
+        fan: EvidenceFan,
+    ) -> Result<LiveLifecycleFanAutoObservation, String> {
+        self.invoke_cleanup(
+            "confirm-endurance-firmware-auto",
+            json!({ "fan": fan }),
+            self.deadline(5_000),
+        )
     }
 
     fn wait_until_deadline(&self, target: u64, deadline: u64) -> Result<(), String> {
@@ -1830,8 +2448,9 @@ fn configure_root_harness(
     if unsafe { libc::geteuid() } != 0 {
         return;
     }
-    // The harness needs read access to system identity/telemetry and workload devices, never root
-    // fan-control authority. Linux's overflow IDs are deliberately fixed and have no host files.
+    // Read-only stages drop to Linux's fixed overflow identity. Control stages retain root because
+    // their protected, digest-pinned harness contract performs the direct hardware/service changes.
+    // Both modes remain cgroup-contained and run with no_new_privs.
     unsafe {
         command.pre_exec(move || {
             let Some(cgroup_procs) = &cgroup_procs else {
@@ -2267,9 +2886,100 @@ impl FirmwareAutoBaselineEnvironment for HarnessEnvironment {
     }
 }
 
+impl LiveLifecycleEnvironment for HarnessEnvironment {
+    fn timestamp(&mut self) -> EvidenceTimestamp {
+        self.timestamp_now()
+    }
+
+    fn current_boot_id(&mut self) -> Result<String, String> {
+        fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map(|value| value.trim().to_owned())
+            .map_err(|error| format!("cannot read kernel boot identity: {error}"))
+    }
+
+    fn run_case(
+        &mut self,
+        case: LiveLifecycleCase,
+    ) -> Result<LiveLifecycleObserved<LiveLifecycleCaseObservation>, String> {
+        self.invoke(
+            "run-live-lifecycle-case",
+            json!({ "case": case, "instruction": case.instruction() }),
+            self.deadline(20 * 60 * 1_000),
+        )
+    }
+
+    fn restore_after_case(
+        &mut self,
+        case: LiveLifecycleCase,
+    ) -> Result<LiveLifecycleObserved<EvidenceTimestamp>, String> {
+        self.invoke_cleanup(
+            "restore-live-lifecycle-after-case",
+            json!({ "case": case }),
+            self.deadline(10_000),
+        )
+    }
+
+    fn resume_after_reboot(
+        &mut self,
+    ) -> Result<LiveLifecycleObserved<LiveLifecycleRebootContinuation>, String> {
+        self.invoke(
+            "resume-live-lifecycle-reboot",
+            json!({}),
+            self.deadline(30_000),
+        )
+    }
+
+    fn arm_after_reboot(
+        &mut self,
+    ) -> Result<LiveLifecycleObserved<LiveLifecycleRebootArmObservation>, String> {
+        self.invoke(
+            "arm-live-lifecycle-after-reboot",
+            json!({}),
+            self.deadline(10_000),
+        )
+    }
+
+    fn restore_after_reboot(&mut self) -> Result<LiveLifecycleObserved<EvidenceTimestamp>, String> {
+        self.invoke_cleanup(
+            "restore-live-lifecycle-after-reboot",
+            json!({}),
+            self.deadline(10_000),
+        )
+    }
+
+    fn confirm_firmware_auto(
+        &mut self,
+        fan: EvidenceFan,
+    ) -> Result<LiveLifecycleFanAutoObservation, String> {
+        self.invoke_cleanup(
+            "confirm-live-lifecycle-firmware-auto",
+            json!({ "fan": fan }),
+            self.deadline(5_000),
+        )
+    }
+}
+
 impl SupervisedEnduranceEnvironment for HarnessEnvironment {
     fn timestamp(&mut self) -> EvidenceTimestamp {
         self.timestamp_now()
+    }
+
+    fn confirm_observer(&mut self, deadline: u64) -> Result<EvidenceTimestamp, String> {
+        let requested_at = self.timestamp_now();
+        let confirmation: HarnessObserverConfirmation =
+            self.invoke("confirm-endurance-observer", json!({}), deadline)?;
+        let completed_at = self.timestamp_now();
+        if confirmation.observer_present
+            && confirmation.confirmed
+            && confirmation.observed_at.monotonic_millis >= requested_at.monotonic_millis
+            && confirmation.observed_at.wall_unix_millis >= requested_at.wall_unix_millis
+            && confirmation.observed_at.monotonic_millis <= completed_at.monotonic_millis
+            && confirmation.observed_at.wall_unix_millis <= completed_at.wall_unix_millis
+        {
+            Ok(confirmation.observed_at)
+        } else {
+            Err("protected harness did not provide a current physical-observer confirmation".into())
+        }
     }
 
     fn capture_starting_conditions(
@@ -2321,50 +3031,66 @@ impl SupervisedEnduranceEnvironment for HarnessEnvironment {
         &mut self,
         deadline: u64,
     ) -> Result<SupervisedEnduranceProcessStopConfirmation, String> {
-        self.invoke("stop-workload", json!({}), deadline)
+        self.invoke_cleanup("stop-workload", json!({}), deadline)
     }
 
     fn contain_workload(
         &mut self,
         deadline: u64,
     ) -> Result<SupervisedEnduranceProcessStopConfirmation, String> {
-        self.invoke("contain-workload", json!({}), deadline)
+        self.invoke_cleanup("contain-workload", json!({}), deadline)
     }
 
     fn force_contain_workload(
         &mut self,
         deadline: u64,
     ) -> Result<SupervisedEnduranceProcessStopConfirmation, String> {
-        self.invoke("force-contain-workload", json!({}), deadline)
+        self.invoke_cleanup("force-contain-workload", json!({}), deadline)
     }
 
     fn stop_service(
         &mut self,
         deadline: u64,
     ) -> Result<SupervisedEnduranceProcessStopConfirmation, String> {
-        self.invoke("stop-service", json!({}), deadline)
+        self.invoke_cleanup("stop-service", json!({}), deadline)
     }
 
     fn contain_service(
         &mut self,
         deadline: u64,
     ) -> Result<SupervisedEnduranceProcessStopConfirmation, String> {
-        self.invoke("contain-service", json!({}), deadline)
+        self.invoke_cleanup("contain-service", json!({}), deadline)
     }
 
     fn force_contain_service(
         &mut self,
         deadline: u64,
     ) -> Result<SupervisedEnduranceProcessStopConfirmation, String> {
-        self.invoke("force-contain-service", json!({}), deadline)
+        self.invoke_cleanup("force-contain-service", json!({}), deadline)
     }
 
     fn restore_fan(&mut self, fan: EvidenceFan, deadline: u64) -> MatchedWorkloadFanRestoration {
-        self.invoke("restore-fan", json!({ "fan": fan }), deadline)
+        self.invoke_cleanup("restore-fan", json!({ "fan": fan }), deadline)
             .unwrap_or(MatchedWorkloadFanRestoration {
                 auto_write_succeeded: false,
                 enable_readback: None,
                 endpoint_identity: "unavailable".into(),
+                outcome: RestorationOutcome::ContainmentFailed,
+            })
+    }
+
+    fn contain_fan_at_maximum(
+        &mut self,
+        fan: EvidenceFan,
+        deadline: u64,
+    ) -> SupervisedEnduranceFanContainment {
+        self.invoke_cleanup("contain-fan-maximum", json!({ "fan": fan }), deadline)
+            .unwrap_or(SupervisedEnduranceFanContainment {
+                enable_readback: None,
+                pwm_write_succeeded: false,
+                pwm_readback: None,
+                enable_endpoint_identity: "unavailable".into(),
+                pwm_endpoint_identity: "unavailable".into(),
                 outcome: RestorationOutcome::ContainmentFailed,
             })
     }
@@ -2679,20 +3405,76 @@ printf '{"deadline":%s}' "$2""#,
 
     #[test]
     fn termination_cancels_stage_work_but_not_firmware_auto_cleanup() {
-        let script = TestHarness::new("printf '{\"confirmed\":true}'");
+        let marker = env::temp_dir().join(format!(
+            "fan-control-qualify-signal-cleanup-{}",
+            process::id()
+        ));
+        let script = TestHarness::new(&format!(
+            r#"printf '%s\n' "$1" >> '{marker}'
+case "$1" in
+  stop-workload) printf '%s' '{{"observed_at":{{"monotonic_millis":1,"wall_unix_millis":1}},"process_identity":"/usr/lib/pt31553-fan-control/workloads/mixed","running":false}}' ;;
+  stop-service) printf '%s' '{{"observed_at":{{"monotonic_millis":2,"wall_unix_millis":2}},"process_identity":"pt31553-fan-control.service","running":false}}' ;;
+  restore-fan) printf '%s' '{{"auto_write_succeeded":true,"enable_readback":2,"endpoint_identity":"device-0-inode-1","outcome":"firmware-auto-confirmed"}}' ;;
+  *) exit 9 ;;
+esac"#,
+            marker = marker.display()
+        ));
         let shutdown = ShutdownRequest::new();
         shutdown.request();
-        let harness = HarnessEnvironment::new_control(script.path.clone(), shutdown).unwrap();
+        let mut harness = HarnessEnvironment::new_control(script.path.clone(), shutdown).unwrap();
         assert!(
             harness
                 .invoke::<Value>("ordinary", json!({}), harness.deadline(5_000))
                 .unwrap_err()
                 .contains("termination signal")
         );
-        let response: Value = harness
-            .invoke_cleanup("cleanup", json!({}), harness.deadline(5_000))
-            .unwrap();
-        assert_eq!(response, json!({"confirmed": true}));
+        let deadline = harness.deadline(5_000);
+        SupervisedEnduranceEnvironment::stop_workload(&mut harness, deadline).unwrap();
+        SupervisedEnduranceEnvironment::stop_service(&mut harness, deadline).unwrap();
+        SupervisedEnduranceEnvironment::restore_fan(&mut harness, EvidenceFan::Cpu, deadline);
+        SupervisedEnduranceEnvironment::restore_fan(&mut harness, EvidenceFan::Gpu, deadline);
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            "stop-workload\nstop-service\nrestore-fan\nrestore-fan\n"
+        );
+        let _ = fs::remove_file(marker);
+    }
+
+    #[test]
+    fn lifecycle_adapter_retains_observer_attestations_and_keeps_restoration_available() {
+        let script = TestHarness::new(
+            r#"request=$(cat)
+case "$1" in
+  run-live-lifecycle-case)
+    printf '%s' '{"observation":{"case":"invalid-configuration","observed_at":{"monotonic_millis":1,"wall_unix_millis":1},"fresh":true,"rejected_before_custom_control":true},"observer_attestations":[]}'
+    ;;
+  restore-live-lifecycle-after-reboot)
+    printf '%s' '{"observation":{"monotonic_millis":3,"wall_unix_millis":3},"observer_attestations":[{"action":"post-reboot-restore","started_at":{"monotonic_millis":2,"wall_unix_millis":2},"completed_at":{"monotonic_millis":3,"wall_unix_millis":3},"checks":[{"monotonic_millis":2,"wall_unix_millis":2},{"monotonic_millis":3,"wall_unix_millis":3}]}]}'
+    ;;
+  *) exit 9 ;;
+esac"#,
+        );
+        let shutdown = ShutdownRequest::new();
+        let mut harness =
+            HarnessEnvironment::new_control(script.path.clone(), shutdown.clone()).unwrap();
+
+        let observed = LiveLifecycleEnvironment::run_case(
+            &mut harness,
+            LiveLifecycleCase::InvalidConfiguration,
+        )
+        .unwrap();
+        assert!(observed.observer_attestations.is_empty());
+
+        shutdown.request();
+        assert_eq!(
+            LiveLifecycleEnvironment::restore_after_reboot(&mut harness)
+                .unwrap()
+                .observation,
+            EvidenceTimestamp {
+                monotonic_millis: 3,
+                wall_unix_millis: 3,
+            }
+        );
     }
 
     #[test]
@@ -2773,14 +3555,72 @@ printf '%s' '{"captured_at":{"monotonic_millis":1,"wall_unix_millis":1},"nvidia_
     }
 
     #[test]
+    fn endurance_rejects_a_residual_lifecycle_checkpoint() {
+        let root = env::temp_dir().join(format!(
+            "fan-control-qualify-checkpoint-{}-{}",
+            process::id(),
+            NEXT_HARNESS_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let lifecycle = root.join("live-lifecycle.json");
+        let checkpoint = root.join("live-lifecycle-checkpoint.json");
+        fs::write(&checkpoint, b"checkpoint").unwrap();
+
+        let error = reject_residual_lifecycle_checkpoint(&lifecycle).unwrap_err();
+        assert!(error.to_string().contains("reboot checkpoint remains"));
+
+        fs::remove_file(checkpoint).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn protected_manifest_pins_the_exact_harness_bytes() {
+        let script = TestHarness::new("exit 0");
+        let digest = format!("{:x}", Sha256::digest(fs::read(&script.path).unwrap()));
+        require_harness_digest(&script.path, &digest).unwrap();
+        assert!(require_harness_digest(&script.path, &"0".repeat(64)).is_err());
+        assert!(require_harness_digest(&script.path, "not-a-sha256").is_err());
+    }
+
+    #[test]
     fn nested_future_evidence_timestamps_are_discovered() {
+        let future = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 60_000;
         let value = json!({
             "completed_at": { "monotonic_millis": 10, "wall_unix_millis": 100 },
-            "samples": [{ "timestamp": { "monotonic_millis": 5, "wall_unix_millis": 999 } }]
+            "checkpoint": { "cases": [{ "timestamp": { "monotonic_millis": 5, "wall_unix_millis": future } }] }
         });
         let mut timestamps = Vec::new();
         collect_wall_timestamps(&value, &mut timestamps);
-        assert_eq!(timestamps, vec![100, 999]);
+        timestamps.sort_unstable();
+        assert_eq!(timestamps, vec![100, future]);
+        assert!(reject_future_serialized_timestamps(&value, "checkpoint").is_err());
+    }
+
+    #[test]
+    fn prerequisite_freshness_expires_after_the_exact_resume_age_boundary() {
+        let completed_at = 10_000;
+        assert!(
+            require_fresh_wall_time_at(
+                completed_at,
+                "prerequisite",
+                completed_at + MAX_RESUME_AGE_MILLIS,
+            )
+            .is_ok()
+        );
+        assert!(
+            require_fresh_wall_time_at(
+                completed_at,
+                "prerequisite",
+                completed_at + MAX_RESUME_AGE_MILLIS + 1,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("stale")
+        );
     }
 
     #[test]

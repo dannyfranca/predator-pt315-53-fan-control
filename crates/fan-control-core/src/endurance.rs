@@ -6,14 +6,14 @@ use std::{
 
 use crate::{
     CPU_ABSOLUTE_ABORT_MILLICELSIUS, CapturedMatchedWorkloadStartingConditions,
-    EVIDENCE_SCHEMA_VERSION_V2, EnduranceThermalEnvelopeEvidence, EvidenceExternalPower,
-    EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceRecordStatus, EvidenceTimestamp,
-    EvidenceValidationError, FanReadbackEvidence, FanReadbackField, FaultEvidence,
-    MatchedWorkloadFanRestoration, MatchedWorkloadObservation,
-    MatchedWorkloadTachometerCalibrations, ObservationOutcome, ProcessStopEvidence,
-    QualificationEnvelopeIdentityV1, RestorationAttemptEvidence, RestorationOutcome,
-    RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness, StateTransitionEvidence, StoppedProcess,
-    ThermalSummaryEvidence, WorkloadEvidence,
+    EVIDENCE_SCHEMA_VERSION_V2, EnduranceObserverAttestationEvidence,
+    EnduranceThermalEnvelopeEvidence, EvidenceExternalPower, EvidenceFan, EvidenceProfile,
+    EvidenceRecord, EvidenceRecordStatus, EvidenceTimestamp, EvidenceValidationError,
+    FanReadbackEvidence, FanReadbackField, FaultEvidence, MatchedWorkloadFanRestoration,
+    MatchedWorkloadObservation, MatchedWorkloadTachometerCalibrations, ObservationOutcome,
+    ProcessStopEvidence, QualificationEnvelopeIdentityV1, RestorationAttemptEvidence,
+    RestorationOutcome, RunOutcomeEvidence, RunOutcomeStatus, SampleFreshness,
+    StateTransitionEvidence, StoppedProcess, ThermalSummaryEvidence, WorkloadEvidence,
     evidence::{precise_final_thermal_slopes, summarize_thermal_evidence, validate_workload},
     matched_workload::{
         ControlEvidenceState, MAX_PLAUSIBLE_AMBIENT_MILLICELSIUS,
@@ -37,6 +37,7 @@ const QUALIFICATION_WORKLOAD_VERSION: &str = "1.0.0";
 
 const SAMPLE_CADENCE_MILLIS: u64 = 2_000;
 const SAMPLE_CADENCE_JITTER_MILLIS: u64 = 100;
+const SEGMENT_TRANSITION_WINDOW_MILLIS: u64 = SAMPLE_CADENCE_MILLIS;
 const OPERATION_TIMEOUT_MILLIS: u64 = 10_000;
 const RESTORATION_TIMEOUT_MILLIS: u64 = 5_000;
 const THERMAL_COMPARISON_MARGIN_MILLICELSIUS: i32 = 2_000;
@@ -132,6 +133,18 @@ pub struct SupervisedEnduranceProcessStopConfirmation {
     pub running: bool,
 }
 
+/// Independent Custom-mode and maximum-PWM confirmation for emergency containment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisedEnduranceFanContainment {
+    pub enable_readback: Option<u32>,
+    pub pwm_write_succeeded: bool,
+    pub pwm_readback: Option<u32>,
+    pub enable_endpoint_identity: String,
+    pub pwm_endpoint_identity: String,
+    pub outcome: RestorationOutcome,
+}
+
 pub const SUPERVISED_ENDURANCE_SEGMENTS: [SupervisedEnduranceSegment; 6] = [
     SupervisedEnduranceSegment {
         id: "endurance-ac-load-1",
@@ -173,6 +186,12 @@ pub const SUPERVISED_ENDURANCE_SEGMENTS: [SupervisedEnduranceSegment; 6] = [
 
 pub trait SupervisedEnduranceEnvironment {
     fn timestamp(&mut self) -> EvidenceTimestamp;
+
+    /// Reconfirms that the physical safety observer is present before and throughout Custom.
+    fn confirm_observer(
+        &mut self,
+        deadline_monotonic_millis: u64,
+    ) -> Result<EvidenceTimestamp, String>;
 
     fn capture_starting_conditions(
         &mut self,
@@ -247,9 +266,17 @@ pub trait SupervisedEnduranceEnvironment {
         fan: EvidenceFan,
         deadline_monotonic_millis: u64,
     ) -> MatchedWorkloadFanRestoration;
+
+    /// Commands and confirms emergency maximum fan containment without first selecting Auto.
+    fn contain_fan_at_maximum(
+        &mut self,
+        fan: EvidenceFan,
+        deadline_monotonic_millis: u64,
+    ) -> SupervisedEnduranceFanContainment;
 }
 
 pub struct SupervisedEndurancePlan<'a> {
+    pub prerequisite_binding_sha256: String,
     pub preflight: &'a EvidenceRecord,
     pub baselines: &'a [&'a EvidenceRecord],
     pub matched_workload_runs: &'a [&'a EvidenceRecord],
@@ -323,6 +350,12 @@ pub fn run_supervised_endurance<E>(
 where
     E: SupervisedEnduranceEnvironment + ?Sized,
 {
+    if !crate::evidence::is_lower_hex(&plan.prerequisite_binding_sha256, 64) {
+        return Err(SupervisedEndurancePlanError::InvalidQualificationEvidence {
+            artifact: "prerequisite binding".into(),
+            reason: "lowercase SHA-256 required".into(),
+        });
+    }
     let envelope = validate_qualification_plan(plan)?;
     let endurance_thermal_envelope = endurance_thermal_envelope(plan.baselines)?;
     validate_endurance_workload(&plan.workload)?;
@@ -338,6 +371,7 @@ where
     let mut faults = Vec::new();
     let mut restoration_attempts = Vec::with_capacity(2);
     let mut process_stops = Vec::with_capacity(2);
+    let mut observer_checks = Vec::with_capacity(SUPERVISED_ENDURANCE_SAMPLE_COUNT + 8);
     let mut kernel_faults = Vec::new();
     let mut nvidia_faults = Vec::new();
     let mut system_stable = true;
@@ -417,11 +451,15 @@ where
         let requested_at = later_timestamp(observed_at, lifecycle_not_before);
         let deadline = faults
             .is_empty()
-            .then(|| operation_deadline(requested_at, &mut faults, "custom-control-entry"))
+            .then(|| observer_bounded_deadline(requested_at, &mut faults, "custom-control-entry"))
             .flatten();
         if let Some(deadline) = deadline {
-            custom_attempted = true;
-            let result = environment.enter_custom_control(deadline);
+            let observer =
+                record_observer_confirmation(environment, deadline, &mut observer_checks);
+            let result = observer.and_then(|()| {
+                custom_attempted = true;
+                environment.enter_custom_control(deadline)
+            });
             let observed_completed_at = environment.timestamp();
             if observed_completed_at.monotonic_millis < requested_at.monotonic_millis {
                 push_fault(
@@ -473,10 +511,11 @@ where
         let requested_at = later_timestamp(observed_at, lifecycle_not_before);
         let deadline = faults
             .is_empty()
-            .then(|| operation_deadline(requested_at, &mut faults, "endurance-segment"))
+            .then(|| observer_bounded_deadline(requested_at, &mut faults, "endurance-segment"))
             .flatten();
         if let Some(deadline) = deadline {
-            let result = environment.begin_segment(segment, deadline);
+            let result = record_observer_confirmation(environment, deadline, &mut observer_checks)
+                .and_then(|()| environment.begin_segment(segment, deadline));
             let observed_completed_at = environment.timestamp();
             if observed_completed_at.monotonic_millis < requested_at.monotonic_millis {
                 push_fault(
@@ -534,11 +573,14 @@ where
         let requested_at = later_timestamp(observed_at, lifecycle_not_before);
         let deadline = faults
             .is_empty()
-            .then(|| operation_deadline(requested_at, &mut faults, "workload-start"))
+            .then(|| observer_bounded_deadline(requested_at, &mut faults, "workload-start"))
             .flatten();
         if let Some(deadline) = deadline {
-            workload_attempted = true;
-            let result = environment.start_workload(&workload, deadline);
+            let result = record_observer_confirmation(environment, deadline, &mut observer_checks)
+                .and_then(|()| {
+                    workload_attempted = true;
+                    environment.start_workload(&workload, deadline)
+                });
             let observed_completed_at = environment.timestamp();
             if observed_completed_at.monotonic_millis < requested_at.monotonic_millis {
                 push_fault(
@@ -594,7 +636,10 @@ where
                 );
                 break;
             };
-            let Some(deadline) = boundary.checked_add(SAMPLE_CADENCE_JITTER_MILLIS) else {
+            // The sample at the boundary still belongs to the ending segment and may
+            // consume its full jitter allowance. Give the following transition its
+            // own window, ending at the next scheduled sample.
+            let Some(deadline) = boundary.checked_add(SEGMENT_TRANSITION_WINDOW_MILLIS) else {
                 push_fault(
                     &mut faults,
                     lifecycle_not_before,
@@ -615,7 +660,8 @@ where
                 );
                 break;
             }
-            let result = environment.begin_segment(next, deadline);
+            let result = record_observer_confirmation(environment, deadline, &mut observer_checks)
+                .and_then(|()| environment.begin_segment(next, deadline));
             let completed_at = environment.timestamp();
             match result {
                 Ok(confirmation)
@@ -684,6 +730,18 @@ where
             break;
         }
         lifecycle_not_before = later_timestamp(wait_completed_at, lifecycle_not_before);
+        match record_observer_confirmation(environment, deadline, &mut observer_checks) {
+            Ok(()) => {}
+            Err(error) => {
+                push_fault(
+                    &mut faults,
+                    wait_completed_at,
+                    "observer-withdrawn",
+                    format!("physical safety observer is not continuously present: {error}"),
+                );
+                break;
+            }
+        }
         let mut observation = match environment.capture_observation(deadline) {
             Ok(observation) => observation,
             Err(error) => {
@@ -774,8 +832,16 @@ where
         }
     }
 
-    let mut workload_stopped = !workload_attempted;
-    if workload_attempted {
+    let mut workload_stopped = false;
+    {
+        if custom_attempted {
+            confirm_shutdown_observer(
+                environment,
+                &mut faults,
+                &mut lifecycle_not_before,
+                &mut observer_checks,
+            );
+        }
         let scheduled_stop_endpoint = if samples.len() == SUPERVISED_ENDURANCE_SAMPLE_COUNT {
             workload_started_at.and_then(|started| {
                 started
@@ -822,38 +888,72 @@ where
         ) {
             process_stops.push(stop);
             workload_stopped = true;
-        } else if let Some(stop) = perform_confirmed_stop(
-            environment,
-            &mut faults,
-            &mut lifecycle_not_before,
-            StopExpectation {
-                code: "workload-containment",
-                process: StoppedProcess::Workload,
-                identity: workload.command.first().expect("validated command"),
-                fixed_deadline: None,
-            },
-            |environment, deadline| environment.contain_workload(deadline),
-        ) {
-            process_stops.push(stop);
-            workload_stopped = true;
-        } else if let Some(stop) = perform_confirmed_stop(
-            environment,
-            &mut faults,
-            &mut lifecycle_not_before,
-            StopExpectation {
-                code: "workload-terminal-containment",
-                process: StoppedProcess::Workload,
-                identity: workload.command.first().expect("validated command"),
-                fixed_deadline: None,
-            },
-            |environment, deadline| environment.force_contain_workload(deadline),
-        ) {
-            process_stops.push(stop);
-            workload_stopped = true;
+        } else {
+            if custom_attempted {
+                confirm_shutdown_observer(
+                    environment,
+                    &mut faults,
+                    &mut lifecycle_not_before,
+                    &mut observer_checks,
+                );
+            }
+            if let Some(stop) = perform_confirmed_stop(
+                environment,
+                &mut faults,
+                &mut lifecycle_not_before,
+                StopExpectation {
+                    code: "workload-containment",
+                    process: StoppedProcess::Workload,
+                    identity: workload.command.first().expect("validated command"),
+                    fixed_deadline: None,
+                },
+                |environment, deadline| environment.contain_workload(deadline),
+            ) {
+                process_stops.push(stop);
+                workload_stopped = true;
+            } else {
+                if custom_attempted {
+                    confirm_shutdown_observer(
+                        environment,
+                        &mut faults,
+                        &mut lifecycle_not_before,
+                        &mut observer_checks,
+                    );
+                }
+                if let Some(stop) = perform_confirmed_stop(
+                    environment,
+                    &mut faults,
+                    &mut lifecycle_not_before,
+                    StopExpectation {
+                        code: "workload-terminal-containment",
+                        process: StoppedProcess::Workload,
+                        identity: workload.command.first().expect("validated command"),
+                        fixed_deadline: None,
+                    },
+                    |environment, deadline| environment.force_contain_workload(deadline),
+                ) {
+                    process_stops.push(stop);
+                    workload_stopped = true;
+                }
+            }
         }
+    }
+    if custom_attempted && workload_stopped {
+        confirm_shutdown_observer(
+            environment,
+            &mut faults,
+            &mut lifecycle_not_before,
+            &mut observer_checks,
+        );
     }
     let mut service_stopped = !custom_attempted;
     if custom_attempted {
+        confirm_shutdown_observer(
+            environment,
+            &mut faults,
+            &mut lifecycle_not_before,
+            &mut observer_checks,
+        );
         if let Some(stop) = perform_confirmed_stop(
             environment,
             &mut faults,
@@ -868,39 +968,76 @@ where
         ) {
             process_stops.push(stop);
             service_stopped = true;
-        } else if let Some(stop) = perform_confirmed_stop(
-            environment,
-            &mut faults,
-            &mut lifecycle_not_before,
-            StopExpectation {
-                code: "service-containment",
-                process: StoppedProcess::Service,
-                identity: "pt31553-fan-control.service",
-                fixed_deadline: None,
-            },
-            |environment, deadline| environment.contain_service(deadline),
-        ) {
-            process_stops.push(stop);
-            service_stopped = true;
-        } else if let Some(stop) = perform_confirmed_stop(
-            environment,
-            &mut faults,
-            &mut lifecycle_not_before,
-            StopExpectation {
-                code: "service-terminal-containment",
-                process: StoppedProcess::Service,
-                identity: "pt31553-fan-control.service",
-                fixed_deadline: None,
-            },
-            |environment, deadline| environment.force_contain_service(deadline),
-        ) {
-            process_stops.push(stop);
-            service_stopped = true;
+        } else {
+            confirm_shutdown_observer(
+                environment,
+                &mut faults,
+                &mut lifecycle_not_before,
+                &mut observer_checks,
+            );
+            if let Some(stop) = perform_confirmed_stop(
+                environment,
+                &mut faults,
+                &mut lifecycle_not_before,
+                StopExpectation {
+                    code: "service-containment",
+                    process: StoppedProcess::Service,
+                    identity: "pt31553-fan-control.service",
+                    fixed_deadline: None,
+                },
+                |environment, deadline| environment.contain_service(deadline),
+            ) {
+                process_stops.push(stop);
+                service_stopped = true;
+            } else {
+                confirm_shutdown_observer(
+                    environment,
+                    &mut faults,
+                    &mut lifecycle_not_before,
+                    &mut observer_checks,
+                );
+                if let Some(stop) = perform_confirmed_stop(
+                    environment,
+                    &mut faults,
+                    &mut lifecycle_not_before,
+                    StopExpectation {
+                        code: "service-terminal-containment",
+                        process: StoppedProcess::Service,
+                        identity: "pt31553-fan-control.service",
+                        fixed_deadline: None,
+                    },
+                    |environment, deadline| environment.force_contain_service(deadline),
+                ) {
+                    process_stops.push(stop);
+                    service_stopped = true;
+                }
+            }
         }
     }
 
-    let both_fans_observed_auto = if custom_attempted {
+    if custom_attempted && service_stopped {
+        confirm_shutdown_observer(
+            environment,
+            &mut faults,
+            &mut lifecycle_not_before,
+            &mut observer_checks,
+        );
+    }
+
+    let both_fans_observed_auto = if workload_stopped && service_stopped {
         restore_both_fans(
+            environment,
+            &mut readbacks,
+            &mut restoration_attempts,
+            &mut faults,
+            &control_state,
+            &mut lifecycle_not_before,
+        )
+    } else {
+        false
+    };
+    let both_fans_contained_at_maximum = if !both_fans_observed_auto {
+        contain_both_fans_at_maximum(
             environment,
             &mut readbacks,
             &mut restoration_attempts,
@@ -925,6 +1062,8 @@ where
             from,
             to: if final_firmware_auto_confirmed {
                 "firmware-auto"
+            } else if both_fans_contained_at_maximum {
+                "emergency-maximum-containment"
             } else {
                 "restoration-failed"
             }
@@ -994,6 +1133,18 @@ where
     record.process_stops = process_stops;
     record.thermal_summary = Some(thermal_summary);
     record.endurance_thermal_envelope = Some(endurance_thermal_envelope);
+    record.endurance_observer_attestation = (custom_attempted
+        && service_stopped
+        && record.faults.is_empty()
+        && observer_checks.len() >= 2)
+        .then(|| EnduranceObserverAttestationEvidence {
+            started_at: observer_checks[0],
+            completed_at: *observer_checks
+                .last()
+                .expect("at least two observer checks"),
+            checks: observer_checks,
+        });
+    record.prerequisite_binding_sha256 = Some(plan.prerequisite_binding_sha256.clone());
     record
         .validate()
         .map_err(SupervisedEndurancePlanError::InvalidGeneratedEvidence)?;
@@ -1280,6 +1431,77 @@ fn operation_deadline(
         })
 }
 
+fn observer_bounded_deadline(
+    requested_at: EvidenceTimestamp,
+    faults: &mut Vec<FaultEvidence>,
+    code: &str,
+) -> Option<u64> {
+    operation_deadline(requested_at, faults, code).map(|deadline| {
+        deadline.min(
+            requested_at
+                .monotonic_millis
+                .saturating_add(crate::LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS),
+        )
+    })
+}
+
+fn record_observer_confirmation<E>(
+    environment: &mut E,
+    deadline: u64,
+    checks: &mut Vec<EvidenceTimestamp>,
+) -> Result<(), String>
+where
+    E: SupervisedEnduranceEnvironment + ?Sized,
+{
+    let requested_at = environment.timestamp();
+    let observed_at = environment.confirm_observer(deadline)?;
+    let completed_at = environment.timestamp();
+    let follows_previous = checks.last().is_none_or(|previous| {
+        observed_at.monotonic_millis > previous.monotonic_millis
+            && observed_at.wall_unix_millis > previous.wall_unix_millis
+            && observed_at.monotonic_millis - previous.monotonic_millis <= 5_000
+            && observed_at
+                .wall_unix_millis
+                .checked_sub(previous.wall_unix_millis)
+                .is_some_and(|gap| gap <= 5_000)
+    });
+    if requested_at.monotonic_millis > deadline
+        || completed_at.monotonic_millis > deadline
+        || observed_at.monotonic_millis < requested_at.monotonic_millis
+        || observed_at.wall_unix_millis < requested_at.wall_unix_millis
+        || observed_at.monotonic_millis > completed_at.monotonic_millis
+        || observed_at.wall_unix_millis > completed_at.wall_unix_millis
+        || !follows_previous
+    {
+        return Err("observer confirmation was stale, replayed, or outside its call window".into());
+    }
+    checks.push(observed_at);
+    Ok(())
+}
+
+fn confirm_shutdown_observer<E>(
+    environment: &mut E,
+    faults: &mut Vec<FaultEvidence>,
+    not_before: &mut EvidenceTimestamp,
+    checks: &mut Vec<EvidenceTimestamp>,
+) where
+    E: SupervisedEnduranceEnvironment + ?Sized,
+{
+    let requested_at = environment.timestamp();
+    let deadline = observer_bounded_deadline(requested_at, faults, "observer-shutdown-boundary");
+    if let Some(deadline) = deadline
+        && let Err(error) = record_observer_confirmation(environment, deadline, checks)
+    {
+        push_fault(
+            faults,
+            requested_at,
+            "observer-withdrawn",
+            format!("physical safety observer was not present through service shutdown: {error}"),
+        );
+    }
+    *not_before = later_timestamp(environment.timestamp(), *not_before);
+}
+
 fn segment_index_at_elapsed(elapsed_millis: u64) -> usize {
     let mut end = 0;
     for (index, segment) in SUPERVISED_ENDURANCE_SEGMENTS.iter().enumerate() {
@@ -1396,7 +1618,12 @@ where
         deadline
     } else {
         operation_deadline(requested_at, faults, code).unwrap_or(requested_at.monotonic_millis)
-    };
+    }
+    .min(
+        requested_at
+            .monotonic_millis
+            .saturating_add(crate::LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS),
+    );
     if requested_at.monotonic_millis > deadline {
         push_fault(
             faults,
@@ -1528,6 +1755,8 @@ where
             enable_readback: result.enable_readback,
             outcome: if confirmed {
                 RestorationOutcome::FirmwareAutoConfirmed
+            } else if result.outcome == RestorationOutcome::ContainmentFailed {
+                RestorationOutcome::ContainmentFailed
             } else {
                 RestorationOutcome::FirmwareAutoUnconfirmed
             },
@@ -1561,6 +1790,117 @@ where
         *not_before = completed_at;
     }
     restored
+}
+
+fn contain_both_fans_at_maximum<E>(
+    environment: &mut E,
+    readbacks: &mut Vec<FanReadbackEvidence>,
+    attempts: &mut Vec<RestorationAttemptEvidence>,
+    faults: &mut Vec<FaultEvidence>,
+    control: &ControlEvidenceState,
+    not_before: &mut EvidenceTimestamp,
+) -> bool
+where
+    E: SupervisedEnduranceEnvironment + ?Sized,
+{
+    let mut contained = true;
+    for fan in [EvidenceFan::Cpu, EvidenceFan::Gpu] {
+        let requested_at = later_timestamp(environment.timestamp(), *not_before);
+        let deadline = requested_at
+            .monotonic_millis
+            .checked_add(RESTORATION_TIMEOUT_MILLIS);
+        if deadline.is_none() {
+            push_fault(
+                faults,
+                requested_at,
+                "emergency-maximum-containment",
+                "fan containment deadline overflowed",
+            );
+        }
+        let deadline = deadline.unwrap_or(requested_at.monotonic_millis);
+        let result = environment.contain_fan_at_maximum(fan, deadline);
+        let completed_at = later_timestamp(environment.timestamp(), requested_at);
+        let enable_identity_is_trusted = !result.enable_endpoint_identity.trim().is_empty()
+            && control.endpoint_identity(fan, FanReadbackField::Enable)
+                == Some(result.enable_endpoint_identity.as_str());
+        let pwm_identity_is_trusted = !result.pwm_endpoint_identity.trim().is_empty()
+            && control.endpoint_identity(fan, FanReadbackField::Pwm)
+                == Some(result.pwm_endpoint_identity.as_str());
+        let confirmed = result.outcome == RestorationOutcome::MaximumContainmentConfirmed
+            && result.enable_readback == Some(1)
+            && result.pwm_write_succeeded
+            && result.pwm_readback == Some(u8::MAX.into())
+            && enable_identity_is_trusted
+            && pwm_identity_is_trusted
+            && completed_at.monotonic_millis <= deadline;
+        contained &= confirmed;
+        attempts.push(RestorationAttemptEvidence {
+            timestamp: completed_at,
+            fan,
+            auto_write_succeeded: false,
+            enable_readback: result.enable_readback,
+            outcome: if confirmed {
+                RestorationOutcome::MaximumContainmentConfirmed
+            } else {
+                RestorationOutcome::ContainmentFailed
+            },
+        });
+        readbacks.push(FanReadbackEvidence {
+            timestamp: completed_at,
+            source_timestamp: None,
+            fresh: None,
+            boot_id: None,
+            fan,
+            field: FanReadbackField::Enable,
+            value: result.enable_readback,
+            endpoint_identity: result.enable_endpoint_identity,
+            outcome: if result.enable_readback == Some(1) && enable_identity_is_trusted {
+                ObservationOutcome::Confirmed
+            } else if result.enable_readback.is_some() {
+                ObservationOutcome::Unexpected
+            } else {
+                ObservationOutcome::Unreadable
+            },
+            phase: Some(crate::FanReadbackPhase::Final),
+        });
+        readbacks.push(FanReadbackEvidence {
+            timestamp: completed_at,
+            source_timestamp: None,
+            fresh: None,
+            boot_id: None,
+            fan,
+            field: FanReadbackField::Pwm,
+            value: result.pwm_readback,
+            endpoint_identity: result.pwm_endpoint_identity,
+            outcome: if result.pwm_write_succeeded
+                && result.pwm_readback == Some(u8::MAX.into())
+                && pwm_identity_is_trusted
+            {
+                ObservationOutcome::Confirmed
+            } else if result.pwm_readback.is_some() {
+                ObservationOutcome::Unexpected
+            } else {
+                ObservationOutcome::Unreadable
+            },
+            phase: Some(crate::FanReadbackPhase::Final),
+        });
+        push_fault(
+            faults,
+            completed_at,
+            "firmware-auto-unconfirmed",
+            if confirmed {
+                format!(
+                    "{fan:?} fan used explicit maximum containment because workload absence was unconfirmed"
+                )
+            } else {
+                format!(
+                    "{fan:?} fan could not be placed in explicit maximum containment after workload termination failed"
+                )
+            },
+        );
+        *not_before = completed_at;
+    }
+    contained
 }
 
 fn validate_endurance_thermal_limits(
@@ -1759,7 +2099,7 @@ pub(crate) fn supervised_endurance_is_complete(record: &EvidenceRecord) -> bool 
                         .is_some_and(|transition| {
                             transition.timestamp.monotonic_millis >= boundary
                                 && transition.timestamp.monotonic_millis
-                                    <= boundary.saturating_add(SAMPLE_CADENCE_JITTER_MILLIS)
+                                    <= boundary.saturating_add(SEGMENT_TRANSITION_WINDOW_MILLIS)
                         })
                 })
         })
@@ -1848,6 +2188,12 @@ pub(crate) fn supervised_endurance_is_complete(record: &EvidenceRecord) -> bool 
         && starting_temperatures_are_safe
         && transition_names_match
         && transition_timestamps_match
+        && record
+            .endurance_observer_attestation
+            .as_ref()
+            .is_some_and(|attestation| {
+                crate::evidence::endurance_observer_attestation_is_valid(record, attestation)
+            })
         && control_evidence_matches
         && record.thermal_summary.as_ref().is_some_and(|summary| {
             summary == &summarize_thermal_evidence(&record.samples, true, Vec::new(), Vec::new())
@@ -1895,6 +2241,10 @@ mod tests {
     impl SupervisedEnduranceEnvironment for OverflowRestorationEnvironment {
         fn timestamp(&mut self) -> EvidenceTimestamp {
             self.now
+        }
+
+        fn confirm_observer(&mut self, _: u64) -> Result<EvidenceTimestamp, String> {
+            unreachable!()
         }
 
         fn capture_starting_conditions(
@@ -1979,6 +2329,22 @@ mod tests {
                 outcome: RestorationOutcome::FirmwareAutoConfirmed,
             }
         }
+
+        fn contain_fan_at_maximum(
+            &mut self,
+            fan: EvidenceFan,
+            _: u64,
+        ) -> SupervisedEnduranceFanContainment {
+            self.restored.push(fan);
+            SupervisedEnduranceFanContainment {
+                enable_readback: Some(1),
+                pwm_write_succeeded: true,
+                pwm_readback: Some(255),
+                enable_endpoint_identity: format!("{fan:?}-enable"),
+                pwm_endpoint_identity: format!("{fan:?}-pwm"),
+                outcome: RestorationOutcome::MaximumContainmentConfirmed,
+            }
+        }
     }
 
     fn legacy_record() -> EvidenceRecord {
@@ -2037,6 +2403,7 @@ mod tests {
     fn incomplete_evidence_matrix_is_rejected_before_endurance() {
         let preflight = legacy_record();
         let plan = SupervisedEndurancePlan {
+            prerequisite_binding_sha256: "a".repeat(64),
             preflight: &preflight,
             baselines: &[],
             matched_workload_runs: &[],

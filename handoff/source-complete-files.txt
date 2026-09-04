@@ -153,6 +153,7 @@ packaging/kernel/trust/cachyos-release-key.gpg
 policy/README.md
 policy/qualified-envelope.example.toml
 qualification/evidence-example/evidence-v1.json
+qualification/live-lifecycle-harness.md
 qualification/preflight-baseline-harness.md
 qualification/supervised-calibration-matched-harness.md
 qualification/supervised-endurance-harness.md

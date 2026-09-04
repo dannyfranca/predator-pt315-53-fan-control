@@ -9,6 +9,7 @@ Both commands accept the same protected, root-owned JSON manifest:
 
 ```json
 {
+  "qualification_harness_sha256": "lowercase SHA-256 of the reviewed harness executable",
   "qualification_envelope": { "use": "the exact qualification-envelope-v1 object" },
   "compatibility": "/usr/lib/pt31553-fan-control/compatibility.toml",
   "config": "/etc/pt31553-fan-control/config.toml",
@@ -22,7 +23,8 @@ Both commands accept the same protected, root-owned JSON manifest:
 ```
 
 The absolute evidence root must already be a protected root-owned directory. The harness and every
-ancestor are protected/root-owned; the executable must be readable/executable by the fixed sandbox
+ancestor are protected/root-owned and its bytes must match `qualification_harness_sha256`; the
+executable must be readable/executable by the fixed sandbox
 UID/GID 65534. When the qualifier runs as root, every harness operation runs as 65534 with no
 supplementary groups and `no_new_privs`, inside a private cgroup v2 session. Any deadline or runner
 failure uses `cgroup.kill`, so descendants cannot escape cleanup with a new process group/session.

@@ -115,6 +115,8 @@ impl Fixture {
         let mut evidence_source = String::new();
         compressed.read_to_string(&mut evidence_source).unwrap();
         let mut evidence_value: Value = serde_json::from_str(&evidence_source).unwrap();
+        evidence_value["prerequisite_binding_sha256"] = "a".repeat(64).into();
+        add_endurance_observer_fixture(&mut evidence_value);
         evidence_value["qualification_envelope"]["protected_policy_sha256"] =
             sha(policy_bytes).into();
         let compatibility = &mut evidence_value["qualification_envelope"]["compatibility"];
@@ -328,6 +330,31 @@ impl Fixture {
         }
         write_json(&self.manifest, &manifest);
     }
+}
+
+fn add_endurance_observer_fixture(record: &mut Value) {
+    let mut checks = vec![record["state_transitions"][0]["timestamp"].clone()];
+    let started = record["started_at"].clone();
+    for offset in 1..=9 {
+        checks.push(serde_json::json!({
+            "monotonic_millis": started["monotonic_millis"].as_u64().unwrap() + offset,
+            "wall_unix_millis": started["wall_unix_millis"].as_i64().unwrap() + offset as i64,
+        }));
+    }
+    checks.extend(
+        record["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sample| sample["timestamp"].clone()),
+    );
+    checks.push(record["process_stops"][1]["requested_at"].clone());
+    checks.push(record["process_stops"][1]["confirmed_at"].clone());
+    record["endurance_observer_attestation"] = serde_json::json!({
+        "started_at": checks[0],
+        "completed_at": checks.last().unwrap(),
+        "checks": checks,
+    });
 }
 
 #[test]

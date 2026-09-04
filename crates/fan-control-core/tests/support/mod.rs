@@ -282,6 +282,8 @@ pub fn matching_endurance_evidence(policy: &str) -> String {
     let mut source = String::new();
     compressed.read_to_string(&mut source).unwrap();
     let mut record: serde_json::Value = serde_json::from_str(&source).unwrap();
+    record["prerequisite_binding_sha256"] = "a".repeat(64).into();
+    add_endurance_observer_fixture(&mut record);
     record["qualification_envelope"]["protected_policy_sha256"] =
         protected_policy_sha256.clone().into();
     record["qualification_envelope"]["compatibility"] =
@@ -292,6 +294,31 @@ pub fn matching_endurance_evidence(policy: &str) -> String {
         .unwrap()
         .insert(protected_policy_sha256, source.clone());
     source
+}
+
+fn add_endurance_observer_fixture(record: &mut serde_json::Value) {
+    let mut checks = vec![record["state_transitions"][0]["timestamp"].clone()];
+    let started = record["started_at"].clone();
+    for offset in 1..=9 {
+        checks.push(serde_json::json!({
+            "monotonic_millis": started["monotonic_millis"].as_u64().unwrap() + offset,
+            "wall_unix_millis": started["wall_unix_millis"].as_i64().unwrap() + offset as i64,
+        }));
+    }
+    checks.extend(
+        record["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sample| sample["timestamp"].clone()),
+    );
+    checks.push(record["process_stops"][1]["requested_at"].clone());
+    checks.push(record["process_stops"][1]["confirmed_at"].clone());
+    record["endurance_observer_attestation"] = serde_json::json!({
+        "started_at": checks[0],
+        "completed_at": checks.last().unwrap(),
+        "checks": checks,
+    });
 }
 
 pub fn sha256(source: &str) -> String {
