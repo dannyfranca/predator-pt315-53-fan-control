@@ -889,6 +889,13 @@ where
     Ok(MatchedWorkloadReport { record })
 }
 
+/// Validates all immutable evidence prerequisites without entering Custom control.
+pub fn validate_matched_workload_plan(
+    plan: &MatchedWorkloadPlan<'_>,
+) -> Result<(), MatchedWorkloadPlanError> {
+    validate_plan(plan)
+}
+
 fn validate_plan(plan: &MatchedWorkloadPlan<'_>) -> Result<(), MatchedWorkloadPlanError> {
     plan.baseline
         .validate()
