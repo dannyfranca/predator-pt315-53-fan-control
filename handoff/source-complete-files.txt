@@ -154,6 +154,7 @@ policy/README.md
 policy/qualified-envelope.example.toml
 qualification/evidence-example/evidence-v1.json
 qualification/preflight-baseline-harness.md
+qualification/supervised-calibration-matched-harness.md
 qualification/supervised-endurance-harness.md
 qualification/supervised-endurance-v2.json.gz
 qualification/workloads/README.md
