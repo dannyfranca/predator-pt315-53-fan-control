@@ -42,6 +42,27 @@ Run the complete offline simulated-fault qualification gate without host hardwar
 cargo test -p fan-control-core --test simulated_fault_orderings
 ```
 
+For the complete qualification-ready fake-platform flow, install Git, Bubblewrap (`bwrap`), the
+systemd tools (`systemctl`), Rust 1.85 with Cargo, and a native C compiler/linker. Then select the
+supported toolchain and pre-fetch the locked Rust dependencies once:
+
+```console
+rustup toolchain install 1.85.0 --profile minimal
+rustup override set 1.85.0
+cargo fetch --locked
+```
+
+Then run the single local gate from a clean checkout:
+
+```console
+scripts/verify-fake-platform-flow
+```
+
+The Cargo processes receive an empty `/sys`, an empty `/run`, and a synthetic `/dev`, so they
+cannot reach host fan controls, NVIDIA devices, or active systemd units. Success means only
+**qualification-ready source handoff**; it is not hardware qualification or Custom-control
+authorization.
+
 The guided live-lifecycle stage is exposed through
 `pt31553-fan-qualify live-lifecycle`. It orders invalid-configuration, duplicate-process,
 normal stop/restart, `SIGKILL`, watchdog, AC-to-battery, suspend/resume, and reboot checks.

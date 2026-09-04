@@ -321,7 +321,7 @@ fn workflow_runs_the_complete_policy_only_when_manually_requested() {
     assert_eq!(
         script_lines(field(install, "run")),
         vec![
-            "pacman -Syu --noconfirm cargo-deny git gnupg kmod libarchive lychee openssl \\",
+            "pacman -Syu --noconfirm bubblewrap cargo-deny git gnupg kmod libarchive lychee openssl \\",
             "python rustup sbsigntools systemd zstd",
             "useradd --create-home builder",
         ]

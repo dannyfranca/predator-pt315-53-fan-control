@@ -8,3 +8,6 @@ publish.workspace = true
 
 [dependencies]
 fan-control-core = { path = "../fan-control-core" }
+
+[dev-dependencies]
+tempfile = "3.23"

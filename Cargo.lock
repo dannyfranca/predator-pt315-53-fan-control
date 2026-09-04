@@ -237,6 +237,7 @@ name = "fan-control-restore"
 version = "0.1.0"
 dependencies = [
  "fan-control-core",
+ "tempfile",
 ]
 
 [[package]]
