@@ -43,14 +43,16 @@ cargo test -p fan-control-core --test simulated_fault_orderings
 ```
 
 The guided live-lifecycle stage is exposed through
-`run_live_lifecycle_qualification`. It orders invalid-configuration, duplicate-process,
+`pt31553-fan-qualify live-lifecycle`. It orders invalid-configuration, duplicate-process,
 normal stop/restart, `SIGKILL`, watchdog, AC-to-battery, suspend/resume, and reboot checks.
 Every case must finish with independent CPU and GPU Firmware Auto (`2`) readbacks before
 the next case. Its environment supplies fresh typed observations; a persisted outer
-qualification coordinator must resume after reboot with distinct boot IDs and confirm both
-fans in Auto before arming. The reboot boundary is deliberately split: `resume_after_reboot`
-cannot arm the controller, and `arm_after_reboot` is called only after the core runner's fresh
-CPU/GPU Auto gate succeeds. Suspend/resume evidence records ordered resume and process-start
+qualification coordinator persists a protected checkpoint bound to the current kernel boot ID,
+resumes only after a verified boot change, and confirms both fans in Auto before arming. The
+reboot boundary is deliberately split: `resume_after_reboot` cannot arm the controller, and
+`arm_after_reboot` is called only after the core runner's fresh CPU/GPU Auto gate succeeds. The
+runner then stops the controller and requires another independent Auto gate before acceptance.
+Suspend/resume evidence records ordered resume and process-start
 times plus distinct pre-sleep and post-resume process identities. Invalid-configuration and
 duplicate-process results carry fresh case-window timestamps; duplicate, normal restart, crash,
 watchdog, and resume checks bind distinct before/after process identities. Raw WMI/EC access,
@@ -1372,13 +1374,11 @@ the exact candidate identity and environmental limits before stage 2. Start
 each following stage only after the preceding evidence is complete, protected,
 and accepted. At every handoff, repeat the Auto boundary above.
 
-> **IMPLEMENTATION BLOCK:** this source revision exposes preflight, all seven
-> Firmware Auto baselines, one-fan calibration, and all twelve matched workloads
-> through `pt31553-fan-qualify`, but does not yet package their reviewed hardware
-> harness. Live lifecycle remains unavailable. Do not run live qualification until
-> that harness and the remaining stage entrypoint land. Command contracts are in
+> **PACKAGING BLOCK:** this source revision exposes the complete qualification
+> coordinator but does not package its reviewed hardware harness. Do not run live
+> qualification with an improvised harness. Command contracts are in
 > [`qualification/preflight-baseline-harness.md`](qualification/preflight-baseline-harness.md)
-> and [`qualification/supervised-calibration-matched-harness.md`](qualification/supervised-calibration-matched-harness.md).
+> and the linked lifecycle/endurance protocol documents.
 
 ### 2. Run read-only preflight
 
@@ -1489,15 +1489,29 @@ On live hardware exercise only: invalid configuration, duplicate ownership,
 normal stop and restart, SIGKILL/watchdog recovery, AC-to-battery transitions,
 suspend/resume, and reboot. Do not inject dangerous live sensor, write,
 tachometer, or restoration failures. Begin and end every case with the Auto
-boundary, keep the stock boot default, and abort the entire stage on any
+boundary, continuously attest physical-observer presence for every live Custom
+action, keep the stock boot default, and abort the entire stage on any
 unexpected restart, readiness, write, readback, journal, or cleanup result.
 Publish the accepted protected record as `live-lifecycle.json`.
+
+Use the reviewed harness protocol in
+[`qualification/live-lifecycle-harness.md`](qualification/live-lifecycle-harness.md). Run the
+command once through suspend/resume, reboot normally only after it publishes the protected
+checkpoint, then rerun with fresh approval:
+
+```sh
+sudo /usr/bin/pt31553-fan-qualify live-lifecycle \
+  --manifest /etc/pt31553-fan-control/qualification-stages.json \
+  --harness /usr/lib/pt31553-fan-control/qualification-harness \
+  --observer-approval I-AM-PHYSICALLY-OBSERVING
+```
 
 ### 7. Complete supervised endurance and authorization
 
 Create a root-owned, non-group/world-writable plan manifest containing the
 accepted preflight, seven baseline, twelve matched-run, two calibration, and
-live-lifecycle evidence paths. The root-owned executable endurance harness must
+live-lifecycle evidence paths plus the lowercase SHA-256 of the exact reviewed harness. The
+root-owned executable endurance harness must
 implement only the protocol in
 [`qualification/supervised-endurance-harness.md`](qualification/supervised-endurance-harness.md).
 Its identity is part of the reviewed candidate; do not improvise a harness at
@@ -1514,6 +1528,7 @@ revision's package:
 sudo /usr/bin/pt31553-fan-qualify supervised-endurance \
   --manifest /etc/pt31553-fan-control/endurance-plan.json \
   --harness /usr/lib/pt31553-fan-control/endurance-harness \
+  --observer-approval I-AM-PHYSICALLY-OBSERVING \
   --evidence-output \
     /var/lib/pt31553-fan-control/evidence/supervised-endurance.json \
   --qualification-record /var/lib/pt31553-fan-control/qualification.json

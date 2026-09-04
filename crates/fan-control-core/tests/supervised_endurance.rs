@@ -10,20 +10,23 @@ use fan_control_core::{
     FanEndpointIdentitiesEvidence, FanReadbackEvidence, FanReadbackField, FanReadbackPhase,
     FilePermissions, FirmwareAutoBaselineEnvironment, FirmwareAutoBaselinePlan, LiveLifecycleCase,
     LiveLifecycleCaseObservation, LiveLifecycleEnvironment, LiveLifecycleFanAutoObservation,
-    LiveLifecycleFanAutoPair, LiveLifecyclePowerObservation, LiveLifecycleProfileObservation,
-    LiveLifecycleRebootArmObservation, LiveLifecycleRebootContinuation, MatchedWorkloadEnvironment,
-    MatchedWorkloadFanRestoration, MatchedWorkloadObservation, MatchedWorkloadPlan,
-    MatchedWorkloadStartingConditions, MatchedWorkloadTachometerCalibrations, ObservationOutcome,
-    PreflightCheckEvidence, QualificationAuthorizationError, QualificationEnvelopeIdentityV1,
-    QualificationRecordV2, RestorationOutcome, RootOwnedQualificationRecordAccess,
-    RunOutcomeEvidence, RunOutcomeStatus, SUPERVISED_ENDURANCE_SAMPLE_COUNT,
-    SUPERVISED_ENDURANCE_SEGMENTS, SUPERVISED_ENDURANCE_WORKLOAD_ID, SampleFreshness,
-    StoppedProcess, SupervisedEnduranceEnvironment, SupervisedEndurancePlan,
+    LiveLifecycleFanAutoPair, LiveLifecycleObserved, LiveLifecycleObserverAttestation,
+    LiveLifecyclePlanError, LiveLifecyclePowerObservation, LiveLifecycleProfileObservation,
+    LiveLifecycleProgress, LiveLifecycleRebootArmObservation, LiveLifecycleRebootContinuation,
+    LiveLifecycleReport, MatchedWorkloadEnvironment, MatchedWorkloadFanRestoration,
+    MatchedWorkloadObservation, MatchedWorkloadPlan, MatchedWorkloadStartingConditions,
+    MatchedWorkloadTachometerCalibrations, ObservationOutcome, PreflightCheckEvidence,
+    QualificationAuthorizationError, QualificationEnvelopeIdentityV1, QualificationRecordV2,
+    RestorationOutcome, RootOwnedQualificationRecordAccess, RunOutcomeEvidence, RunOutcomeStatus,
+    SUPERVISED_ENDURANCE_SAMPLE_COUNT, SUPERVISED_ENDURANCE_SEGMENTS,
+    SUPERVISED_ENDURANCE_WORKLOAD_ID, SampleFreshness, StoppedProcess,
+    SupervisedEnduranceEnvironment, SupervisedEnduranceFanContainment, SupervisedEndurancePlan,
     SupervisedEnduranceProcessStopConfirmation, SupervisedEnduranceSegment,
     SupervisedEnduranceSegmentConfirmation, SystemOwnershipPlatform, TelemetrySampleEvidence,
-    WorkloadEvidence, parse_evidence_v2, run_firmware_auto_baseline,
-    run_live_lifecycle_qualification, run_matched_custom_workload, run_supervised_endurance,
-    write_qualification_record_after_endurance,
+    WorkloadEvidence, parse_evidence_v2, resume_live_lifecycle_qualification,
+    run_firmware_auto_baseline, run_live_lifecycle_until_reboot, run_matched_custom_workload,
+    run_supervised_endurance, write_qualification_record_after_endurance,
+    write_qualification_record_after_endurance_with_guard,
 };
 use support::{
     PROTECTED_POLICY, compatibility_declaration, completed_calibration_record,
@@ -31,6 +34,39 @@ use support::{
 };
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
+
+fn assert_events_in_order(events: &[&str], expected: &[&str]) {
+    let mut remaining = events;
+    for expected_event in expected {
+        let position = remaining
+            .iter()
+            .position(|event| event == expected_event)
+            .unwrap_or_else(|| panic!("missing ordered event {expected_event}: {events:?}"));
+        remaining = &remaining[position + 1..];
+    }
+}
+
+fn run_live_lifecycle_qualification<E: LiveLifecycleEnvironment + ?Sized>(
+    environment: &mut E,
+    identity: &QualificationEnvelopeIdentityV1,
+) -> Result<LiveLifecycleReport, LiveLifecyclePlanError> {
+    let endpoint_identities = FanEndpointIdentitiesEvidence {
+        cpu_enable: "Cpu-enable".into(),
+        gpu_enable: "Gpu-enable".into(),
+        ..fan_endpoint_identities()
+    };
+    match run_live_lifecycle_until_reboot(
+        environment,
+        identity,
+        &"a".repeat(64),
+        &endpoint_identities,
+    )? {
+        LiveLifecycleProgress::AwaitingReboot(checkpoint) => {
+            resume_live_lifecycle_qualification(environment, *checkpoint)
+        }
+        LiveLifecycleProgress::Complete(report) => Ok(*report),
+    }
+}
 
 struct QualificationFixture {
     baselines: Vec<EvidenceRecord>,
@@ -49,6 +85,7 @@ impl QualificationFixture {
         matched_refs: &'a [&'a EvidenceRecord],
     ) -> SupervisedEndurancePlan<'a> {
         SupervisedEndurancePlan {
+            prerequisite_binding_sha256: "a".repeat(64),
             preflight: &self.preflight,
             baselines: baseline_refs,
             matched_workload_runs: matched_refs,
@@ -152,6 +189,7 @@ fn qualification_matrix_is_complete_before_endurance() {
     let plan = fixture.plan(&baseline_refs, &matched_refs);
 
     let incomplete_plan = SupervisedEndurancePlan {
+        prerequisite_binding_sha256: plan.prerequisite_binding_sha256.clone(),
         preflight: plan.preflight,
         baselines: plan.baselines,
         matched_workload_runs: &matched_refs[..matched_refs.len() - 1],
@@ -181,6 +219,7 @@ fn qualification_matrix_is_complete_before_endurance() {
     duplicated_matched[2].outcome.another_passing_run_required = false;
     let duplicated_refs = duplicated_matched.iter().collect::<Vec<_>>();
     let duplicated_plan = SupervisedEndurancePlan {
+        prerequisite_binding_sha256: plan.prerequisite_binding_sha256.clone(),
         preflight: plan.preflight,
         baselines: plan.baselines,
         matched_workload_runs: &duplicated_refs,
@@ -205,6 +244,7 @@ fn qualification_matrix_is_complete_before_endurance() {
         .another_passing_run_required = false;
     let endpoint_relabeled_refs = endpoint_relabeled_matched.iter().collect::<Vec<_>>();
     let endpoint_relabeled_plan = SupervisedEndurancePlan {
+        prerequisite_binding_sha256: plan.prerequisite_binding_sha256.clone(),
         preflight: plan.preflight,
         baselines: plan.baselines,
         matched_workload_runs: &endpoint_relabeled_refs,
@@ -223,6 +263,7 @@ fn qualification_matrix_is_complete_before_endurance() {
     shifted_matched[2].outcome.another_passing_run_required = false;
     let shifted_refs = shifted_matched.iter().collect::<Vec<_>>();
     let shifted_plan = SupervisedEndurancePlan {
+        prerequisite_binding_sha256: plan.prerequisite_binding_sha256.clone(),
         preflight: plan.preflight,
         baselines: plan.baselines,
         matched_workload_runs: &shifted_refs,
@@ -243,6 +284,7 @@ fn qualification_matrix_is_complete_before_endurance() {
             .workload_id = substituted_id.into();
         let substituted_refs = substituted_baselines.iter().collect::<Vec<_>>();
         let substituted_plan = SupervisedEndurancePlan {
+            prerequisite_binding_sha256: plan.prerequisite_binding_sha256.clone(),
             preflight: plan.preflight,
             baselines: &substituted_refs,
             matched_workload_runs: plan.matched_workload_runs,
@@ -262,6 +304,7 @@ fn qualification_matrix_is_complete_before_endurance() {
     relabeled_workload.command[0] = "/usr/lib/pt31553-fan-control/workloads/gpu".into();
     let relabeled_refs = relabeled_baselines.iter().collect::<Vec<_>>();
     let relabeled_plan = SupervisedEndurancePlan {
+        prerequisite_binding_sha256: plan.prerequisite_binding_sha256.clone(),
         preflight: plan.preflight,
         baselines: &relabeled_refs,
         matched_workload_runs: plan.matched_workload_runs,
@@ -276,6 +319,7 @@ fn qualification_matrix_is_complete_before_endurance() {
     let mut retry_preflight = preflight.clone();
     retry_preflight.outcome.another_passing_run_required = true;
     let retry_preflight_plan = SupervisedEndurancePlan {
+        prerequisite_binding_sha256: plan.prerequisite_binding_sha256.clone(),
         preflight: &retry_preflight,
         baselines: plan.baselines,
         matched_workload_runs: plan.matched_workload_runs,
@@ -291,6 +335,7 @@ fn qualification_matrix_is_complete_before_endurance() {
     retry_baselines[0].outcome.another_passing_run_required = true;
     let retry_baseline_refs = retry_baselines.iter().collect::<Vec<_>>();
     let retry_baseline_plan = SupervisedEndurancePlan {
+        prerequisite_binding_sha256: plan.prerequisite_binding_sha256.clone(),
         preflight: plan.preflight,
         baselines: &retry_baseline_refs,
         matched_workload_runs: plan.matched_workload_runs,
@@ -305,6 +350,7 @@ fn qualification_matrix_is_complete_before_endurance() {
     let mut retry_lifecycle = lifecycle.clone();
     retry_lifecycle.outcome.another_passing_run_required = true;
     let retry_lifecycle_plan = SupervisedEndurancePlan {
+        prerequisite_binding_sha256: plan.prerequisite_binding_sha256.clone(),
         preflight: plan.preflight,
         baselines: plan.baselines,
         matched_workload_runs: plan.matched_workload_runs,
@@ -319,6 +365,7 @@ fn qualification_matrix_is_complete_before_endurance() {
     let mut retry_calibration = cpu_calibration.clone();
     retry_calibration.outcome.another_passing_run_required = true;
     let retry_calibration_plan = SupervisedEndurancePlan {
+        prerequisite_binding_sha256: plan.prerequisite_binding_sha256.clone(),
         preflight: plan.preflight,
         baselines: plan.baselines,
         matched_workload_runs: plan.matched_workload_runs,
@@ -336,6 +383,7 @@ fn qualification_matrix_is_complete_before_endurance() {
     let mut mislabeled_workload = plan.workload.clone();
     mislabeled_workload.command = vec!["/usr/bin/true".into()];
     let mislabeled_workload_plan = SupervisedEndurancePlan {
+        prerequisite_binding_sha256: plan.prerequisite_binding_sha256.clone(),
         preflight: plan.preflight,
         baselines: plan.baselines,
         matched_workload_runs: plan.matched_workload_runs,
@@ -371,8 +419,8 @@ fn passing_endurance_publishes_evidence_before_authorization() {
     assert_eq!(
         unsafe_environment.events[unsafe_environment.events.len() - 4..],
         [
-            "stop-workload",
             "stop-service",
+            "confirm-observer",
             "restore-cpu",
             "restore-gpu"
         ]
@@ -403,14 +451,21 @@ fn passing_endurance_publishes_evidence_before_authorization() {
         report.record().samples.len(),
         SUPERVISED_ENDURANCE_SAMPLE_COUNT
     );
-    assert_eq!(
-        environment.events[environment.events.len() - 4..],
-        [
-            "stop-workload",
-            "stop-service",
-            "restore-cpu",
-            "restore-gpu"
-        ]
+    let observer = report
+        .record()
+        .endurance_observer_attestation
+        .as_ref()
+        .expect("passing evidence retains bounded observer checks");
+    assert!(observer.checks.len() >= SUPERVISED_ENDURANCE_SAMPLE_COUNT);
+    assert!(observer.checks.windows(2).all(|pair| {
+        pair[1]
+            .monotonic_millis
+            .saturating_sub(pair[0].monotonic_millis)
+            <= 5_000
+    }));
+    assert_events_in_order(
+        &environment.events,
+        &["stop-service", "restore-cpu", "restore-gpu"],
     );
     assert!(environment.initial_confirmation_was_idle);
     assert_eq!(
@@ -444,6 +499,21 @@ fn passing_endurance_publishes_evidence_before_authorization() {
     let destination = publication_directory.join("qualification.json");
     let evidence_destination = publication_directory.join("endurance.json");
     if effective_user == 0 {
+        let cancelled_destination = publication_directory.join("cancelled-qualification.json");
+        let cancelled_evidence = publication_directory.join("cancelled-endurance.json");
+        assert!(matches!(
+            write_qualification_record_after_endurance_with_guard(
+                &cancelled_destination,
+                &cancelled_evidence,
+                &plan,
+                &report,
+                || false,
+            ),
+            Err(QualificationAuthorizationError::PublicationCancelled)
+        ));
+        assert!(!cancelled_destination.exists());
+        assert!(!cancelled_evidence.exists());
+
         let qualification = write_qualification_record_after_endurance(
             &destination,
             &evidence_destination,
@@ -515,6 +585,216 @@ fn passing_endurance_publishes_evidence_before_authorization() {
     fs::remove_dir_all(publication_directory).unwrap();
 }
 
+#[test]
+fn observer_withdrawal_during_custom_aborts_and_still_restores() {
+    let fixture = qualification_fixture();
+    let baseline_refs = fixture.baselines.iter().collect::<Vec<_>>();
+    let matched_refs = fixture.matched.iter().collect::<Vec<_>>();
+    let plan = fixture.plan(&baseline_refs, &matched_refs);
+    let mut environment = EnduranceEnvironment {
+        withdraw_observer_at: Some(4),
+        ..EnduranceEnvironment::default()
+    };
+
+    let report = run_supervised_endurance(&mut environment, &plan).expect("failure is evidence");
+
+    assert!(!report.accepted());
+    assert!(
+        report
+            .record()
+            .faults
+            .iter()
+            .any(|fault| fault.code == "observer-withdrawn")
+    );
+    assert_eq!(
+        environment.events[environment.events.len() - 4..],
+        [
+            "stop-service",
+            "confirm-observer",
+            "restore-cpu",
+            "restore-gpu"
+        ]
+    );
+}
+
+#[test]
+fn observer_withdrawal_blocks_each_pre_workload_custom_action() {
+    let fixture = qualification_fixture();
+    let baseline_refs = fixture.baselines.iter().collect::<Vec<_>>();
+    let matched_refs = fixture.matched.iter().collect::<Vec<_>>();
+    let plan = fixture.plan(&baseline_refs, &matched_refs);
+
+    for (withdraw_at, forbidden) in [
+        (1, "enter-custom"),
+        (2, SUPERVISED_ENDURANCE_SEGMENTS[0].id),
+        (3, "start-workload"),
+    ] {
+        let mut environment = EnduranceEnvironment {
+            withdraw_observer_at: Some(withdraw_at),
+            ..EnduranceEnvironment::default()
+        };
+
+        let report =
+            run_supervised_endurance(&mut environment, &plan).expect("failure is evidence");
+
+        assert!(!report.accepted());
+        assert!(
+            !environment.events.contains(&forbidden),
+            "check {withdraw_at}"
+        );
+        assert!(
+            report
+                .record()
+                .faults
+                .iter()
+                .any(|fault| fault.detail.contains("observer withdrew"))
+        );
+        if withdraw_at > 1 {
+            assert_events_in_order(
+                &environment.events,
+                &["stop-service", "restore-cpu", "restore-gpu"],
+            );
+        }
+    }
+}
+
+#[test]
+fn stale_future_and_replayed_observer_confirmations_fail_closed() {
+    let fixture = qualification_fixture();
+    let baseline_refs = fixture.baselines.iter().collect::<Vec<_>>();
+    let matched_refs = fixture.matched.iter().collect::<Vec<_>>();
+    let plan = fixture.plan(&baseline_refs, &matched_refs);
+
+    for mut environment in [
+        EnduranceEnvironment {
+            stale_observer_at: Some(2),
+            ..EnduranceEnvironment::default()
+        },
+        EnduranceEnvironment {
+            future_observer_at: Some(1),
+            ..EnduranceEnvironment::default()
+        },
+        EnduranceEnvironment {
+            replay_observer_at: Some(2),
+            ..EnduranceEnvironment::default()
+        },
+    ] {
+        let report =
+            run_supervised_endurance(&mut environment, &plan).expect("failure is evidence");
+        assert!(!report.accepted());
+        assert!(report.record().faults.iter().any(|fault| {
+            fault.code == "custom-control-entry" || fault.code == "endurance-segment"
+        }));
+    }
+}
+
+#[test]
+fn observer_withdrawal_during_cleanup_is_no_go_but_cleanup_continues() {
+    let fixture = qualification_fixture();
+    let baseline_refs = fixture.baselines.iter().collect::<Vec<_>>();
+    let matched_refs = fixture.matched.iter().collect::<Vec<_>>();
+    let plan = fixture.plan(&baseline_refs, &matched_refs);
+    let mut environment = EnduranceEnvironment {
+        withdraw_observer_at: Some(
+            SUPERVISED_ENDURANCE_SAMPLE_COUNT + SUPERVISED_ENDURANCE_SEGMENTS.len() + 3,
+        ),
+        ..EnduranceEnvironment::default()
+    };
+
+    let report = run_supervised_endurance(&mut environment, &plan).expect("failure is evidence");
+
+    assert!(!report.accepted());
+    assert!(environment.events.contains(&"stop-service"));
+    assert!(environment.events.contains(&"restore-cpu"));
+    assert!(
+        report
+            .record()
+            .faults
+            .iter()
+            .any(|fault| fault.code == "observer-withdrawn")
+    );
+}
+
+#[test]
+fn observer_is_reconfirmed_at_service_shutdown_after_workload_cleanup() {
+    let fixture = qualification_fixture();
+    let baseline_refs = fixture.baselines.iter().collect::<Vec<_>>();
+    let matched_refs = fixture.matched.iter().collect::<Vec<_>>();
+    let plan = fixture.plan(&baseline_refs, &matched_refs);
+    let mut environment = EnduranceEnvironment {
+        withdraw_observer_at: Some(
+            SUPERVISED_ENDURANCE_SAMPLE_COUNT + SUPERVISED_ENDURANCE_SEGMENTS.len() + 5,
+        ),
+        ..EnduranceEnvironment::default()
+    };
+
+    let report = run_supervised_endurance(&mut environment, &plan).expect("failure is evidence");
+
+    assert!(!report.accepted());
+    assert!(environment.events.contains(&"stop-service"));
+    assert!(environment.events.contains(&"restore-cpu"));
+    assert!(
+        report
+            .record()
+            .faults
+            .iter()
+            .any(|fault| fault.code == "observer-withdrawn")
+    );
+}
+
+#[test]
+fn maximum_containment_outcomes_survive_failed_auto_restoration() {
+    let fixture = qualification_fixture();
+    let baseline_refs = fixture.baselines.iter().collect::<Vec<_>>();
+    let matched_refs = fixture.matched.iter().collect::<Vec<_>>();
+    let plan = fixture.plan(&baseline_refs, &matched_refs);
+    let mut environment = EnduranceEnvironment {
+        restoration_outcome: Some(RestorationOutcome::MaximumContainmentConfirmed),
+        ..EnduranceEnvironment::default()
+    };
+
+    let report = run_supervised_endurance(&mut environment, &plan).expect("failure is evidence");
+
+    assert!(!report.accepted());
+    assert_eq!(report.record().restoration_attempts.len(), 4);
+    assert!(
+        report.record().restoration_attempts[..2]
+            .iter()
+            .all(|attempt| { attempt.outcome == RestorationOutcome::FirmwareAutoUnconfirmed })
+    );
+    assert!(
+        report.record().restoration_attempts[2..]
+            .iter()
+            .all(|attempt| { attempt.outcome == RestorationOutcome::MaximumContainmentConfirmed })
+    );
+    assert_eq!(
+        report.record().state_transitions.last().unwrap().to,
+        "emergency-maximum-containment"
+    );
+}
+
+#[test]
+fn authorization_rejects_a_report_from_another_prerequisite_fingerprint() {
+    let fixture = qualification_fixture();
+    let baseline_refs = fixture.baselines.iter().collect::<Vec<_>>();
+    let matched_refs = fixture.matched.iter().collect::<Vec<_>>();
+    let plan = fixture.plan(&baseline_refs, &matched_refs);
+    let report = run_supervised_endurance(&mut EnduranceEnvironment::default(), &plan)
+        .expect("qualified plan runs");
+    let mut substituted_plan = fixture.plan(&baseline_refs, &matched_refs);
+    substituted_plan.prerequisite_binding_sha256 = "b".repeat(64);
+
+    assert!(matches!(
+        write_qualification_record_after_endurance(
+            Path::new("/tmp/qualification.json"),
+            Path::new("/tmp/endurance.json"),
+            &substituted_plan,
+            &report,
+        ),
+        Err(QualificationAuthorizationError::EnduranceNotAccepted)
+    ));
+}
+
 fn accepted_endurance_record() -> &'static EvidenceRecord {
     static ACCEPTED: OnceLock<EvidenceRecord> = OnceLock::new();
     ACCEPTED.get_or_init(|| {
@@ -538,6 +818,14 @@ fn schema_and_semantic_tampering_are_rejected() {
     let schema_validator = jsonschema::validator_for(&schema).unwrap();
     assert!(schema_validator.is_valid(&accepted_json));
     for schema_tampering in [
+        {
+            let mut value = accepted_json.clone();
+            value
+                .as_object_mut()
+                .unwrap()
+                .remove("endurance_observer_attestation");
+            value
+        },
         {
             let mut value = accepted_json.clone();
             value["thermal_summary"]["system_stable"] = false.into();
@@ -583,6 +871,28 @@ fn schema_and_semantic_tampering_are_rejected() {
         assert!(!schema_validator.is_valid(&schema_tampering));
     }
     for tampered in [
+        {
+            let mut value = accepted_json.clone();
+            value["endurance_observer_attestation"]["checks"]
+                .as_array_mut()
+                .unwrap()
+                .drain(10..12);
+            value
+        },
+        {
+            let mut value = accepted_json.clone();
+            let alternating = value["endurance_observer_attestation"]["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| index % 2 == 0)
+                .map(|(_, check)| check.clone())
+                .collect();
+            value["endurance_observer_attestation"]["checks"] =
+                serde_json::Value::Array(alternating);
+            value
+        },
         {
             let mut value = accepted_json.clone();
             value["workload"]["power_profile"] = "battery".into();
@@ -700,13 +1010,34 @@ fn runtime_failures_preserve_ordered_cleanup_evidence() {
     );
 
     let mut delayed_segment_environment = EnduranceEnvironment {
-        segment_delay_millis: 101,
+        segment_delay_millis: 2_001,
         ..EnduranceEnvironment::default()
     };
     let delayed_segment = run_supervised_endurance(&mut delayed_segment_environment, &plan)
         .expect("timing failure is evidence");
     assert!(!delayed_segment.accepted());
     assert!(delayed_segment_environment.events.contains(&"stop-service"));
+
+    let mut delayed_custom_entry_environment = EnduranceEnvironment {
+        enter_custom_delay_millis: 5_000,
+        observer_delay_at: Some(2),
+        observer_delay_millis: 5_001,
+        ..EnduranceEnvironment::default()
+    };
+    let delayed_custom_entry =
+        run_supervised_endurance(&mut delayed_custom_entry_environment, &plan)
+            .expect("observer-window overrun is retained as failed evidence");
+    assert!(!delayed_custom_entry.accepted());
+    assert!(delayed_custom_entry.record().faults.iter().any(|fault| {
+        fault.code == "custom-control-entry" && fault.detail.contains("exceeded its deadline")
+    }));
+    assert!(
+        delayed_custom_entry
+            .record()
+            .faults
+            .iter()
+            .any(|fault| fault.code == "observer-withdrawn")
+    );
 
     let mut invalid_segment_environment = EnduranceEnvironment {
         invalid_segment_confirmation: true,
@@ -767,6 +1098,20 @@ fn runtime_failures_preserve_ordered_cleanup_evidence() {
             .outcome
             .final_firmware_auto_confirmed
     );
+
+    let mut boundary_capture_environment = EnduranceEnvironment {
+        capture_delay_at_sample: Some(450),
+        // The observer confirmation consumes 1 ms; capture then completes at +100 ms.
+        capture_delay_millis: 99,
+        ..EnduranceEnvironment::default()
+    };
+    let boundary_capture = run_supervised_endurance(&mut boundary_capture_environment, &plan)
+        .expect("boundary capture inside its jitter leaves a transition window");
+    assert!(
+        boundary_capture.accepted(),
+        "{:#?}",
+        boundary_capture.record().faults
+    );
     assert!(
         delayed_capture
             .record()
@@ -788,19 +1133,23 @@ fn runtime_failures_preserve_ordered_cleanup_evidence() {
             .expect("starting-condition failure is retained as failed evidence");
     assert!(!failed_starting_conditions.accepted());
     assert!(failed_starting_conditions.record().commands.is_empty());
-    assert!(
+    assert_eq!(
         failed_starting_conditions
             .record()
             .restoration_attempts
-            .is_empty()
+            .len(),
+        2
     );
     assert!(
-        !failed_starting_conditions
+        failed_starting_conditions
             .record()
             .outcome
             .final_firmware_auto_confirmed
     );
-    assert!(failed_starting_conditions_environment.events.is_empty());
+    assert_eq!(
+        failed_starting_conditions_environment.events,
+        ["stop-workload", "restore-cpu", "restore-gpu"]
+    );
 
     let mut regressed_capture_environment = EnduranceEnvironment {
         regress_after_wait: true,
@@ -835,15 +1184,14 @@ fn runtime_failures_preserve_ordered_cleanup_evidence() {
     let contained = run_supervised_endurance(&mut contained_environment, &plan)
         .expect("hard-stop containment is retained as failed evidence");
     assert!(!contained.accepted());
-    assert_eq!(
-        contained_environment.events[contained_environment.events.len() - 5..],
-        [
-            "stop-workload",
+    assert_events_in_order(
+        &contained_environment.events,
+        &[
             "contain-workload",
             "stop-service",
             "restore-cpu",
-            "restore-gpu"
-        ]
+            "restore-gpu",
+        ],
     );
 
     let mut uncontained_environment = EnduranceEnvironment {
@@ -854,16 +1202,15 @@ fn runtime_failures_preserve_ordered_cleanup_evidence() {
     let uncontained = run_supervised_endurance(&mut uncontained_environment, &plan)
         .expect("uncontained workload is retained as failed evidence");
     assert!(!uncontained.accepted());
-    assert_eq!(
-        &uncontained_environment.events[uncontained_environment.events.len() - 6..],
+    assert_events_in_order(
+        &uncontained_environment.events,
         &[
-            "stop-workload",
             "contain-workload",
             "force-contain-workload",
             "stop-service",
             "restore-cpu",
-            "restore-gpu"
-        ][..]
+            "restore-gpu",
+        ],
     );
     assert_eq!(uncontained.record().process_stops.len(), 2);
     assert_eq!(uncontained.record().restoration_attempts.len(), 2);
@@ -893,6 +1240,37 @@ fn runtime_failures_preserve_ordered_cleanup_evidence() {
             .iter()
             .any(|fault| fault.code == "workload-terminal-containment")
     );
+    assert_events_in_order(
+        &unconfirmed_terminal_containment_environment.events,
+        &[
+            "force-contain-workload",
+            "stop-service",
+            "contain-cpu-maximum",
+            "contain-gpu-maximum",
+        ],
+    );
+    assert!(
+        !unconfirmed_terminal_containment_environment
+            .events
+            .iter()
+            .any(|event| matches!(*event, "restore-cpu" | "restore-gpu"))
+    );
+    assert!(
+        unconfirmed_terminal_containment
+            .record()
+            .restoration_attempts
+            .iter()
+            .all(|attempt| attempt.outcome == RestorationOutcome::MaximumContainmentConfirmed)
+    );
+    assert_eq!(
+        unconfirmed_terminal_containment
+            .record()
+            .state_transitions
+            .last()
+            .unwrap()
+            .to,
+        "emergency-maximum-containment"
+    );
 
     let mut service_contained_environment = EnduranceEnvironment {
         stop_service_running: true,
@@ -901,15 +1279,14 @@ fn runtime_failures_preserve_ordered_cleanup_evidence() {
     let service_contained = run_supervised_endurance(&mut service_contained_environment, &plan)
         .expect("service containment is retained as failed evidence");
     assert!(!service_contained.accepted());
-    assert_eq!(
-        &service_contained_environment.events[service_contained_environment.events.len() - 5..],
+    assert_events_in_order(
+        &service_contained_environment.events,
         &[
-            "stop-workload",
             "stop-service",
             "contain-service",
             "restore-cpu",
-            "restore-gpu"
-        ]
+            "restore-gpu",
+        ],
     );
 
     let mut service_uncontained_environment = EnduranceEnvironment {
@@ -920,16 +1297,15 @@ fn runtime_failures_preserve_ordered_cleanup_evidence() {
     let service_uncontained = run_supervised_endurance(&mut service_uncontained_environment, &plan)
         .expect("uncontained service is retained as failed evidence");
     assert!(!service_uncontained.accepted());
-    assert_eq!(
-        &service_uncontained_environment.events[service_uncontained_environment.events.len() - 6..],
+    assert_events_in_order(
+        &service_uncontained_environment.events,
         &[
-            "stop-workload",
             "stop-service",
             "contain-service",
             "force-contain-service",
             "restore-cpu",
-            "restore-gpu"
-        ]
+            "restore-gpu",
+        ],
     );
     assert_eq!(service_uncontained.record().restoration_attempts.len(), 2);
     assert!(
@@ -951,8 +1327,8 @@ fn runtime_failures_preserve_ordered_cleanup_evidence() {
     let all_stops_fail = run_supervised_endurance(&mut all_stops_fail_environment, &plan)
         .expect("failed cleanup is retained as failed evidence");
     assert!(!all_stops_fail.accepted());
-    assert_eq!(
-        &all_stops_fail_environment.events[all_stops_fail_environment.events.len() - 8..],
+    assert_events_in_order(
+        &all_stops_fail_environment.events,
         &[
             "stop-workload",
             "contain-workload",
@@ -960,18 +1336,68 @@ fn runtime_failures_preserve_ordered_cleanup_evidence() {
             "stop-service",
             "contain-service",
             "force-contain-service",
-            "restore-cpu",
-            "restore-gpu",
-        ]
+            "contain-cpu-maximum",
+            "contain-gpu-maximum",
+        ],
     );
     assert!(all_stops_fail.record().process_stops.is_empty());
-    assert_eq!(all_stops_fail.record().restoration_attempts.len(), 2);
     assert!(
         all_stops_fail
+            .record()
+            .restoration_attempts
+            .iter()
+            .all(|attempt| attempt.outcome == RestorationOutcome::MaximumContainmentConfirmed)
+    );
+    assert!(
+        !all_stops_fail
             .record()
             .outcome
             .final_firmware_auto_confirmed
     );
+}
+
+#[test]
+fn emergency_maximum_containment_requires_mode_pwm_and_endpoint_readbacks() {
+    let fixture = qualification_fixture();
+    let baseline_refs = fixture.baselines.iter().collect::<Vec<_>>();
+    let matched_refs = fixture.matched.iter().collect::<Vec<_>>();
+    let plan = fixture.plan(&baseline_refs, &matched_refs);
+
+    for invalid_field in ["mode", "pwm", "identity"] {
+        let mut environment = EnduranceEnvironment {
+            stop_workload_running: true,
+            containment_running: true,
+            force_workload_running: true,
+            invalid_containment_mode_readback: invalid_field == "mode",
+            invalid_containment_pwm_readback: invalid_field == "pwm",
+            invalid_containment_identity: invalid_field == "identity",
+            ..EnduranceEnvironment::default()
+        };
+
+        let report = run_supervised_endurance(&mut environment, &plan)
+            .expect("unconfirmed maximum containment is retained as failed evidence");
+
+        assert!(
+            report
+                .record()
+                .restoration_attempts
+                .iter()
+                .all(|attempt| { attempt.outcome == RestorationOutcome::ContainmentFailed })
+        );
+        assert_eq!(
+            report.record().state_transitions.last().unwrap().to,
+            "restoration-failed"
+        );
+        assert_eq!(
+            report
+                .record()
+                .readbacks
+                .iter()
+                .filter(|readback| readback.phase == Some(FanReadbackPhase::Final))
+                .count(),
+            4
+        );
+    }
 }
 
 fn baseline(
@@ -1035,6 +1461,7 @@ fn preflight(envelope: QualificationEnvelopeIdentityV1) -> EvidenceRecord {
         workload_started_at: None,
         baseline_binding_sha256: None,
         preflight_binding_sha256: None,
+        prerequisite_binding_sha256: None,
         nvidia_gpu_uuid: Some("GPU-11111111-2222-3333-4444-555555555555".into()),
         fan_endpoint_identities: Some(FanEndpointIdentitiesEvidence {
             cpu_pwm: "device-0-inode-7".into(),
@@ -1093,6 +1520,7 @@ fn preflight(envelope: QualificationEnvelopeIdentityV1) -> EvidenceRecord {
         firmware_auto_cleanup: None,
         thermal_summary: None,
         endurance_thermal_envelope: None,
+        endurance_observer_attestation: None,
         live_lifecycle_cases: None,
         outcome: RunOutcomeEvidence {
             status: RunOutcomeStatus::Passed,
@@ -1374,15 +1802,40 @@ impl LifecycleEnvironment {
     }
 }
 
+fn lifecycle_observer_attestations(
+    actions: &[&str],
+    started_at: EvidenceTimestamp,
+    completed_at: EvidenceTimestamp,
+) -> Vec<LiveLifecycleObserverAttestation> {
+    actions
+        .iter()
+        .map(|action| LiveLifecycleObserverAttestation {
+            action: (*action).into(),
+            started_at,
+            completed_at,
+            checks: vec![started_at, completed_at],
+        })
+        .collect()
+}
+
 impl LiveLifecycleEnvironment for LifecycleEnvironment {
     fn timestamp(&mut self) -> EvidenceTimestamp {
         self.tick()
     }
+    fn current_boot_id(&mut self) -> Result<String, String> {
+        Ok(if self.after_reboot {
+            "boot-after"
+        } else {
+            "boot-before"
+        }
+        .into())
+    }
     fn run_case(
         &mut self,
         case: LiveLifecycleCase,
-    ) -> Result<LiveLifecycleCaseObservation, String> {
-        Ok(match case {
+    ) -> Result<LiveLifecycleObserved<LiveLifecycleCaseObservation>, String> {
+        let observer_started_at = self.tick();
+        let observation = match case {
             LiveLifecycleCase::InvalidConfiguration => {
                 LiveLifecycleCaseObservation::InvalidConfiguration {
                     observed_at: self.tick(),
@@ -1484,21 +1937,99 @@ impl LiveLifecycleEnvironment for LifecycleEnvironment {
                 }
             }
             LiveLifecycleCase::Reboot => unreachable!(),
+        };
+        let observer_completed_at = self.tick();
+        let actions: &[&str] = match case {
+            LiveLifecycleCase::InvalidConfiguration => &[],
+            LiveLifecycleCase::DuplicateProcess => &["duplicate-owner-custom"],
+            LiveLifecycleCase::NormalStopRestart => {
+                &["normal-owner-before-stop", "normal-restart-custom"]
+            }
+            LiveLifecycleCase::ProcessKillRecovery => {
+                &["process-before-kill", "bounded-restart-custom"]
+            }
+            LiveLifecycleCase::WatchdogRecovery => {
+                &["watchdog-monitored-custom", "bounded-restart-custom"]
+            }
+            LiveLifecycleCase::AcToBatteryTransition => &["ac-transition-custom"],
+            LiveLifecycleCase::SuspendResume => &["pre-suspend-custom", "post-resume-custom"],
+            LiveLifecycleCase::Reboot => unreachable!(),
+        };
+        Ok(LiveLifecycleObserved {
+            observation,
+            observer_attestations: lifecycle_observer_attestations(
+                actions,
+                observer_started_at,
+                observer_completed_at,
+            ),
         })
     }
-    fn resume_after_reboot(&mut self) -> Result<LiveLifecycleRebootContinuation, String> {
+
+    fn restore_after_case(
+        &mut self,
+        case: LiveLifecycleCase,
+    ) -> Result<LiveLifecycleObserved<EvidenceTimestamp>, String> {
+        let started_at = self.tick();
+        let restored_at = self.tick();
+        let observer_attestations = if case == LiveLifecycleCase::InvalidConfiguration {
+            Vec::new()
+        } else {
+            vec![LiveLifecycleObserverAttestation {
+                action: format!("{}-cleanup", case.id()),
+                started_at,
+                completed_at: restored_at,
+                checks: vec![started_at, restored_at],
+            }]
+        };
+        Ok(LiveLifecycleObserved {
+            observation: restored_at,
+            observer_attestations,
+        })
+    }
+
+    fn resume_after_reboot(
+        &mut self,
+    ) -> Result<LiveLifecycleObserved<LiveLifecycleRebootContinuation>, String> {
         self.after_reboot = true;
-        Ok(LiveLifecycleRebootContinuation {
-            reboot_completed: true,
-            boot_id_before: "boot-before".into(),
-            boot_id_after: "boot-after".into(),
-            post_boot_at: self.tick(),
+        Ok(LiveLifecycleObserved {
+            observation: LiveLifecycleRebootContinuation {
+                reboot_completed: true,
+                boot_id_before: "boot-before".into(),
+                boot_id_after: "boot-after".into(),
+                post_boot_at: self.tick(),
+            },
+            observer_attestations: Vec::new(),
         })
     }
-    fn arm_after_reboot(&mut self) -> Result<LiveLifecycleRebootArmObservation, String> {
-        Ok(LiveLifecycleRebootArmObservation {
-            armed_at: self.tick(),
-            controller_process_identity: "after-reboot".into(),
+
+    fn arm_after_reboot(
+        &mut self,
+    ) -> Result<LiveLifecycleObserved<LiveLifecycleRebootArmObservation>, String> {
+        let started_at = self.tick();
+        let completed_at = self.tick();
+        Ok(LiveLifecycleObserved {
+            observation: LiveLifecycleRebootArmObservation {
+                armed_at: started_at,
+                controller_process_identity: "after-reboot".into(),
+            },
+            observer_attestations: lifecycle_observer_attestations(
+                &["post-reboot-arm"],
+                started_at,
+                completed_at,
+            ),
+        })
+    }
+
+    fn restore_after_reboot(&mut self) -> Result<LiveLifecycleObserved<EvidenceTimestamp>, String> {
+        let started_at = self.tick();
+        let completed_at = self.tick();
+        Ok(LiveLifecycleObserved {
+            observation: completed_at,
+            observer_attestations: lifecycle_observer_attestations(
+                &["post-reboot-restore"],
+                started_at,
+                completed_at,
+            ),
         })
     }
     fn confirm_firmware_auto(
@@ -1528,7 +2059,10 @@ struct EnduranceEnvironment {
     invalid_sample_utilization: bool,
     out_of_range_sample_utilization: bool,
     segment_delay_millis: u64,
+    enter_custom_delay_millis: u64,
     capture_delay_millis: u64,
+    capture_delay_at_sample: Option<usize>,
+    observation_count: usize,
     fail_starting_conditions: bool,
     regress_after_wait: bool,
     stop_workload_delay_millis: u64,
@@ -1540,11 +2074,47 @@ struct EnduranceEnvironment {
     service_containment_running: bool,
     force_service_failure: bool,
     force_service_running: bool,
+    observer_checks: usize,
+    observer_delay_at: Option<usize>,
+    observer_delay_millis: u64,
+    withdraw_observer_at: Option<usize>,
+    stale_observer_at: Option<usize>,
+    future_observer_at: Option<usize>,
+    replay_observer_at: Option<usize>,
+    last_observer_at: Option<EvidenceTimestamp>,
+    restoration_outcome: Option<RestorationOutcome>,
+    invalid_containment_mode_readback: bool,
+    invalid_containment_pwm_readback: bool,
+    invalid_containment_identity: bool,
 }
 
 impl SupervisedEnduranceEnvironment for EnduranceEnvironment {
     fn timestamp(&mut self) -> EvidenceTimestamp {
         timestamp(self.now)
+    }
+    fn confirm_observer(&mut self, _: u64) -> Result<EvidenceTimestamp, String> {
+        self.observer_checks += 1;
+        self.events.push("confirm-observer");
+        if self.withdraw_observer_at == Some(self.observer_checks) {
+            Err("observer withdrew".into())
+        } else {
+            self.now += if self.observer_delay_at == Some(self.observer_checks) {
+                self.observer_delay_millis
+            } else {
+                1
+            };
+            let observed_at = if self.stale_observer_at == Some(self.observer_checks) {
+                timestamp(self.now.saturating_sub(2))
+            } else if self.future_observer_at == Some(self.observer_checks) {
+                timestamp(self.now + 1)
+            } else if self.replay_observer_at == Some(self.observer_checks) {
+                self.last_observer_at.unwrap_or_else(|| timestamp(self.now))
+            } else {
+                timestamp(self.now)
+            };
+            self.last_observer_at = Some(observed_at);
+            Ok(observed_at)
+        }
     }
     fn capture_starting_conditions(
         &mut self,
@@ -1565,6 +2135,7 @@ impl SupervisedEnduranceEnvironment for EnduranceEnvironment {
     }
     fn enter_custom_control(&mut self, _: u64) -> Result<(), String> {
         self.events.push("enter-custom");
+        self.now += self.enter_custom_delay_millis;
         Ok(())
     }
     fn begin_segment(
@@ -1616,6 +2187,7 @@ impl SupervisedEnduranceEnvironment for EnduranceEnvironment {
         Ok(())
     }
     fn capture_observation(&mut self, _: u64) -> Result<MatchedWorkloadObservation, String> {
+        self.observation_count += 1;
         let mut observation = custom_observation(self.now, self.profile.expect("active segment"));
         let utilization = match self.load.expect("active segment") {
             fan_control_core::SupervisedEnduranceLoad::Load => 8_000,
@@ -1630,9 +2202,14 @@ impl SupervisedEnduranceEnvironment for EnduranceEnvironment {
                 utilization
             });
         observation.sample.gpu_utilization_basis_points = Some(utilization);
-        self.now += self.capture_delay_millis;
+        if self
+            .capture_delay_at_sample
+            .is_none_or(|sample| sample == self.observation_count)
+        {
+            self.now += self.capture_delay_millis;
+        }
         if self.regress_after_wait {
-            self.now = self.now.saturating_sub(1);
+            self.now = self.now.saturating_sub(2);
         }
         if self.overheat {
             observation.sample.cpu_millicelsius = Some(95_000);
@@ -1727,7 +2304,46 @@ impl SupervisedEnduranceEnvironment for EnduranceEnvironment {
             EvidenceFan::Gpu => "restore-gpu",
         });
         self.now += 1;
-        successful_restoration(fan)
+        match self.restoration_outcome {
+            Some(outcome) => MatchedWorkloadFanRestoration {
+                auto_write_succeeded: false,
+                enable_readback: Some(1),
+                endpoint_identity: format!("{fan:?}-Enable-endpoint"),
+                outcome,
+            },
+            None => successful_restoration(fan),
+        }
+    }
+    fn contain_fan_at_maximum(
+        &mut self,
+        fan: EvidenceFan,
+        _: u64,
+    ) -> SupervisedEnduranceFanContainment {
+        self.events.push(match fan {
+            EvidenceFan::Cpu => "contain-cpu-maximum",
+            EvidenceFan::Gpu => "contain-gpu-maximum",
+        });
+        self.now += 1;
+        SupervisedEnduranceFanContainment {
+            enable_readback: Some(if self.invalid_containment_mode_readback {
+                2
+            } else {
+                1
+            }),
+            pwm_write_succeeded: true,
+            pwm_readback: Some(if self.invalid_containment_pwm_readback {
+                254
+            } else {
+                255
+            }),
+            enable_endpoint_identity: format!("{fan:?}-Enable-endpoint"),
+            pwm_endpoint_identity: if self.invalid_containment_identity {
+                format!("{fan:?}-replacement-Pwm-endpoint")
+            } else {
+                format!("{fan:?}-Pwm-endpoint")
+            },
+            outcome: RestorationOutcome::MaximumContainmentConfirmed,
+        }
     }
 }
 

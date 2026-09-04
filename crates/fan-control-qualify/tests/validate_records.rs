@@ -39,7 +39,10 @@ fn matching_sources() -> (String, String) {
     );
     let mut evidence = String::new();
     compressed.read_to_string(&mut evidence).unwrap();
-    let evidence_value: serde_json::Value = serde_json::from_str(&evidence).unwrap();
+    let mut evidence_value: serde_json::Value = serde_json::from_str(&evidence).unwrap();
+    evidence_value["prerequisite_binding_sha256"] = "a".repeat(64).into();
+    add_endurance_observer_fixture(&mut evidence_value);
+    let evidence = serde_json::to_string(&evidence_value).unwrap();
     let envelope = &evidence_value["qualification_envelope"];
     let record = serde_json::json!({
         "schema_version": 2,
@@ -62,6 +65,31 @@ fn matching_sources() -> (String, String) {
         }
     });
     (serde_json::to_string(&record).unwrap(), evidence)
+}
+
+fn add_endurance_observer_fixture(record: &mut serde_json::Value) {
+    let mut checks = vec![record["state_transitions"][0]["timestamp"].clone()];
+    let started = record["started_at"].clone();
+    for offset in 1..=9 {
+        checks.push(serde_json::json!({
+            "monotonic_millis": started["monotonic_millis"].as_u64().unwrap() + offset,
+            "wall_unix_millis": started["wall_unix_millis"].as_i64().unwrap() + offset as i64,
+        }));
+    }
+    checks.extend(
+        record["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sample| sample["timestamp"].clone()),
+    );
+    checks.push(record["process_stops"][1]["requested_at"].clone());
+    checks.push(record["process_stops"][1]["confirmed_at"].clone());
+    record["endurance_observer_attestation"] = serde_json::json!({
+        "started_at": checks[0],
+        "completed_at": checks.last().unwrap(),
+        "checks": checks,
+    });
 }
 
 fn write_sources(directory: &Path, record: &str, evidence: &str) -> (PathBuf, PathBuf) {

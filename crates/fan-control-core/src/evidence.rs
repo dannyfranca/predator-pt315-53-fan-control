@@ -42,6 +42,7 @@ pub struct EvidenceRecord {
     pub workload_started_at: Option<EvidenceTimestamp>,
     pub baseline_binding_sha256: Option<String>,
     pub preflight_binding_sha256: Option<String>,
+    pub prerequisite_binding_sha256: Option<String>,
     pub nvidia_gpu_uuid: Option<String>,
     pub fan_endpoint_identities: Option<FanEndpointIdentitiesEvidence>,
     pub firmware_auto_cleanup: Option<FirmwareAutoCleanupEvidence>,
@@ -57,6 +58,7 @@ pub struct EvidenceRecord {
     pub calibration: Vec<FanCalibrationEvidence>,
     pub thermal_summary: Option<ThermalSummaryEvidence>,
     pub endurance_thermal_envelope: Option<EnduranceThermalEnvelopeEvidence>,
+    pub endurance_observer_attestation: Option<EnduranceObserverAttestationEvidence>,
     pub live_lifecycle_cases: Option<Vec<crate::LiveLifecycleCaseResult>>,
     pub outcome: RunOutcomeEvidence,
 }
@@ -79,6 +81,8 @@ struct EvidenceRecordWire {
     baseline_binding_sha256: Option<String>,
     #[serde(default, deserialize_with = "deserialize_present_option")]
     preflight_binding_sha256: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    prerequisite_binding_sha256: Option<String>,
     #[serde(default, deserialize_with = "deserialize_present_option")]
     nvidia_gpu_uuid: Option<String>,
     #[serde(default, deserialize_with = "deserialize_present_option")]
@@ -103,6 +107,8 @@ struct EvidenceRecordWire {
     #[serde(default, deserialize_with = "deserialize_present_option")]
     endurance_thermal_envelope: Option<EnduranceThermalEnvelopeEvidence>,
     #[serde(default, deserialize_with = "deserialize_present_option")]
+    endurance_observer_attestation: Option<EnduranceObserverAttestationEvidence>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
     live_lifecycle_cases: Option<Vec<crate::LiveLifecycleCaseResult>>,
     outcome: RunOutcomeEvidence,
 }
@@ -122,6 +128,7 @@ impl TryFrom<EvidenceRecordWire> for EvidenceRecord {
             workload_started_at: wire.workload_started_at,
             baseline_binding_sha256: wire.baseline_binding_sha256,
             preflight_binding_sha256: wire.preflight_binding_sha256,
+            prerequisite_binding_sha256: wire.prerequisite_binding_sha256,
             nvidia_gpu_uuid: wire.nvidia_gpu_uuid,
             fan_endpoint_identities: wire.fan_endpoint_identities,
             firmware_auto_cleanup: wire.firmware_auto_cleanup,
@@ -137,6 +144,7 @@ impl TryFrom<EvidenceRecordWire> for EvidenceRecord {
             calibration: wire.calibration,
             thermal_summary: wire.thermal_summary,
             endurance_thermal_envelope: wire.endurance_thermal_envelope,
+            endurance_observer_attestation: wire.endurance_observer_attestation,
             live_lifecycle_cases: wire.live_lifecycle_cases,
             outcome: wire.outcome,
         };
@@ -157,11 +165,13 @@ impl Serialize for EvidenceRecord {
                 + usize::from(self.workload_started_at.is_some())
                 + usize::from(self.baseline_binding_sha256.is_some())
                 + usize::from(self.preflight_binding_sha256.is_some())
+                + usize::from(self.prerequisite_binding_sha256.is_some())
                 + usize::from(self.nvidia_gpu_uuid.is_some())
                 + usize::from(self.fan_endpoint_identities.is_some())
                 + usize::from(self.firmware_auto_cleanup.is_some())
                 + usize::from(self.preflight_checks.is_some())
                 + usize::from(self.endurance_thermal_envelope.is_some())
+                + usize::from(self.endurance_observer_attestation.is_some())
                 + usize::from(self.live_lifecycle_cases.is_some())
                 + usize::from(!self.process_stops.is_empty()),
         )?;
@@ -185,6 +195,9 @@ impl Serialize for EvidenceRecord {
         }
         if let Some(preflight_binding_sha256) = &self.preflight_binding_sha256 {
             record.serialize_field("preflight_binding_sha256", preflight_binding_sha256)?;
+        }
+        if let Some(prerequisite_binding_sha256) = &self.prerequisite_binding_sha256 {
+            record.serialize_field("prerequisite_binding_sha256", prerequisite_binding_sha256)?;
         }
         if let Some(nvidia_gpu_uuid) = &self.nvidia_gpu_uuid {
             record.serialize_field("nvidia_gpu_uuid", nvidia_gpu_uuid)?;
@@ -213,6 +226,9 @@ impl Serialize for EvidenceRecord {
         if let Some(endurance_thermal_envelope) = &self.endurance_thermal_envelope {
             record.serialize_field("endurance_thermal_envelope", endurance_thermal_envelope)?;
         }
+        if let Some(attestation) = &self.endurance_observer_attestation {
+            record.serialize_field("endurance_observer_attestation", attestation)?;
+        }
         if let Some(live_lifecycle_cases) = &self.live_lifecycle_cases {
             record.serialize_field("live_lifecycle_cases", live_lifecycle_cases)?;
         }
@@ -234,6 +250,14 @@ pub struct EnduranceThermalEnvelopeEvidence {
     pub gpu_peak_limit_millicelsius: i32,
     pub cpu_p95_limit_millicelsius: i32,
     pub gpu_p95_limit_millicelsius: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnduranceObserverAttestationEvidence {
+    pub started_at: EvidenceTimestamp,
+    pub completed_at: EvidenceTimestamp,
+    pub checks: Vec<EvidenceTimestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -747,6 +771,7 @@ impl EvidenceRecord {
             workload_started_at: None,
             baseline_binding_sha256: None,
             preflight_binding_sha256: None,
+            prerequisite_binding_sha256: None,
             nvidia_gpu_uuid: None,
             fan_endpoint_identities: None,
             firmware_auto_cleanup: None,
@@ -762,6 +787,7 @@ impl EvidenceRecord {
             calibration: Vec::new(),
             thermal_summary: None,
             endurance_thermal_envelope: None,
+            endurance_observer_attestation: None,
             live_lifecycle_cases: None,
             outcome,
         }
@@ -795,6 +821,11 @@ impl EvidenceRecord {
                     field: "preflight_binding_sha256",
                 });
             }
+            if self.prerequisite_binding_sha256.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "prerequisite_binding_sha256",
+                });
+            }
             if self.nvidia_gpu_uuid.is_some() {
                 return Err(EvidenceValidationError::IncompatibleSchemaField {
                     field: "nvidia_gpu_uuid",
@@ -818,6 +849,11 @@ impl EvidenceRecord {
             if self.live_lifecycle_cases.is_some() {
                 return Err(EvidenceValidationError::IncompatibleSchemaField {
                     field: "live_lifecycle_cases",
+                });
+            }
+            if self.endurance_observer_attestation.is_some() {
+                return Err(EvidenceValidationError::IncompatibleSchemaField {
+                    field: "endurance_observer_attestation",
                 });
             }
             if self.readbacks.iter().any(|readback| {
@@ -883,6 +919,30 @@ impl EvidenceRecord {
             (EVIDENCE_SCHEMA_VERSION_V2, "firmware-auto-baseline", _) | (_, _, Some(_)) => {
                 return Err(EvidenceValidationError::InvalidValue {
                     field: "preflight_binding_sha256",
+                    index: 0,
+                });
+            }
+            (_, _, None) => {}
+        }
+        match (
+            self.schema_version,
+            self.stage.as_str(),
+            self.prerequisite_binding_sha256.as_deref(),
+        ) {
+            (
+                EVIDENCE_SCHEMA_VERSION_V2,
+                "fan-calibration" | "live-lifecycle" | "supervised-endurance",
+                Some(binding),
+            ) if is_lower_hex(binding, 64) => {}
+            (EVIDENCE_SCHEMA_VERSION_V2, "live-lifecycle" | "supervised-endurance", None) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "prerequisite_binding_sha256",
+                    index: 0,
+                });
+            }
+            (_, _, Some(_)) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "prerequisite_binding_sha256",
                     index: 0,
                 });
             }
@@ -978,6 +1038,44 @@ impl EvidenceRecord {
                 });
             }
             (_, None) => {}
+        }
+        match (
+            self.schema_version,
+            self.stage.as_str(),
+            self.outcome.status,
+            self.endurance_observer_attestation.as_ref(),
+        ) {
+            (
+                EVIDENCE_SCHEMA_VERSION_V2,
+                "supervised-endurance",
+                RunOutcomeStatus::Passed,
+                Some(attestation),
+            ) if endurance_observer_attestation_is_valid(self, attestation) => {}
+            (
+                EVIDENCE_SCHEMA_VERSION_V2,
+                "supervised-endurance",
+                RunOutcomeStatus::Failed,
+                Some(attestation),
+            ) if endurance_observer_attestation_is_valid(self, attestation) => {}
+            (
+                EVIDENCE_SCHEMA_VERSION_V2,
+                "supervised-endurance",
+                RunOutcomeStatus::Failed,
+                None,
+            ) => {}
+            (_, _, _, Some(_))
+            | (
+                EVIDENCE_SCHEMA_VERSION_V2,
+                "supervised-endurance",
+                RunOutcomeStatus::Passed,
+                None,
+            ) => {
+                return Err(EvidenceValidationError::InvalidValue {
+                    field: "endurance_observer_attestation",
+                    index: 0,
+                });
+            }
+            (_, _, _, None) => {}
         }
         match (self.stage.as_str(), self.live_lifecycle_cases.as_ref()) {
             ("live-lifecycle", Some(_))
@@ -2593,11 +2691,117 @@ pub(crate) fn is_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn is_lower_hex(value: &str, length: usize) -> bool {
+pub(crate) fn is_lower_hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+pub(crate) fn endurance_observer_attestation_is_valid(
+    record: &EvidenceRecord,
+    attestation: &EnduranceObserverAttestationEvidence,
+) -> bool {
+    let Some(first) = attestation.checks.first() else {
+        return false;
+    };
+    let Some(last) = attestation.checks.last() else {
+        return false;
+    };
+    let custom_entered_at = record
+        .state_transitions
+        .first()
+        .map(|value| value.timestamp);
+    let initial_segment_at = record.state_transitions.get(1).map(|value| value.timestamp);
+    let Some(workload_started_at) = record.workload_started_at else {
+        return false;
+    };
+    let service_stop = record
+        .process_stops
+        .iter()
+        .find(|stop| stop.process == StoppedProcess::Service && !stop.running);
+    let timestamp_is_between =
+        |timestamp: EvidenceTimestamp, lower: EvidenceTimestamp, upper: EvidenceTimestamp| {
+            timestamp.monotonic_millis >= lower.monotonic_millis
+                && timestamp.wall_unix_millis >= lower.wall_unix_millis
+                && timestamp.monotonic_millis <= upper.monotonic_millis
+                && timestamp.wall_unix_millis <= upper.wall_unix_millis
+        };
+    let has_check_between = |lower: EvidenceTimestamp, upper: EvidenceTimestamp| {
+        attestation
+            .checks
+            .iter()
+            .copied()
+            .any(|check| timestamp_is_between(check, lower, upper))
+    };
+    let every_sample_has_its_own_confirmation =
+        record.samples.iter().enumerate().all(|(index, sample)| {
+            let lower = index
+                .checked_sub(1)
+                .and_then(|previous| record.samples.get(previous))
+                .map_or(workload_started_at, |previous| previous.timestamp);
+            attestation.checks.iter().copied().any(|check| {
+                check.monotonic_millis > lower.monotonic_millis
+                    && check.wall_unix_millis > lower.wall_unix_millis
+                    && check.monotonic_millis <= sample.timestamp.monotonic_millis
+                    && check.wall_unix_millis <= sample.timestamp.wall_unix_millis
+            })
+        });
+    let every_later_transition_has_confirmation = record
+        .state_transitions
+        .iter()
+        .skip(2)
+        .take(record.state_transitions.len().saturating_sub(3))
+        .all(|transition| {
+            let lower = record
+                .samples
+                .iter()
+                .rev()
+                .find(|sample| {
+                    sample.timestamp.monotonic_millis < transition.timestamp.monotonic_millis
+                        && sample.timestamp.wall_unix_millis < transition.timestamp.wall_unix_millis
+                })
+                .map_or(workload_started_at, |sample| sample.timestamp);
+            has_check_between(lower, transition.timestamp)
+        });
+    let exact_check_count = record
+        .samples
+        .len()
+        .checked_add(record.state_transitions.len())
+        .and_then(|count| count.checked_add(4));
+    exact_check_count == Some(attestation.checks.len())
+        && *first == attestation.started_at
+        && *last == attestation.completed_at
+        && attestation.started_at.monotonic_millis >= record.started_at.monotonic_millis
+        && attestation.started_at.wall_unix_millis >= record.started_at.wall_unix_millis
+        && attestation.completed_at.monotonic_millis <= record.completed_at.monotonic_millis
+        && attestation.completed_at.wall_unix_millis <= record.completed_at.wall_unix_millis
+        && custom_entered_at.is_some_and(|entered| {
+            has_check_between(record.started_at, entered)
+                && initial_segment_at.is_some_and(|initial| {
+                    has_check_between(entered, initial)
+                        && has_check_between(initial, workload_started_at)
+                })
+        })
+        && every_later_transition_has_confirmation
+        && every_sample_has_its_own_confirmation
+        && service_stop.is_some_and(|stop| {
+            record
+                .samples
+                .last()
+                .is_some_and(|sample| has_check_between(sample.timestamp, stop.requested_at))
+                && attestation.completed_at.monotonic_millis >= stop.confirmed_at.monotonic_millis
+                && attestation.completed_at.wall_unix_millis >= stop.confirmed_at.wall_unix_millis
+        })
+        && attestation.checks.windows(2).all(|pair| {
+            pair[0].monotonic_millis < pair[1].monotonic_millis
+                && pair[0].wall_unix_millis < pair[1].wall_unix_millis
+                && pair[1].monotonic_millis - pair[0].monotonic_millis <= 5_000
+                && pair[1]
+                    .wall_unix_millis
+                    .checked_sub(pair[0].wall_unix_millis)
+                    .is_some_and(|gap| gap <= 5_000)
+        })
 }
 
 fn io_error(operation: &'static str, source: io::Error) -> EvidenceWriteError {

@@ -16,6 +16,10 @@ fn exposes_all_available_qualification_stage_commands() {
             "matched-workload",
             "matched-workload --manifest FILE --harness FILE",
         ),
+        (
+            "live-lifecycle",
+            "live-lifecycle --manifest FILE --harness FILE",
+        ),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_fan-control-qualify"))
             .args([command, "--help"])

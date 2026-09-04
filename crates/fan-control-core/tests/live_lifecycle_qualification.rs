@@ -2,16 +2,203 @@ mod support;
 
 use fan_control_core::{
     DangerousLiveFaultInjection, EvidenceExternalPower, EvidenceFan, EvidenceProfile,
-    EvidenceTimestamp, LIVE_RESTART_DELAY_MILLIS, LIVE_START_LIMIT_BURST, LiveLifecycleCase,
+    EvidenceTimestamp, FanEndpointIdentitiesEvidence, LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS,
+    LIVE_RESTART_DELAY_MILLIS, LIVE_START_LIMIT_BURST, LiveLifecycleCase,
     LiveLifecycleCaseObservation, LiveLifecycleEnvironment, LiveLifecycleFanAutoObservation,
-    LiveLifecycleFanAutoPair, LiveLifecyclePlanError, LiveLifecyclePowerObservation,
-    LiveLifecycleProfileObservation, LiveLifecycleRebootArmObservation,
-    LiveLifecycleRebootContinuation, LiveLifecycleRequest, RunOutcomeStatus,
-    classify_live_lifecycle_request, parse_evidence_v2, run_live_lifecycle_qualification,
+    LiveLifecycleFanAutoPair, LiveLifecycleObserved, LiveLifecycleObserverAttestation,
+    LiveLifecyclePlanError, LiveLifecyclePowerObservation, LiveLifecycleProfileObservation,
+    LiveLifecycleProgress, LiveLifecycleRebootArmObservation, LiveLifecycleRebootContinuation,
+    LiveLifecycleReport, LiveLifecycleRequest, RunOutcomeStatus, classify_live_lifecycle_request,
+    parse_evidence_v2, resume_live_lifecycle_qualification, run_live_lifecycle_until_reboot,
 };
 use support::{PROTECTED_POLICY, compatibility_declaration};
 
 const EVIDENCE_V2_SCHEMA: &str = include_str!("../../../schemas/evidence-v2.json");
+
+fn run_live_lifecycle_qualification(
+    environment: &mut LifecycleEnvironment,
+    identity: &fan_control_core::QualificationEnvelopeIdentityV1,
+) -> Result<LiveLifecycleReport, LiveLifecyclePlanError> {
+    let mut endpoint_identities = lifecycle_fan_endpoints();
+    endpoint_identities.cpu_enable = environment.endpoint_identity(EvidenceFan::Cpu);
+    endpoint_identities.gpu_enable = environment.endpoint_identity(EvidenceFan::Gpu);
+    match run_live_lifecycle_until_reboot(
+        environment,
+        identity,
+        &"a".repeat(64),
+        &endpoint_identities,
+    )? {
+        LiveLifecycleProgress::AwaitingReboot(checkpoint) => {
+            resume_live_lifecycle_qualification(environment, *checkpoint)
+        }
+        LiveLifecycleProgress::Complete(report) => Ok(*report),
+    }
+}
+
+fn lifecycle_fan_endpoints() -> FanEndpointIdentitiesEvidence {
+    FanEndpointIdentitiesEvidence {
+        cpu_pwm: "cpu-pwm".into(),
+        cpu_enable: "cpu-enable".into(),
+        cpu_tachometer: "cpu-tachometer".into(),
+        gpu_pwm: "gpu-pwm".into(),
+        gpu_enable: "gpu-enable".into(),
+        gpu_tachometer: "gpu-tachometer".into(),
+    }
+}
+
+#[test]
+fn protected_checkpoint_resumes_only_the_reboot_case() {
+    let mut environment = LifecycleEnvironment::default();
+    let checkpoint = match run_live_lifecycle_until_reboot(
+        &mut environment,
+        &envelope(),
+        &"a".repeat(64),
+        &lifecycle_fan_endpoints(),
+    )
+    .unwrap()
+    {
+        LiveLifecycleProgress::AwaitingReboot(checkpoint) => checkpoint,
+        LiveLifecycleProgress::Complete(_) => panic!("passing prefix must pause before reboot"),
+    };
+    assert_eq!(
+        environment
+            .events
+            .iter()
+            .filter(|event| event.starts_with("case:"))
+            .count(),
+        LiveLifecycleCase::ALL.len() - 1
+    );
+
+    let source = serde_json::to_string(&checkpoint).unwrap();
+    let checkpoint = serde_json::from_str(&source).unwrap();
+    let checkpoint_for_match: fan_control_core::LiveLifecycleCheckpoint =
+        serde_json::from_str(&source).unwrap();
+    let report = resume_live_lifecycle_qualification(&mut environment, checkpoint).unwrap();
+
+    assert!(report.accepted(), "{:#?}", report.record());
+    assert!(checkpoint_for_match.matches_completed_record_prefix(report.record()));
+    let mut substituted = report.record().clone();
+    substituted.state_transitions[3].timestamp.monotonic_millis += 1;
+    assert!(!checkpoint_for_match.matches_completed_record_prefix(&substituted));
+    assert_eq!(
+        environment
+            .events
+            .iter()
+            .filter(|event| event.as_str() == "case:reboot")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn boot_change_during_prefix_blocks_checkpoint_creation() {
+    let mut environment = LifecycleEnvironment {
+        change_boot_before_checkpoint: true,
+        ..LifecycleEnvironment::default()
+    };
+
+    let error = match run_live_lifecycle_until_reboot(
+        &mut environment,
+        &envelope(),
+        &"a".repeat(64),
+        &lifecycle_fan_endpoints(),
+    ) {
+        Ok(_) => panic!("changed boot identity must block checkpoint creation"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("boot identity changed"));
+}
+
+#[test]
+fn initial_auto_gate_rejects_endpoints_not_bound_by_preflight() {
+    let mut environment = LifecycleEnvironment {
+        changed_identity_call: Some(1),
+        ..LifecycleEnvironment::default()
+    };
+
+    let progress = run_live_lifecycle_until_reboot(
+        &mut environment,
+        &envelope(),
+        &"a".repeat(64),
+        &lifecycle_fan_endpoints(),
+    )
+    .unwrap();
+    let LiveLifecycleProgress::Complete(report) = progress else {
+        panic!("a substituted initial endpoint must not reach the reboot checkpoint");
+    };
+
+    assert!(!report.accepted());
+    assert!(
+        report
+            .record()
+            .faults
+            .iter()
+            .any(|fault| fault.detail.contains("endpoint identity changed"))
+    );
+    assert!(
+        environment
+            .events
+            .iter()
+            .all(|event| !event.starts_with("case:"))
+    );
+}
+
+#[test]
+fn checkpoint_deserialization_rejects_partial_or_failed_prefixes() {
+    let mut environment = LifecycleEnvironment::default();
+    let checkpoint = match run_live_lifecycle_until_reboot(
+        &mut environment,
+        &envelope(),
+        &"a".repeat(64),
+        &lifecycle_fan_endpoints(),
+    )
+    .unwrap()
+    {
+        LiveLifecycleProgress::AwaitingReboot(checkpoint) => checkpoint,
+        LiveLifecycleProgress::Complete(_) => panic!("passing prefix must pause before reboot"),
+    };
+    let mut value = serde_json::to_value(&checkpoint).unwrap();
+    value["cases"][3]["passed"] = false.into();
+    assert!(serde_json::from_value::<fan_control_core::LiveLifecycleCheckpoint>(value).is_err());
+
+    let mut value = serde_json::to_value(&checkpoint).unwrap();
+    value["last_event_at"]["monotonic_millis"] = value["last_event_at"]["monotonic_millis"]
+        .as_u64()
+        .unwrap()
+        .saturating_add(10_000)
+        .into();
+    assert!(serde_json::from_value::<fan_control_core::LiveLifecycleCheckpoint>(value).is_err());
+}
+
+#[test]
+fn checkpoint_rejects_a_continuation_from_an_unbound_pre_reboot_boot() {
+    let mut environment = LifecycleEnvironment::default();
+    let checkpoint = match run_live_lifecycle_until_reboot(
+        &mut environment,
+        &envelope(),
+        &"a".repeat(64),
+        &lifecycle_fan_endpoints(),
+    )
+    .unwrap()
+    {
+        LiveLifecycleProgress::AwaitingReboot(checkpoint) => checkpoint,
+        LiveLifecycleProgress::Complete(_) => panic!("passing prefix must pause before reboot"),
+    };
+    environment.reboot_fault = Some(RebootFault::HistoricalPrebootId);
+
+    let report = resume_live_lifecycle_qualification(&mut environment, *checkpoint).unwrap();
+
+    assert!(!report.accepted());
+    assert!(
+        report
+            .record()
+            .outcome
+            .reason
+            .contains("distinct post-boot identity")
+    );
+    assert!(!environment.events.iter().any(|event| event == "arm:reboot"));
+}
 
 #[test]
 fn every_approved_case_runs_in_order_with_an_independent_auto_gate_between_cases() {
@@ -33,7 +220,7 @@ fn every_approved_case_runs_in_order_with_an_independent_auto_gate_between_cases
     assert!(report.cases().iter().all(|result| result.passed()));
     assert_eq!(
         report.record().readbacks.len(),
-        2 + 2 * LiveLifecycleCase::ALL.len()
+        4 + 2 * LiveLifecycleCase::ALL.len()
     );
     assert_eq!(
         report.record().state_transitions.len(),
@@ -55,13 +242,28 @@ fn every_approved_case_runs_in_order_with_an_independent_auto_gate_between_cases
     }
     assert!(report.record().validate().is_ok());
 
-    let mut expected = vec!["auto:cpu".to_owned(), "auto:gpu".to_owned()];
+    let mut expected = vec![
+        "boot-id:before".to_owned(),
+        "auto:cpu".to_owned(),
+        "auto:gpu".to_owned(),
+    ];
     for case in LiveLifecycleCase::ALL {
+        if case == LiveLifecycleCase::Reboot {
+            expected.push("boot-id:before".to_owned());
+        }
         expected.push(format!("case:{}", case.id()));
+        if case == LiveLifecycleCase::Reboot {
+            expected.push("boot-id:after".to_owned());
+        } else {
+            expected.push(format!("restore:{}", case.id()));
+        }
         expected.push("auto:cpu".to_owned());
         expected.push("auto:gpu".to_owned());
         if case == LiveLifecycleCase::Reboot {
             expected.push("arm:reboot".to_owned());
+            expected.push("restore:reboot".to_owned());
+            expected.push("auto:cpu".to_owned());
+            expected.push("auto:gpu".to_owned());
         }
     }
     assert_eq!(environment.events, expected);
@@ -131,10 +333,7 @@ fn passing_lifecycle_identity_fields_reject_whitespace_only_values() {
 
 #[test]
 fn visible_unicode_lifecycle_identities_remain_schema_and_parser_compatible() {
-    let mut environment = LifecycleEnvironment {
-        unicode_endpoint_identities: true,
-        ..LifecycleEnvironment::default()
-    };
+    let mut environment = LifecycleEnvironment::default();
     let report = run_live_lifecycle_qualification(&mut environment, &envelope()).unwrap();
     assert!(report.accepted());
 
@@ -576,11 +775,18 @@ fn schema_rejects_live_only_clock_fields_on_other_stages() {
         .as_object_mut()
         .unwrap()
         .remove("live_lifecycle_cases");
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("prerequisite_binding_sha256");
     for readback in value["readbacks"].as_array_mut().unwrap() {
         let readback = readback.as_object_mut().unwrap();
         readback.remove("source_timestamp");
         readback.remove("fresh");
         readback.remove("boot_id");
+    }
+    for fault in value["faults"].as_array_mut().unwrap() {
+        fault.as_object_mut().unwrap().remove("boot_id");
     }
     assert!(validator.is_valid(&value));
 
@@ -749,6 +955,15 @@ fn every_case_failure_stops_the_stage_after_checking_both_fans() {
         assert_eq!(report.cases().last().unwrap().case(), failed_case);
         assert!(!report.cases().last().unwrap().passed());
         assert_eq!(environment.events.last().unwrap(), "auto:gpu");
+        if failed_case != LiveLifecycleCase::Reboot {
+            let cleanup = environment
+                .events
+                .iter()
+                .position(|event| event == &format!("restore:{}", failed_case.id()))
+                .unwrap();
+            assert_eq!(environment.events[cleanup + 1], "auto:cpu");
+            assert_eq!(environment.events[cleanup + 2], "auto:gpu");
+        }
         assert_eq!(
             environment
                 .events
@@ -799,15 +1014,27 @@ fn either_unconfirmed_fan_blocks_the_next_case_without_skipping_the_other_read()
         assert!(!report.accepted());
         if failed_auto_call <= 2 {
             assert!(report.cases().is_empty());
-            assert_eq!(environment.events, ["auto:cpu", "auto:gpu"]);
+            assert_eq!(
+                environment.events,
+                [
+                    "boot-id:before",
+                    "auto:cpu",
+                    "auto:gpu",
+                    "restore:invalid-configuration",
+                    "auto:cpu",
+                    "auto:gpu",
+                ]
+            );
         } else {
             assert_eq!(report.cases().len(), 1);
             assert_eq!(
                 environment.events,
                 [
+                    "boot-id:before",
                     "auto:cpu",
                     "auto:gpu",
                     "case:invalid-configuration",
+                    "restore:invalid-configuration",
                     "auto:cpu",
                     "auto:gpu",
                 ]
@@ -825,6 +1052,89 @@ fn either_unconfirmed_fan_blocks_the_next_case_without_skipping_the_other_read()
 }
 
 #[test]
+fn missing_or_gapped_custom_observer_proof_fails_and_restores_before_auto_gate() {
+    for gapped in [false, true] {
+        let mut environment = LifecycleEnvironment {
+            observer_fault_case: Some(LiveLifecycleCase::DuplicateProcess),
+            gapped_observer_proof: gapped,
+            ..LifecycleEnvironment::default()
+        };
+
+        let report = run_live_lifecycle_qualification(&mut environment, &envelope()).unwrap();
+
+        assert!(!report.accepted());
+        assert_eq!(report.cases().len(), 2);
+        assert!(!report.cases()[1].passed());
+        let cleanup = environment
+            .events
+            .iter()
+            .position(|event| event == "restore:duplicate-process")
+            .unwrap();
+        assert_eq!(environment.events[cleanup + 1], "auto:cpu");
+        assert_eq!(environment.events[cleanup + 2], "auto:gpu");
+        assert!(
+            !environment
+                .events
+                .iter()
+                .any(|event| event == "case:normal-stop-restart")
+        );
+    }
+}
+
+#[test]
+fn observer_attestation_must_cover_the_typed_action_timestamp() {
+    let report =
+        run_live_lifecycle_qualification(&mut LifecycleEnvironment::default(), &envelope())
+            .unwrap();
+    let mut value = serde_json::to_value(report.record()).unwrap();
+    let observed = value["live_lifecycle_cases"][1]["observation"]["observed_at"].clone();
+    let monotonic = observed["monotonic_millis"].as_u64().unwrap();
+    let wall = observed["wall_unix_millis"].as_i64().unwrap();
+    let started = serde_json::json!({
+        "monotonic_millis": monotonic + 1,
+        "wall_unix_millis": wall + 1
+    });
+    let completed = serde_json::json!({
+        "monotonic_millis": monotonic + 2,
+        "wall_unix_millis": wall + 2
+    });
+    let attestation = &mut value["live_lifecycle_cases"][1]["observer_attestations"][0];
+    attestation["started_at"] = started.clone();
+    attestation["completed_at"] = completed.clone();
+    attestation["checks"] = serde_json::json!([started, completed]);
+    assert!(parse_evidence_v2(&serde_json::to_string(&value).unwrap()).is_err());
+}
+
+#[test]
+fn observer_attestations_must_bridge_consecutive_custom_actions() {
+    let mut environment = LifecycleEnvironment {
+        observer_gap_before_cleanup: Some(LiveLifecycleCase::NormalStopRestart),
+        ..LifecycleEnvironment::default()
+    };
+
+    let report = run_live_lifecycle_qualification(&mut environment, &envelope()).unwrap();
+
+    assert!(!report.accepted());
+    assert_eq!(report.cases().len(), 3);
+    assert!(!report.cases()[2].passed());
+    assert!(report.cases()[2].detail().contains("not continuous"));
+}
+
+#[test]
+fn observer_attestations_must_start_near_the_live_case_boundary() {
+    let mut environment = LifecycleEnvironment {
+        late_observer_start_case: Some(LiveLifecycleCase::DuplicateProcess),
+        ..LifecycleEnvironment::default()
+    };
+
+    let report = run_live_lifecycle_qualification(&mut environment, &envelope()).unwrap();
+
+    assert!(!report.accepted());
+    assert_eq!(report.cases().len(), 2);
+    assert!(report.cases()[1].detail().contains("complete live case"));
+}
+
+#[test]
 fn stale_auto_readback_blocks_progression() {
     let mut environment = LifecycleEnvironment {
         stale_auto_call: Some(1),
@@ -835,7 +1145,17 @@ fn stale_auto_readback_blocks_progression() {
 
     assert!(!report.accepted());
     assert!(report.cases().is_empty());
-    assert_eq!(environment.events, ["auto:cpu", "auto:gpu"]);
+    assert_eq!(
+        environment.events,
+        [
+            "boot-id:before",
+            "auto:cpu",
+            "auto:gpu",
+            "restore:invalid-configuration",
+            "auto:cpu",
+            "auto:gpu",
+        ]
+    );
 }
 
 #[test]
@@ -982,7 +1302,7 @@ fn initial_gate_records_both_typed_attempts_when_identity_or_read_fails() {
 
         assert!(!report.accepted());
         assert!(report.cases().is_empty());
-        assert_eq!(report.record().readbacks.len(), 2);
+        assert_eq!(report.record().readbacks.len(), 4);
         assert_eq!(report.record().readbacks[0].fan, EvidenceFan::Cpu);
         assert_eq!(report.record().readbacks[1].fan, EvidenceFan::Gpu);
         assert!(
@@ -1092,7 +1412,8 @@ fn reboot_accepts_a_real_post_boot_monotonic_clock_reset() {
     else {
         panic!("last observation must be reboot");
     };
-    let final_pair = &report.record().readbacks[report.record().readbacks.len() - 2..];
+    let final_pair = &report.record().readbacks
+        [report.record().readbacks.len() - 4..report.record().readbacks.len() - 2];
     assert!(final_pair[0].source_timestamp == Some(auto_before_arm.cpu.observed_at));
     assert!(final_pair[1].source_timestamp == Some(auto_before_arm.gpu.observed_at));
     assert!(final_pair[1].timestamp.monotonic_millis < reboot.started_at().monotonic_millis);
@@ -1146,7 +1467,7 @@ fn reboot_execution_error_after_clock_reset_is_durable_failed_evidence() {
 fn failed_final_gate_cannot_be_overridden_by_preboot_monotonic_order_or_outcome_flag() {
     let mut environment = LifecycleEnvironment {
         reset_monotonic_on_reboot: true,
-        failed_auto_call: Some(17),
+        failed_auto_call: Some(19),
         ..LifecycleEnvironment::default()
     };
     let report = run_live_lifecycle_qualification(&mut environment, &envelope()).unwrap();
@@ -1254,6 +1575,7 @@ enum RebootFault {
     EmptyPostBootId,
     ArmAtGpuConfirmation,
     FuturePostBootCheckpoint,
+    HistoricalPrebootId,
 }
 
 #[derive(Default)]
@@ -1268,7 +1590,6 @@ struct LifecycleEnvironment {
     stale_wall_auto_call: Option<usize>,
     empty_identity_call: Option<usize>,
     whitespace_identity_call: Option<usize>,
-    unicode_endpoint_identities: bool,
     case_error: Option<LiveLifecycleCase>,
     malformed_case: Option<LiveLifecycleCase>,
     invalid_recovery_proof: Option<LiveLifecycleCase>,
@@ -1276,7 +1597,13 @@ struct LifecycleEnvironment {
     reset_monotonic_on_reboot: bool,
     regress_monotonic_after_case: Option<LiveLifecycleCase>,
     same_millisecond_auto: bool,
+    observer_fault_case: Option<LiveLifecycleCase>,
+    gapped_observer_proof: bool,
+    observer_gap_before_cleanup: Option<LiveLifecycleCase>,
+    late_observer_start_case: Option<LiveLifecycleCase>,
     after_reboot: bool,
+    boot_calls: usize,
+    change_boot_before_checkpoint: bool,
     wall_now: u64,
 }
 
@@ -1310,15 +1637,11 @@ impl LifecycleEnvironment {
     }
 
     fn endpoint_identity(&self, fan: EvidenceFan) -> String {
-        match (fan, self.after_reboot, self.unicode_endpoint_identities) {
-            (EvidenceFan::Cpu, false, true) => "处理器风扇".into(),
-            (EvidenceFan::Gpu, false, true) => "图形风扇".into(),
-            (EvidenceFan::Cpu, true, true) => "处理器风扇-重启后".into(),
-            (EvidenceFan::Gpu, true, true) => "图形风扇-重启后".into(),
-            (EvidenceFan::Cpu, false, false) => "cpu-enable".into(),
-            (EvidenceFan::Gpu, false, false) => "gpu-enable".into(),
-            (EvidenceFan::Cpu, true, false) => "cpu-enable-postboot".into(),
-            (EvidenceFan::Gpu, true, false) => "gpu-enable-postboot".into(),
+        match (fan, self.after_reboot) {
+            (EvidenceFan::Cpu, false) => "cpu-enable".into(),
+            (EvidenceFan::Gpu, false) => "gpu-enable".into(),
+            (EvidenceFan::Cpu, true) => "cpu-enable-postboot".into(),
+            (EvidenceFan::Gpu, true) => "gpu-enable-postboot".into(),
         }
     }
 
@@ -1454,6 +1777,7 @@ impl LifecycleEnvironment {
                         armed_at = auto_before_arm.gpu.observed_at;
                     }
                     Some(RebootFault::FuturePostBootCheckpoint) => {}
+                    Some(RebootFault::HistoricalPrebootId) => {}
                 }
                 LiveLifecycleCaseObservation::Reboot {
                     reboot_completed: true,
@@ -1469,6 +1793,8 @@ impl LifecycleEnvironment {
                     auto_before_arm: Some(auto_before_arm),
                     armed_at: Some(armed_at),
                     controller_process_identity: Some("daemon-after-reboot".into()),
+                    restored_at: None,
+                    auto_after_arm: None,
                 }
             }
         }
@@ -1592,6 +1918,8 @@ impl LifecycleEnvironment {
                 auto_before_arm,
                 armed_at,
                 controller_process_identity,
+                restored_at,
+                auto_after_arm,
                 ..
             } => LiveLifecycleCaseObservation::Reboot {
                 reboot_completed: false,
@@ -1601,9 +1929,51 @@ impl LifecycleEnvironment {
                 auto_before_arm,
                 armed_at,
                 controller_process_identity,
+                restored_at,
+                auto_after_arm,
             },
         }
     }
+}
+
+fn observer_attestation(
+    action: &str,
+    started_at: EvidenceTimestamp,
+    completed_at: EvidenceTimestamp,
+) -> LiveLifecycleObserverAttestation {
+    LiveLifecycleObserverAttestation {
+        action: action.into(),
+        started_at,
+        completed_at,
+        checks: vec![started_at, completed_at],
+    }
+}
+
+fn observer_attestations(
+    case: LiveLifecycleCase,
+    started_at: EvidenceTimestamp,
+    completed_at: EvidenceTimestamp,
+) -> Vec<LiveLifecycleObserverAttestation> {
+    let actions: &[&str] = match case {
+        LiveLifecycleCase::InvalidConfiguration => &[],
+        LiveLifecycleCase::DuplicateProcess => &["duplicate-owner-custom"],
+        LiveLifecycleCase::NormalStopRestart => {
+            &["normal-owner-before-stop", "normal-restart-custom"]
+        }
+        LiveLifecycleCase::ProcessKillRecovery => {
+            &["process-before-kill", "bounded-restart-custom"]
+        }
+        LiveLifecycleCase::WatchdogRecovery => {
+            &["watchdog-monitored-custom", "bounded-restart-custom"]
+        }
+        LiveLifecycleCase::AcToBatteryTransition => &["ac-transition-custom"],
+        LiveLifecycleCase::SuspendResume => &["pre-suspend-custom", "post-resume-custom"],
+        LiveLifecycleCase::Reboot => unreachable!(),
+    };
+    actions
+        .iter()
+        .map(|action| observer_attestation(action, started_at, completed_at))
+        .collect()
 }
 
 impl LiveLifecycleEnvironment for LifecycleEnvironment {
@@ -1611,13 +1981,31 @@ impl LiveLifecycleEnvironment for LifecycleEnvironment {
         self.tick()
     }
 
+    fn current_boot_id(&mut self) -> Result<String, String> {
+        self.boot_calls += 1;
+        let phase = if self.after_reboot { "after" } else { "before" };
+        self.events.push(format!("boot-id:{phase}"));
+        Ok(if self.after_reboot {
+            "boot-after"
+        } else if self.change_boot_before_checkpoint && self.boot_calls > 1 {
+            "boot-changed"
+        } else {
+            "boot-before"
+        }
+        .into())
+    }
+
     fn run_case(
         &mut self,
         case: LiveLifecycleCase,
-    ) -> Result<LiveLifecycleCaseObservation, String> {
+    ) -> Result<LiveLifecycleObserved<LiveLifecycleCaseObservation>, String> {
         assert_ne!(case, LiveLifecycleCase::Reboot);
         self.events.push(format!("case:{}", case.id()));
-        self.tick();
+        if self.late_observer_start_case == Some(case) {
+            self.now += LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS + 1;
+            self.wall_now += LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS + 1;
+        }
+        let observer_started_at = self.tick();
         if self.case_error == Some(case) {
             if case == LiveLifecycleCase::Reboot && self.reset_monotonic_on_reboot {
                 self.now = 0;
@@ -1626,7 +2014,16 @@ impl LiveLifecycleEnvironment for LifecycleEnvironment {
             return Err("guided case failed".into());
         }
         if self.malformed_case == Some(case) {
-            return Ok(self.malformed_observation(case));
+            let observation = self.malformed_observation(case);
+            let observer_completed_at = self.tick();
+            return Ok(LiveLifecycleObserved {
+                observation,
+                observer_attestations: observer_attestations(
+                    case,
+                    observer_started_at,
+                    observer_completed_at,
+                ),
+            });
         }
         let mut observation = self.passing_observation(case);
         if self.invalid_recovery_proof == Some(case) {
@@ -1647,10 +2044,58 @@ impl LiveLifecycleEnvironment for LifecycleEnvironment {
         if self.regress_monotonic_after_case == Some(case) {
             self.now = 0;
         }
-        Ok(observation)
+        let observer_completed_at = self.tick();
+        let mut attestations =
+            observer_attestations(case, observer_started_at, observer_completed_at);
+        if self.observer_fault_case == Some(case) {
+            if self.gapped_observer_proof {
+                let future = EvidenceTimestamp {
+                    monotonic_millis: observer_started_at.monotonic_millis + 6_000,
+                    wall_unix_millis: observer_started_at.wall_unix_millis + 6_000,
+                };
+                if let Some(attestation) = attestations.first_mut() {
+                    attestation.completed_at = future;
+                    attestation.checks = vec![observer_started_at, future];
+                }
+            } else {
+                attestations.clear();
+            }
+        }
+        Ok(LiveLifecycleObserved {
+            observation,
+            observer_attestations: attestations,
+        })
     }
 
-    fn resume_after_reboot(&mut self) -> Result<LiveLifecycleRebootContinuation, String> {
+    fn restore_after_case(
+        &mut self,
+        case: LiveLifecycleCase,
+    ) -> Result<LiveLifecycleObserved<EvidenceTimestamp>, String> {
+        self.events.push(format!("restore:{}", case.id()));
+        if self.observer_gap_before_cleanup == Some(case) {
+            self.now += LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS + 1;
+            self.wall_now += LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS + 1;
+        }
+        let started_at = self.tick();
+        let restored_at = self.tick();
+        let observer_attestations = if case == LiveLifecycleCase::InvalidConfiguration {
+            Vec::new()
+        } else {
+            vec![observer_attestation(
+                &format!("{}-cleanup", case.id()),
+                started_at,
+                restored_at,
+            )]
+        };
+        Ok(LiveLifecycleObserved {
+            observation: restored_at,
+            observer_attestations,
+        })
+    }
+
+    fn resume_after_reboot(
+        &mut self,
+    ) -> Result<LiveLifecycleObserved<LiveLifecycleRebootContinuation>, String> {
         self.events.push("case:reboot".into());
         self.tick();
         if self.case_error == Some(LiveLifecycleCase::Reboot) {
@@ -1668,21 +2113,30 @@ impl LiveLifecycleEnvironment for LifecycleEnvironment {
         if self.reboot_fault == Some(RebootFault::FuturePostBootCheckpoint) {
             post_boot_at.wall_unix_millis = post_boot_at.wall_unix_millis.saturating_add(100);
         }
-        Ok(LiveLifecycleRebootContinuation {
-            reboot_completed: self.malformed_case != Some(LiveLifecycleCase::Reboot),
-            boot_id_before: "boot-before".into(),
-            boot_id_after: if self.reboot_fault == Some(RebootFault::UnchangedBootId) {
-                "boot-before".into()
-            } else if self.reboot_fault == Some(RebootFault::EmptyPostBootId) {
-                String::new()
-            } else {
-                "boot-after".into()
+        Ok(LiveLifecycleObserved {
+            observation: LiveLifecycleRebootContinuation {
+                reboot_completed: self.malformed_case != Some(LiveLifecycleCase::Reboot),
+                boot_id_before: if self.reboot_fault == Some(RebootFault::HistoricalPrebootId) {
+                    "historical-boot".into()
+                } else {
+                    "boot-before".into()
+                },
+                boot_id_after: if self.reboot_fault == Some(RebootFault::UnchangedBootId) {
+                    "boot-before".into()
+                } else if self.reboot_fault == Some(RebootFault::EmptyPostBootId) {
+                    String::new()
+                } else {
+                    "boot-after".into()
+                },
+                post_boot_at,
             },
-            post_boot_at,
+            observer_attestations: Vec::new(),
         })
     }
 
-    fn arm_after_reboot(&mut self) -> Result<LiveLifecycleRebootArmObservation, String> {
+    fn arm_after_reboot(
+        &mut self,
+    ) -> Result<LiveLifecycleObserved<LiveLifecycleRebootArmObservation>, String> {
         self.events.push("arm:reboot".into());
         if self.reboot_fault == Some(RebootFault::AutoBeforePostBootCheckpoint) {
             return Err("injected stale post-boot checkpoint".into());
@@ -1698,9 +2152,31 @@ impl LiveLifecycleEnvironment for LifecycleEnvironment {
         } else {
             self.tick()
         };
-        Ok(LiveLifecycleRebootArmObservation {
-            armed_at,
-            controller_process_identity: "daemon-after-reboot".into(),
+        let observed_at = self.tick();
+        Ok(LiveLifecycleObserved {
+            observation: LiveLifecycleRebootArmObservation {
+                armed_at,
+                controller_process_identity: "daemon-after-reboot".into(),
+            },
+            observer_attestations: vec![observer_attestation(
+                "post-reboot-arm",
+                armed_at,
+                observed_at,
+            )],
+        })
+    }
+
+    fn restore_after_reboot(&mut self) -> Result<LiveLifecycleObserved<EvidenceTimestamp>, String> {
+        self.events.push("restore:reboot".into());
+        let started_at = self.tick();
+        let completed_at = self.tick();
+        Ok(LiveLifecycleObserved {
+            observation: completed_at,
+            observer_attestations: vec![observer_attestation(
+                "post-reboot-restore",
+                started_at,
+                completed_at,
+            )],
         })
     }
 

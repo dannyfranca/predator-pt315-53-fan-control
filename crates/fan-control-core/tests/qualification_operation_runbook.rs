@@ -75,13 +75,11 @@ fn qualification_ladder_and_abort_boundary_are_explicit_and_ordered() {
     assert!(runbook.contains("A successful handoff advances only after"));
     let normalized = runbook.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(normalized.contains("If both fans cannot be confirmed in Auto immediately, shut down"));
-    assert!(runbook.contains("IMPLEMENTATION BLOCK"));
-    assert!(runbook.contains("this source revision exposes preflight, all seven"));
-    assert!(runbook.contains("Firmware Auto baselines, one-fan calibration, and all twelve"));
-    assert!(runbook.contains("matched workloads"));
-    assert!(runbook.contains("does not yet package"));
+    assert!(runbook.contains("PACKAGING BLOCK"));
+    assert!(runbook.contains("this source revision exposes the complete qualification"));
+    assert!(runbook.contains("coordinator but does not package its reviewed hardware harness"));
     assert!(runbook.contains("reviewed hardware"));
-    assert!(runbook.contains("Live lifecycle remains unavailable"));
+    assert!(runbook.contains("qualification with an improvised harness"));
     assert!(runbook.contains("do not replace it with ad-hoc shell scripts"));
     assert!(runbook.contains("direct sysfs writes"));
     for limit in [

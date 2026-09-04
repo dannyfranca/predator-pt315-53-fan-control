@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, path::Path};
+use std::{error::Error, fmt, fs, path::Path};
 
 use serde::{Deserialize, Deserializer, Serialize, de};
 use sha2::{Digest, Sha256};
@@ -82,6 +82,7 @@ impl SupervisedEnduranceAuthorizationV1 {
 pub enum QualificationAuthorizationError {
     InvalidPlan(SupervisedEndurancePlanError),
     EnduranceNotAccepted,
+    PublicationCancelled,
     Write(EvidenceWriteError),
 }
 
@@ -93,6 +94,9 @@ impl fmt::Display for QualificationAuthorizationError {
             }
             Self::EnduranceNotAccepted => {
                 formatter.write_str("supervised endurance evidence is not complete and passing")
+            }
+            Self::PublicationCancelled => {
+                formatter.write_str("authorization publication was cancelled before commit")
             }
             Self::Write(error) => write!(
                 formatter,
@@ -107,7 +111,7 @@ impl Error for QualificationAuthorizationError {
         match self {
             Self::InvalidPlan(error) => Some(error),
             Self::Write(error) => Some(error),
-            Self::EnduranceNotAccepted => None,
+            Self::EnduranceNotAccepted | Self::PublicationCancelled => None,
         }
     }
 }
@@ -118,6 +122,22 @@ pub fn write_qualification_record_after_endurance(
     plan: &SupervisedEndurancePlan<'_>,
     report: &SupervisedEnduranceReport,
 ) -> Result<QualificationRecordV2, QualificationAuthorizationError> {
+    write_qualification_record_after_endurance_with_guard(
+        destination,
+        evidence_path,
+        plan,
+        report,
+        || true,
+    )
+}
+
+pub fn write_qualification_record_after_endurance_with_guard(
+    destination: &Path,
+    evidence_path: &Path,
+    plan: &SupervisedEndurancePlan<'_>,
+    report: &SupervisedEnduranceReport,
+    commit: impl FnOnce() -> bool,
+) -> Result<QualificationRecordV2, QualificationAuthorizationError> {
     let envelope =
         validate_qualification_plan(plan).map_err(QualificationAuthorizationError::InvalidPlan)?;
     report.record().validate().map_err(|error| {
@@ -127,6 +147,8 @@ pub fn write_qualification_record_after_endurance(
     })?;
     if !report.accepted()
         || report.record().qualification_envelope != envelope
+        || report.record().prerequisite_binding_sha256.as_deref()
+            != Some(plan.prerequisite_binding_sha256.as_str())
         || !supervised_endurance_is_complete(report.record())
     {
         return Err(QualificationAuthorizationError::EnduranceNotAccepted);
@@ -189,6 +211,27 @@ pub fn write_qualification_record_after_endurance(
     };
     write_root_owned_evidence_atomically(evidence_path, report.record())
         .map_err(QualificationAuthorizationError::Write)?;
+    if !commit() {
+        fs::remove_file(evidence_path).map_err(|source| {
+            QualificationAuthorizationError::Write(EvidenceWriteError::Published {
+                operation: "remove cancelled endurance evidence",
+                source,
+            })
+        })?;
+        fs::File::open(
+            evidence_path
+                .parent()
+                .ok_or(QualificationAuthorizationError::EnduranceNotAccepted)?,
+        )
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| {
+            QualificationAuthorizationError::Write(EvidenceWriteError::Published {
+                operation: "sync cancelled endurance evidence directory",
+                source,
+            })
+        })?;
+        return Err(QualificationAuthorizationError::PublicationCancelled);
+    }
     write_root_owned_json_atomically(destination, &qualification)
         .map_err(QualificationAuthorizationError::Write)?;
     Ok(qualification)

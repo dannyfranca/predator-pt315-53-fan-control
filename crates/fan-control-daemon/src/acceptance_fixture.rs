@@ -674,12 +674,39 @@ fn matching_endurance_evidence(policy: &str) -> Result<String, io::Error> {
     }
     let mut evidence: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| io::Error::other(error.to_string()))?;
+    evidence["prerequisite_binding_sha256"] = "a".repeat(64).into();
+    add_endurance_observer_fixture(&mut evidence);
     evidence["qualification_envelope"]["protected_policy_sha256"] = sha256(policy).into();
     evidence["qualification_envelope"]["compatibility"] = serde_json::to_value(
         parse_compatibility_v1(&compatibility_source(policy)).map_err(startup_io_error)?,
     )
     .map_err(|error| io::Error::other(error.to_string()))?;
     serde_json::to_string(&evidence).map_err(|error| io::Error::other(error.to_string()))
+}
+
+fn add_endurance_observer_fixture(record: &mut serde_json::Value) {
+    let mut checks = vec![record["state_transitions"][0]["timestamp"].clone()];
+    let started = record["started_at"].clone();
+    for offset in 1..=9 {
+        checks.push(serde_json::json!({
+            "monotonic_millis": started["monotonic_millis"].as_u64().unwrap() + offset,
+            "wall_unix_millis": started["wall_unix_millis"].as_i64().unwrap() + offset as i64,
+        }));
+    }
+    checks.extend(
+        record["samples"]
+            .as_array()
+            .expect("fixture samples")
+            .iter()
+            .map(|sample| sample["timestamp"].clone()),
+    );
+    checks.push(record["process_stops"][1]["requested_at"].clone());
+    checks.push(record["process_stops"][1]["confirmed_at"].clone());
+    record["endurance_observer_attestation"] = serde_json::json!({
+        "started_at": checks[0],
+        "completed_at": checks.last().expect("fixture checks"),
+        "checks": checks,
+    });
 }
 
 fn matching_record(policy: &str, evidence: &str) -> Result<String, io::Error> {
