@@ -31,7 +31,7 @@ jobs:
       - name: Test current package contract
         run: |
           su builder -c 'cd "$GITHUB_WORKSPACE/packaging/controller" && makepkg --printsrcinfo | diff -u .SRCINFO -'
-          su builder -c 'cd "$GITHUB_WORKSPACE" && cargo test -p fan-control-core --test controller_package'
+          su builder -c 'cd "$GITHUB_WORKSPACE" && cargo test -p fan-control-core --test controller_package --test source_complete_handoff'
 
       - name: Build and test locked package
         run: |
@@ -82,9 +82,19 @@ jobs:
             usr/lib/systemd/system/pt31553-fan-sleep-guard.service \
             usr/lib/systemd/system-preset/90-pt31553-fan-control.preset \
             usr/lib/tmpfiles.d/pt31553-fan-control.conf \
+            usr/share/pt31553-fan-control/examples/qualified-envelope.example.toml \
+            usr/share/pt31553-fan-control/schemas/candidate-identity-v1.json \
             usr/share/pt31553-fan-control/schemas/evidence.json \
             usr/share/pt31553-fan-control/schemas/evidence-v2.json \
+            usr/share/pt31553-fan-control/schemas/package-provenance-v1.json \
+            usr/share/pt31553-fan-control/schemas/promotion-manifest.json \
+            usr/share/pt31553-fan-control/schemas/qualification-record.json \
+            usr/share/pt31553-fan-control/source-commit \
             var/lib/pt31553-fan-control/evidence/; do
             grep -Fxq "$path" /tmp/controller-package-contents
           done
-          test "$(bsdtar -tf "$package" | grep -Ec '(^|/)(qualified-envelope\.toml|qualification-record\.json|qualification\.json|protected-policy|promotion|authorization)')" -eq 0
+          bsdtar -xOf "$package" usr/share/pt31553-fan-control/source-commit \
+            | cmp - <(printf '%s\n' '530f5ea19f46df841e39325580d221d2d64fac7b')
+          test "$(grep -Ev '^usr/share/pt31553-fan-control/(schemas|examples)/' /tmp/controller-package-contents \
+            | grep -Ec '(^|/)(qualified-envelope\.toml|qualification-record\.json|qualification\.json|protected-policy|promotion|authorization)')" -eq 0
+          test "$(grep -Ec '^(boot/|usr/lib/modules/|var/lib/pt31553-fan-control/rollback/)' /tmp/controller-package-contents)" -eq 0

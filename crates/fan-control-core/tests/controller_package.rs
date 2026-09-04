@@ -8,8 +8,8 @@ use std::{
 
 use fan_control_core::{parse_compatibility_v1, parse_config_v1, validate_config_v1};
 
-const SOURCE_COMMIT: &str = "590c4ea728a47f7d8ea5b6f68b90c509022867eb";
-const SOURCE_SHA256: &str = "00e9185e4066964a1506589d28f39a168710bbe721bdf1fd478f4d56f8b15e80";
+const SOURCE_COMMIT: &str = "530f5ea19f46df841e39325580d221d2d64fac7b";
+const SOURCE_SHA256: &str = "ddc12609732c40c13aac1db3b9a1c0d32b3698fc2ef97fb559c0d9d7e871562e";
 const EXPECTED_TMPFILES: &str = "\
 # Type Path                                           Mode User Group Age Argument
 d /var/lib/pt31553-fan-control                        0700 root root -   -
@@ -65,15 +65,21 @@ fn source_metadata_is_exact_and_reproducible() {
 
     assert!(pkgbuild.contains(&format!("_commit='{SOURCE_COMMIT}'")));
     assert!(pkgbuild.contains(SOURCE_SHA256));
+    assert!(pkgbuild.contains("pkgrel=7"));
+    assert!(srcinfo.lines().any(|line| line.trim() == "pkgrel = 7"));
     assert!(pkgbuild.contains(
         "depends=('bash' 'coreutils' 'gcc-libs' 'glibc' 'glmark2' 'kmod' 'nvidia-utils' 'openssl' 'pacman' 'sbsigntools' 'stress-ng' 'systemd')"
     ));
     assert!(!pkgbuild.contains("SKIP"));
     assert!(!pkgbuild.contains("pkgver()"));
     assert!(pkgbuild.contains("cargo build --frozen --release --workspace --bins"));
-    assert!(pkgbuild.contains(
-        "RUSTFLAGS=\"${RUSTFLAGS:-} -C debug-assertions=yes\" cargo test --frozen --workspace"
-    ));
+    assert!(pkgbuild.contains("for git_config_variable in \"${!GIT_CONFIG@}\""));
+    assert!(pkgbuild.contains("export GIT_CONFIG_NOSYSTEM=1"));
+    assert!(pkgbuild.contains("export RUSTFLAGS=\"${RUSTFLAGS:-} -C debug-assertions=yes\""));
+    assert!(pkgbuild.contains("cargo test --frozen --workspace --exclude fan-control-core"));
+    assert!(pkgbuild.contains("[[ $test_name == source_complete_handoff ]] && continue"));
+    assert!(pkgbuild.contains("cargo test --frozen -p fan-control-core --lib"));
+    assert!(pkgbuild.contains("cargo test --frozen -p fan-control-core --doc"));
     assert!(srcinfo.contains(&format!("archive/{SOURCE_COMMIT}.tar.gz")));
     assert!(srcinfo.contains(SOURCE_SHA256));
     assert!(
@@ -81,10 +87,11 @@ fn source_metadata_is_exact_and_reproducible() {
             .lines()
             .any(|line| line.trim() == "options = !debug")
     );
+    assert!(srcinfo.lines().any(|line| line.trim() == "options = !lto"));
     let output = Command::new("/bin/bash")
         .args([
             "-c",
-            "set -euo pipefail; source \"$1\"; test \"${#options[@]}\" -eq 1; test \"${options[0]}\" = '!debug'",
+            "set -euo pipefail; source \"$1\"; test \"${#options[@]}\" -eq 2; test \"${options[0]}\" = '!debug'; test \"${options[1]}\" = '!lto'",
             "package-metadata-test",
         ])
         .arg(package.join("PKGBUILD"))
@@ -131,6 +138,73 @@ fn source_metadata_is_exact_and_reproducible() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn archive_checks_ignore_ambient_git_configuration() {
+    let root = std::env::temp_dir().join(format!(
+        "pt31553-controller-git-config-{}-{}",
+        std::process::id(),
+        NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    let srcdir = root.join("src");
+    let source_root = srcdir.join(format!("predator-pt315-53-fan-control-{SOURCE_COMMIT}"));
+    let hostile_home = root.join("hostile-home");
+    let cargo_calls = root.join("cargo-calls");
+    fs::create_dir_all(source_root.join("crates/fan-control-core/tests")).unwrap();
+    fs::create_dir_all(&hostile_home).unwrap();
+    for test_target in [
+        "controller_package.rs",
+        "policy_authority.rs",
+        "source_complete_handoff.rs",
+    ] {
+        fs::write(
+            source_root
+                .join("crates/fan-control-core/tests")
+                .join(test_target),
+            "",
+        )
+        .unwrap();
+    }
+    fs::write(
+        hostile_home.join(".gitconfig"),
+        "[core]\n\thooksPath = /hostile/hooks\n",
+    )
+    .unwrap();
+
+    let output = Command::new("/bin/bash")
+        .args([
+            "-c",
+            "set -euo pipefail; source \"$1\"; cargo() { test -z \"${GIT_CONFIG_GLOBAL+x}\"; test -z \"${GIT_CONFIG_SYSTEM+x}\"; test -z \"${GIT_CONFIG_COUNT+x}\"; test -z \"${GIT_CONFIG_KEY_0+x}\"; test -z \"${GIT_CONFIG_VALUE_0+x}\"; test \"$GIT_CONFIG_NOSYSTEM\" = 1; case \"$HOME\" in \"$srcdir\"/.pt31553-test-home.*) ;; *) return 1 ;; esac; test \"$XDG_CONFIG_HOME\" = \"$HOME/.config\"; test -z \"$(/usr/bin/git config --global --get core.hooksPath || true)\"; printf '%s\\n' \"$*\" >>\"$cargo_calls\"; }; check",
+            "package-git-config-test",
+        ])
+        .arg(package_root().join("PKGBUILD"))
+        .current_dir(&srcdir)
+        .env("srcdir", &srcdir)
+        .env("cargo_calls", &cargo_calls)
+        .env("HOME", &hostile_home)
+        .env("GIT_CONFIG_GLOBAL", hostile_home.join(".gitconfig"))
+        .env("GIT_CONFIG_SYSTEM", hostile_home.join("system.gitconfig"))
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", "/hostile/injected-hooks")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&cargo_calls).unwrap(),
+        "test --frozen --workspace --exclude fan-control-core\n\
+test --frozen -p fan-control-core --lib --test controller_package --test policy_authority\n\
+test --frozen -p fan-control-core --doc\n"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn ci_rehardens_the_build_prefix_after_copying_archived_recipe_metadata() {
     let workflow =
@@ -151,6 +225,7 @@ fn ci_rehardens_the_build_prefix_after_copying_archived_recipe_metadata() {
         1
     );
     assert!(copy < harden && harden < locked_package_build);
+    assert!(workflow.contains("--test controller_package --test source_complete_handoff"));
 }
 
 #[test]
@@ -267,7 +342,12 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
         "systemd/90-pt31553-fan-control.preset",
         "schemas/evidence.json",
         "schemas/evidence-v2.json",
+        "schemas/candidate-identity-v1.json",
+        "schemas/package-provenance-v1.json",
+        "schemas/promotion-manifest.json",
+        "schemas/qualification-record.json",
         "config/example.toml",
+        "policy/qualified-envelope.example.toml",
         "compatibility/pt315-53.toml",
         "packaging/controller/pt31553-fan-control.tmpfiles",
         "qualification/workloads/VERSION",
@@ -343,12 +423,32 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
             "systemd/90-pt31553-fan-control.preset",
         ),
         (
+            "usr/share/pt31553-fan-control/schemas/candidate-identity-v1.json",
+            "schemas/candidate-identity-v1.json",
+        ),
+        (
             "usr/share/pt31553-fan-control/schemas/evidence.json",
             "schemas/evidence.json",
         ),
         (
             "usr/share/pt31553-fan-control/schemas/evidence-v2.json",
             "schemas/evidence-v2.json",
+        ),
+        (
+            "usr/share/pt31553-fan-control/schemas/package-provenance-v1.json",
+            "schemas/package-provenance-v1.json",
+        ),
+        (
+            "usr/share/pt31553-fan-control/schemas/promotion-manifest.json",
+            "schemas/promotion-manifest.json",
+        ),
+        (
+            "usr/share/pt31553-fan-control/schemas/qualification-record.json",
+            "schemas/qualification-record.json",
+        ),
+        (
+            "usr/share/pt31553-fan-control/examples/qualified-envelope.example.toml",
+            "policy/qualified-envelope.example.toml",
         ),
         ("usr/share/licenses/pt31553-fan-control/LICENSE", "LICENSE"),
         (
@@ -373,6 +473,10 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
         fs::read(pkgdir.join("usr/lib/tmpfiles.d/pt31553-fan-control.conf")).unwrap(),
         fs::read(repository.join("packaging/controller/pt31553-fan-control.tmpfiles")).unwrap()
     );
+    assert_eq!(
+        fs::read_to_string(pkgdir.join("usr/share/pt31553-fan-control/source-commit")).unwrap(),
+        format!("{SOURCE_COMMIT}\n")
+    );
     for asset in [
         "usr/lib/pt31553-fan-control/compatibility.toml",
         "usr/lib/systemd/system/pt31553-fand.service",
@@ -381,8 +485,14 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
         "usr/lib/tmpfiles.d/pt31553-fan-control.conf",
         "usr/lib/pt31553-fan-control/workloads/VERSION",
         "usr/lib/pt31553-fan-control/workloads/common",
+        "usr/share/pt31553-fan-control/examples/qualified-envelope.example.toml",
+        "usr/share/pt31553-fan-control/schemas/candidate-identity-v1.json",
         "usr/share/pt31553-fan-control/schemas/evidence.json",
         "usr/share/pt31553-fan-control/schemas/evidence-v2.json",
+        "usr/share/pt31553-fan-control/schemas/package-provenance-v1.json",
+        "usr/share/pt31553-fan-control/schemas/promotion-manifest.json",
+        "usr/share/pt31553-fan-control/schemas/qualification-record.json",
+        "usr/share/pt31553-fan-control/source-commit",
         "usr/share/licenses/pt31553-fan-control/LICENSE",
     ] {
         assert_eq!(mode(pkgdir.join(asset)), 0o644, "unsafe mode for {asset}");
@@ -450,10 +560,24 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
             "usr/lib/systemd/system/pt31553-fand.service",
             "usr/lib/tmpfiles.d/pt31553-fan-control.conf",
             "usr/share/licenses/pt31553-fan-control/LICENSE",
+            "usr/share/pt31553-fan-control/examples/qualified-envelope.example.toml",
+            "usr/share/pt31553-fan-control/schemas/candidate-identity-v1.json",
             "usr/share/pt31553-fan-control/schemas/evidence-v2.json",
             "usr/share/pt31553-fan-control/schemas/evidence.json",
+            "usr/share/pt31553-fan-control/schemas/package-provenance-v1.json",
+            "usr/share/pt31553-fan-control/schemas/promotion-manifest.json",
+            "usr/share/pt31553-fan-control/schemas/qualification-record.json",
+            "usr/share/pt31553-fan-control/source-commit",
         ]
     );
+
+    for package_owned_recovery_path in [
+        "boot",
+        "usr/lib/modules",
+        "var/lib/pt31553-fan-control/rollback",
+    ] {
+        assert!(!pkgdir.join(package_owned_recovery_path).exists());
+    }
 
     let pkgbuild = fs::read_to_string(package.join("PKGBUILD")).unwrap();
     for forbidden in [
