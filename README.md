@@ -1372,13 +1372,13 @@ the exact candidate identity and environmental limits before stage 2. Start
 each following stage only after the preceding evidence is complete, protected,
 and accepted. At every handoff, repeat the Auto boundary above.
 
-> **IMPLEMENTATION BLOCK:** this source revision exposes preflight and the seven
-> Firmware Auto baselines through `pt31553-fan-qualify`, but does not yet package
-> their reviewed hardware harness. Calibration, matched workloads, and live
-> lifecycle also remain unavailable. Do not run live qualification until the
-> packaged harness and remaining stage entrypoints land. The implemented command
-> contract is documented in
-> [`qualification/preflight-baseline-harness.md`](qualification/preflight-baseline-harness.md).
+> **IMPLEMENTATION BLOCK:** this source revision exposes preflight, all seven
+> Firmware Auto baselines, one-fan calibration, and all twelve matched workloads
+> through `pt31553-fan-qualify`, but does not yet package their reviewed hardware
+> harness. Live lifecycle remains unavailable. Do not run live qualification until
+> that harness and the remaining stage entrypoint land. Command contracts are in
+> [`qualification/preflight-baseline-harness.md`](qualification/preflight-baseline-harness.md)
+> and [`qualification/supervised-calibration-matched-harness.md`](qualification/supervised-calibration-matched-harness.md).
 
 ### 2. Run read-only preflight
 
@@ -1442,6 +1442,13 @@ blocks all later stages. Store the accepted records as
 `cpu-calibration.json` and `gpu-calibration.json` in the protected evidence
 directory.
 
+Executable forms are `pt31553-fan-qualify fan-calibration --fan cpu --manifest
+FILE --harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING`, followed only
+after acceptance by the same command with `--fan gpu`. Each command rechecks the
+fresh preflight and all seven baselines before its first Custom write. Every
+error, interrupt, or observer withdrawal attempts both Auto restorations; only a
+complete, passing, schema-valid record is published.
+
 ### 5. Run matched thermal workloads
 
 For each baseline identity, begin from confirmed Auto with ambient temperature
@@ -1461,6 +1468,13 @@ starting another run. Any thermal-limit breach, missing/stale sample,
 tachometer/readback/deadline failure, workload escape, or restoration failure
 rejects the run. Store the twelve accepted protected records and list their
 paths, in plan order, as `matched_workload_runs`.
+
+The executable form is `pt31553-fan-qualify matched-workload --manifest FILE
+--harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING`. It runs exactly
+the next fixed stage, restores and confirms Auto, then exits. Reinvoke and grant
+fresh physical-observer approval for each of the twelve stages. Failed evidence
+occupies that stage path and blocks resume; begin a new protected evidence
+directory after repair.
 
 ### 6. Exercise lifecycle and fault handling
 
