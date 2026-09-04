@@ -108,6 +108,7 @@ required_executables=(
     scripts/build-source-candidate
     scripts/generate-candidate-declarations
     scripts/redact-evidence
+    scripts/verify-fake-platform-flow
     scripts/verify-package-provenance
     scripts/verify-source-complete-handoff
     scripts/verify-source-lock

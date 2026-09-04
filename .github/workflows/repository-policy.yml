@@ -13,7 +13,7 @@ jobs:
     steps:
       - name: Install policy tooling
         run: |
-          pacman -Syu --noconfirm cargo-deny git gnupg kmod libarchive lychee openssl \
+          pacman -Syu --noconfirm bubblewrap cargo-deny git gnupg kmod libarchive lychee openssl \
             python rustup sbsigntools systemd zstd
           useradd --create-home builder
       - uses: actions/checkout@v4

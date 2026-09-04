@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for live_opt_in in PT31553_RUN_SYSTEMD_LIFECYCLE PT31553_USE_SYSTEM_MANAGER; do
+    if [[ -n ${!live_opt_in:-} ]]; then
+        printf 'fake-platform flow: refusing live-hardware opt-in %s\n' "$live_opt_in" >&2
+        exit 1
+    fi
+done
+
+repository_root=$(git rev-parse --show-toplevel)
+cd "$repository_root"
+
+export CARGO_NET_OFFLINE=true
+
+run_fake_platform_cargo() {
+    /usr/bin/bwrap \
+        --die-with-parent \
+        --unshare-pid \
+        --ro-bind / / \
+        --dev /dev \
+        --proc /proc \
+        --tmpfs /sys \
+        --tmpfs /run \
+        --tmpfs /tmp \
+        --bind "$repository_root" "$repository_root" \
+        --chdir "$repository_root" \
+        --setenv CARGO_NET_OFFLINE true \
+        --setenv TMPDIR /tmp \
+        --unsetenv PT31553_SLEEP_PROBE_LOG \
+        --unsetenv PT31553_SLEEP_PROBE_READY_BLOCK \
+        --unsetenv PT31553_SLEEP_PROBE_READY_DELAY \
+        --unsetenv PT31553_SLEEP_PROBE_ROLE \
+        --unsetenv PT31553_SLEEP_TEST_DAEMON_UNIT \
+        --unsetenv PT31553_SLEEP_TEST_RECOVERY \
+        --unsetenv PT31553_SLEEP_TEST_RECOVERY_EVENT \
+        --unsetenv PT31553_SLEEP_TEST_RESUME_MARKER \
+        --unsetenv PT31553_TEST_WRITABLE_ROOT \
+        --unsetenv PT31553_LOCKED_SOURCE_ROOT \
+        --unsetenv PT31553_LIFECYCLE_PROBE_ROLE \
+        --unsetenv PT31553_LIFECYCLE_PROBE_BEHAVIOR \
+        --unsetenv PT31553_LIFECYCLE_PROBE_LOG \
+        --unsetenv PT31553_ACCEPTANCE_READY_ACK \
+        --unsetenv PT31553_ACCEPTANCE_WATCHDOG_ACK \
+        --unsetenv NOTIFY_SOCKET \
+        --unsetenv WATCHDOG_USEC \
+        --unsetenv WATCHDOG_PID \
+        -- \
+        cargo "$@"
+}
+
+printf '%s\n' '==> clean qualification-ready workspace build'
+run_fake_platform_cargo build --frozen --workspace --all-targets --all-features
+
+printf '%s\n' '==> core package, admission, qualification, control, fault, and restoration flow'
+run_fake_platform_cargo test --frozen -p fan-control-core \
+    --test controller_package \
+    --test compatibility_admission \
+    --test config_validation \
+    --test policy_authority \
+    --test evidence_records \
+    --test requalification \
+    --test read_only_preflight \
+    --test firmware_auto_baseline \
+    --test conservative_calibration \
+    --test matched_custom_workload \
+    --test live_lifecycle_qualification \
+    --test supervised_endurance \
+    --test healthy_control_cycle \
+    --test simulated_fault_orderings \
+    --test runtime_restoration_diagnostics \
+    --test firmware_auto_restoration \
+    --test qualification_ready_fake_platform
+
+printf '%s\n' '==> daemon startup, readiness, healthy control, signals, watchdog, and sleep flow'
+run_fake_platform_cargo test --frozen -p fan-control-daemon --features acceptance-fixture \
+    --test startup \
+    --test qualified_startup \
+    --test production_control_loop \
+    --test production_binary_control_loop \
+    --test service_supervision \
+    --test sleep_guard
+
+printf '%s\n' '==> qualification CLI startup, stage surface, and evidence validation'
+run_fake_platform_cargo test --frozen -p fan-control-qualify \
+    --bin fan-control-qualify \
+    --test startup \
+    --test qualification_stages \
+    --test validate_records
+
+printf '%s\n' '==> independent restoration command ownership, retry, and Firmware Auto flow'
+run_fake_platform_cargo test --frozen -p fan-control-restore \
+    --bin fan-control-restore \
+    --test startup
+
+printf '%s\n' \
+    'qualification-ready source handoff passed: fake-platform software readiness only; not hardware qualification; not Custom-control authorization'

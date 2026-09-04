@@ -92,6 +92,7 @@ crates/fan-control-core/tests/package_provenance_verifier.rs
 crates/fan-control-core/tests/policy_authority.rs
 crates/fan-control-core/tests/protected_envelope.rs
 crates/fan-control-core/tests/qualification_operation_runbook.rs
+crates/fan-control-core/tests/qualification_ready_fake_platform.rs
 crates/fan-control-core/tests/qualification_workloads.rs
 crates/fan-control-core/tests/read_only_preflight.rs
 crates/fan-control-core/tests/repository_policy_ci.rs
@@ -178,6 +179,7 @@ scripts/check-repository-policy
 scripts/check-sensitive-history
 scripts/generate-candidate-declarations
 scripts/redact-evidence
+scripts/verify-fake-platform-flow
 scripts/verify-package-provenance
 scripts/verify-source-complete-handoff
 scripts/verify-source-lock
