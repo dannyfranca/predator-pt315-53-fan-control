@@ -297,6 +297,7 @@ kernel. The package's operator entrypoints, authority inputs, and state location
 - `/usr/bin/pt31553-fand` (`--status` reads status; no argument starts control);
 - `/usr/bin/pt31553-fan-restore` (`--status` reads status; `--restore` writes);
 - `/usr/bin/pt31553-fan-qualify` (qualification and promotion coordinator);
+- `/usr/bin/pt31553-fan-observer` (foreground human-presence and ambient-temperature companion);
 - `/etc/pt31553-fan-control/config.toml` (editable configuration);
 - `/usr/lib/pt31553-fan-control/compatibility.toml` (static declaration);
 - `/var/lib/pt31553-fan-control/` and `/var/lib/pt31553-fan-control/evidence/`
@@ -1923,8 +1924,8 @@ kernel_cert_sha256='REPLACE_WITH_KERNEL_CERT_SHA256'
 archive_parent=/var/lib/pt31553-fan-control/rollback
 last_qualified=$archive_parent/pt31553-last-qualified-7.1.8-1
 previous_qualified=
-controller_package=/absolute/path/to/pt31553-fan-control-0.1.0-11-x86_64.pkg.tar.zst
-controller_package_signature=/absolute/path/to/pt31553-fan-control-0.1.0-11-x86_64.pkg.tar.zst.sig
+controller_package=/absolute/path/to/pt31553-fan-control-0.1.0-12-x86_64.pkg.tar.zst
+controller_package_signature=/absolute/path/to/pt31553-fan-control-0.1.0-12-x86_64.pkg.tar.zst.sig
 controller_package_sha256='REPLACE_WITH_CONTROLLER_PACKAGE_SHA256'
 qualification_record=/var/lib/pt31553-fan-control/qualification.json
 endurance_evidence=/var/lib/pt31553-fan-control/evidence/supervised-endurance.json

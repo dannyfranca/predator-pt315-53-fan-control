@@ -71,6 +71,7 @@ jobs:
             usr/bin/pt31553-fand \
             usr/bin/pt31553-fan-restore \
             usr/bin/pt31553-fan-qualify \
+            usr/bin/pt31553-fan-observer \
             usr/lib/pt31553-fan-control/compatibility.toml \
             usr/lib/pt31553-fan-control/workloads/VERSION \
             usr/lib/pt31553-fan-control/workloads/combined \

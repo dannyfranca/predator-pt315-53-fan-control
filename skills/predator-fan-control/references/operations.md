@@ -36,6 +36,7 @@ The package installs these operator entrypoints and creates these state location
 - `/usr/bin/pt31553-fan-restore` (`--status` is read-only; `--restore` writes
   fan mode and is privileged);
 - `/usr/bin/pt31553-fan-qualify`;
+- `/usr/bin/pt31553-fan-observer` (foreground human-presence and measured-ambient companion);
 - `/etc/pt31553-fan-control/config.toml`;
 - `/usr/lib/pt31553-fan-control/compatibility.toml`;
 - `/var/lib/pt31553-fan-control/` and

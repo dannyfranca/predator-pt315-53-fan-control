@@ -1,3 +1,4 @@
 # Type Path                                           Mode User Group Age Argument
+d /run/pt31553-fan-control                            0755 root root -   -
 d /var/lib/pt31553-fan-control                        0700 root root -   -
 d /var/lib/pt31553-fan-control/evidence               0700 root root -   -

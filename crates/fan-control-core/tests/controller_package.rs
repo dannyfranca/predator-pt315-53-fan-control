@@ -10,8 +10,8 @@ use fan_control_core::{
     QUALIFICATION_CGROUP_PREFIX, parse_compatibility_v1, parse_config_v1, validate_config_v1,
 };
 
-const SOURCE_COMMIT: &str = "722fb787f76b7411b668ed65955a162e0bead753";
-const SOURCE_SHA256: &str = "83b75c1c0d5745896c8fa538ee73b99b25c2f5b7971e21cc455997748c663684";
+const SOURCE_COMMIT: &str = "b69e719d78d23f3987bb3eefb9e3ca801bafd50f";
+const SOURCE_SHA256: &str = "df8984936913f072987c8af2b88b643b905f001a7b460403c43e85c74334764e";
 const README: &str = include_str!("../../../README.md");
 const SKILL: &str = include_str!("../../../skills/predator-fan-control/SKILL.md");
 const OPERATIONS: &str =
@@ -24,6 +24,7 @@ const SUPPORT: &str = include_str!("../../../skills/predator-fan-control/referen
 const OPENAI_YAML: &str = include_str!("../../../skills/predator-fan-control/agents/openai.yaml");
 const EXPECTED_TMPFILES: &str = "\
 # Type Path                                           Mode User Group Age Argument
+d /run/pt31553-fan-control                            0755 root root -   -
 d /var/lib/pt31553-fan-control                        0700 root root -   -
 d /var/lib/pt31553-fan-control/evidence               0700 root root -   -
 ";
@@ -69,6 +70,7 @@ fn stage_package_fixture() -> (PathBuf, PathBuf) {
         "fan-control-daemon",
         "fan-control-restore",
         "fan-control-qualify",
+        "fan-control-observer",
     ] {
         let path = source_root.join("target/release").join(binary);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -508,6 +510,7 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
         ("usr/bin/pt31553-fand", "fan-control-daemon"),
         ("usr/bin/pt31553-fan-restore", "fan-control-restore"),
         ("usr/bin/pt31553-fan-qualify", "fan-control-qualify"),
+        ("usr/bin/pt31553-fan-observer", "fan-control-observer"),
     ] {
         assert_eq!(mode(pkgdir.join(binary)), 0o755);
         assert_eq!(
@@ -679,6 +682,7 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
         files,
         [
             "etc/pt31553-fan-control/config.toml",
+            "usr/bin/pt31553-fan-observer",
             "usr/bin/pt31553-fan-qualify",
             "usr/bin/pt31553-fan-restore",
             "usr/bin/pt31553-fand",
@@ -767,6 +771,10 @@ fn operator_documentation_matches_the_packaged_surface() {
         (
             "usr/bin/pt31553-fan-qualify",
             "/usr/bin/pt31553-fan-qualify",
+        ),
+        (
+            "usr/bin/pt31553-fan-observer",
+            "/usr/bin/pt31553-fan-observer",
         ),
         (
             "etc/pt31553-fan-control/config.toml",
