@@ -351,6 +351,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         &matched_runs,
         &live_lifecycle,
     )?;
+    environment.cleanup_containment().map_err(|error| {
+        format!("qualification harness containment cleanup failed; authorization withheld: {error}")
+    })?;
+    if shutdown.is_requested() {
+        return Err(
+            "termination signal received during containment cleanup; authorization withheld".into(),
+        );
+    }
     write_qualification_record_after_endurance_with_guard(
         &arguments.qualification_record,
         &arguments.evidence_output,
@@ -381,6 +389,7 @@ fn preflight_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> {
     harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
     let (record, report) = execute_read_only_preflight(&manifest, &harness)?;
     let passed = record.outcome.status == RunOutcomeStatus::Passed;
+    complete_harness_stage(&mut harness, "preflight")?;
     write_root_owned_evidence_atomically(&output, &record)?;
     println!("{report}");
     if !passed {
@@ -492,6 +501,9 @@ fn firmware_auto_baselines_command(values: Vec<OsString>) -> Result<(), Box<dyn 
         let report = run_firmware_auto_baseline(&mut platform, &mut harness, &plan)?;
         let accepted = report.accepted();
         let record = report.into_record();
+        if !accepted {
+            complete_harness_stage(&mut harness, spec.workload_id)?;
+        }
         write_root_owned_evidence_atomically(&output, &record)?;
         if !accepted {
             let recovery = firmware_auto_recovery(record.outcome.final_firmware_auto_confirmed);
@@ -506,6 +518,7 @@ fn firmware_auto_baselines_command(values: Vec<OsString>) -> Result<(), Box<dyn 
         }
         println!("PASS {}: {}", spec.workload_id, output.display());
     }
+    complete_harness_stage(&mut harness, "Firmware Auto baselines")?;
     println!(
         "all seven Firmware Auto baselines passed; no Custom-control write was armed; evidence: {}",
         manifest.evidence_root.display()
@@ -535,6 +548,7 @@ fn fan_calibration_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> 
     read_only_harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
     let (_, baselines) = load_custom_prerequisites(&manifest, &read_only_harness)?;
     let calibration_binding_sha256 = calibration_prerequisite_binding_sha256(&manifest)?;
+    complete_harness_stage(&mut read_only_harness, "calibration prerequisite checks")?;
 
     let output = manifest
         .evidence_root
@@ -639,6 +653,7 @@ fn fan_calibration_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> 
     if record.calibration.as_slice() != [calibration] {
         return Err("calibration evidence does not exactly match the validated protocol".into());
     }
+    complete_harness_stage(&mut harness, "fan calibration")?;
     write_root_owned_evidence_atomically(&output, &record)?;
     println!(
         "PASS {fan_name} calibration: Firmware Auto reconfirmed; evidence: {}",
@@ -805,6 +820,10 @@ fn matched_workload_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>>
     let mut read_only_harness = HarnessEnvironment::new(arguments.stage.harness.clone())?;
     read_only_harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
     let (preflight, baselines) = load_custom_prerequisites(&manifest, &read_only_harness)?;
+    complete_harness_stage(
+        &mut read_only_harness,
+        "matched-workload prerequisite checks",
+    )?;
     let cpu_calibration = read_evidence(&manifest.evidence_root.join("cpu-calibration.json"))?;
     let gpu_calibration = read_evidence(&manifest.evidence_root.join("gpu-calibration.json"))?;
     let calibration_binding_sha256 = calibration_prerequisite_binding_sha256(&manifest)?;
@@ -924,6 +943,7 @@ fn matched_workload_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>>
     let report = run_matched_custom_workload(&mut harness, &plan)?;
     let accepted = report.accepted();
     let record = report.into_record();
+    complete_harness_stage(&mut harness, "matched workload")?;
     write_root_owned_evidence_atomically(&output, &record)?;
     if !accepted {
         return Err(format!(
@@ -982,6 +1002,7 @@ fn live_lifecycle_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> {
         &cpu_calibration,
         &gpu_calibration,
     )?;
+    complete_harness_stage(&mut read_only_harness, "lifecycle prerequisite checks")?;
     let prerequisites_completed_at = matched
         .last()
         .expect("the exact 12-stage sequence is required")
@@ -1068,6 +1089,7 @@ fn live_lifecycle_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> {
                             .into(),
                     );
                 }
+                complete_harness_stage(&mut harness, "live lifecycle pre-reboot")?;
                 let bytes = serde_json::to_vec_pretty(&checkpoint)?;
                 write_root_owned_bytes_atomically(&checkpoint_path, &bytes)?;
                 if shutdown.is_requested() {
@@ -1096,6 +1118,7 @@ fn live_lifecycle_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> {
     if shutdown.is_requested() {
         return Err("termination signal received before lifecycle evidence publication".into());
     }
+    complete_harness_stage(&mut harness, "live lifecycle")?;
     write_root_owned_evidence_atomically(&output, &record)?;
     if shutdown.is_requested() {
         remove_lifecycle_checkpoint(&output)?;
@@ -2149,6 +2172,17 @@ impl HarnessEnvironment {
         self.nvidia_gpu_uuid = Some(uuid);
     }
 
+    fn cleanup_containment(&mut self) -> std::io::Result<()> {
+        let Some(mut cgroup) = self.cgroup.take() else {
+            return Ok(());
+        };
+        if let Err(error) = cgroup.cleanup() {
+            self.cgroup = Some(cgroup);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn selected_nvidia_gpu(&self) -> Result<&str, String> {
         self.nvidia_gpu_uuid
             .as_deref()
@@ -2370,6 +2404,15 @@ impl HarnessEnvironment {
     }
 }
 
+fn complete_harness_stage(
+    harness: &mut HarnessEnvironment,
+    stage: &str,
+) -> Result<(), Box<dyn Error>> {
+    harness.cleanup_containment().map_err(|error| {
+        format!("{stage} harness containment cleanup failed; result withheld: {error}").into()
+    })
+}
+
 fn wait_delay_millis(now: u64, target: u64, deadline: u64) -> Result<u64, String> {
     if target > deadline {
         return Err("wait target exceeds deadline".into());
@@ -2383,6 +2426,7 @@ fn wait_delay_millis(now: u64, target: u64, deadline: u64) -> Result<u64, String
 struct HarnessCgroup {
     root: PathBuf,
     processes_path: CString,
+    removed: bool,
 }
 
 impl HarnessCgroup {
@@ -2394,6 +2438,7 @@ impl HarnessCgroup {
                 "cgroup v2 is required for root qualification harness containment",
             ));
         }
+        reject_stale_harness_cgroups_at(cgroup_root)?;
         let root = cgroup_root.join(format!(
             "pt31553-fan-qualify-{}-{}",
             std::process::id(),
@@ -2417,26 +2462,61 @@ impl HarnessCgroup {
         Ok(Self {
             root,
             processes_path,
+            removed: false,
         })
     }
 
     fn kill_all(&self) -> std::io::Result<()> {
         fs::write(self.root.join("cgroup.kill"), b"1")
     }
+
+    fn cleanup(&mut self) -> std::io::Result<()> {
+        if self.removed {
+            return Ok(());
+        }
+        let kill_result = self.kill_all();
+        let mut removal_result = Ok(());
+        for attempt in 0..100 {
+            match fs::remove_dir(&self.root) {
+                Ok(()) => {
+                    self.removed = true;
+                    removal_result = Ok(());
+                    break;
+                }
+                Err(error) if error.raw_os_error() == Some(libc::EBUSY) && attempt < 99 => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    removal_result = Err(error);
+                    break;
+                }
+            }
+        }
+        kill_result.and(removal_result)
+    }
+}
+
+fn reject_stale_harness_cgroups_at(cgroup_root: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(cgroup_root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir()
+            && entry
+                .file_name()
+                .as_bytes()
+                .starts_with(b"pt31553-fan-qualify-")
+        {
+            return Err(std::io::Error::other(format!(
+                "stale qualification harness cgroup remains at {}; cleanup is unproven",
+                entry.path().display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl Drop for HarnessCgroup {
     fn drop(&mut self) {
-        let _ = self.kill_all();
-        for _ in 0..100 {
-            match fs::remove_dir(&self.root) {
-                Ok(()) => break,
-                Err(error) if error.raw_os_error() == Some(libc::EBUSY) => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(_) => break,
-            }
-        }
+        let _ = self.cleanup();
     }
 }
 
@@ -3255,6 +3335,49 @@ printf '{"deadline":%s}' "$2""#,
         let deadline = harness.deadline(5_000);
         let response: Value = harness.invoke("clock", json!({}), deadline).unwrap();
         assert_eq!(response["deadline"].as_u64(), Some(deadline));
+    }
+
+    #[test]
+    fn explicit_containment_cleanup_reports_a_residual_cgroup() {
+        let root = env::temp_dir().join(format!(
+            "fan-control-qualify-cgroup-cleanup-{}-{}",
+            process::id(),
+            NEXT_HARNESS_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("cgroup.kill"), b"").unwrap();
+        fs::write(root.join("cgroup.procs"), b"residual").unwrap();
+        let processes_path =
+            CString::new(root.join("cgroup.procs").as_os_str().as_bytes()).unwrap();
+        let mut cgroup = HarnessCgroup {
+            root: root.clone(),
+            processes_path,
+            removed: false,
+        };
+
+        let error = cgroup.cleanup().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::DirectoryNotEmpty);
+        assert!(root.exists());
+
+        fs::remove_file(root.join("cgroup.procs")).unwrap();
+        fs::remove_file(root.join("cgroup.kill")).unwrap();
+    }
+
+    #[test]
+    fn stale_qualifier_cgroup_blocks_a_new_stage() {
+        let root = env::temp_dir().join(format!(
+            "fan-control-qualify-stale-cgroup-{}-{}",
+            process::id(),
+            NEXT_HARNESS_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let stale = root.join("pt31553-fan-qualify-111-0");
+        fs::create_dir_all(&stale).unwrap();
+
+        let error = reject_stale_harness_cgroups_at(&root).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(error.to_string().contains(&stale.display().to_string()));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
