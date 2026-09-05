@@ -1,13 +1,15 @@
 # Predator PT315-53 fan control
 
-Source status: **unqualified and not configured**. This repository supports
-only the documented build and disabled package installation; it does not yet
-authorize Custom fan control or service enablement.
+Source status: **qualification-ready; this checkout is unqualified and not
+configured**. The repository implements the production controller and complete
+qualification coordinator. Custom fan control and service enablement remain
+forbidden until the exact installed machine produces and validates its own
+qualification authority.
 
 ## Workspace
 
 - `fan-control-core`: shared library
-- `fan-control-daemon`: future automatic controller
+- `fan-control-daemon`: fail-closed production controller
 - `fan-control-restore`: independent Firmware Auto restoration tool
 - `fan-control-qualify`: privileged supervised qualification runner
 
@@ -19,13 +21,13 @@ Install the portable operating skill from this repository with:
 npx skills add dannyfranca/predator-pt315-53-fan-control --skill predator-fan-control
 ```
 
-The skill teaches an agent to inspect compatibility, select and verify a
-source revision, build its artifacts locally, prepare a disabled installation,
-propose configuration changes, and follow recovery/removal boundaries. It
-derives revision-specific commands from the selected checkout and requires
-approval before privileged or mutating operations. For this unqualified
-revision it must keep services disabled and inactive; it does not make active
-fan control available.
+The skill teaches an agent to inspect compatibility, check status, build the
+current clean checkout, prepare a disabled installation, guide supervised
+qualification, operate an authorized installation, propose configuration
+changes, and follow recovery/removal boundaries. It may perform unprivileged
+source work autonomously. It pauses for approval only at privileged or live
+hardware-control boundaries. An unqualified machine stays disabled and
+inactive even though the production executable is present.
 
 Update an installed copy with `npx skills update predator-fan-control`.
 
@@ -63,8 +65,7 @@ cannot reach host fan controls, NVIDIA devices, or active systemd units. Success
 **qualification-ready source handoff**; it is not hardware qualification or Custom-control
 authorization.
 
-The guided live-lifecycle stage is exposed through
-`pt31553-fan-qualify live-lifecycle`. It orders invalid-configuration, duplicate-process,
+The guided `live-lifecycle` qualification stage orders invalid-configuration, duplicate-process,
 normal stop/restart, `SIGKILL`, watchdog, AC-to-battery, suspend/resume, and reboot checks.
 Every case must finish with independent CPU and GPU Firmware Auto (`2`) readbacks before
 the next case. Its environment supplies fresh typed observations; a persisted outer
@@ -89,7 +90,7 @@ Status invocations do no hardware or service work and exit after reporting the
 current source role:
 
 ```console
-cargo run -p fan-control-daemon
+cargo run -p fan-control-daemon -- --status
 cargo run -p fan-control-restore -- --status
 cargo run -p fan-control-qualify
 ```
@@ -128,7 +129,7 @@ status without touching hardware:
 
 ```sh
 set -eu
-cargo run -p fan-control-daemon
+cargo run -p fan-control-daemon -- --status
 cargo run -p fan-control-restore -- --status
 cargo run -p fan-control-qualify
 ```
@@ -155,25 +156,18 @@ change.
 
 ### 3. Build and verify from a clean source state
 
-Install the repository's documented toolchain and policy tools first. Use a
-new directory and an explicit reviewed revision; the placeholder check prevents
-an accidental build from an unspecified branch:
+Install the repository's documented toolchain and policy tools first. Build the
+current clean checkout; its resolved `HEAD`, never a tag name, release asset, or
+floating remote branch, is the source identity:
 
 ```sh
 set -eu
-source_revision='REPLACE_WITH_REVIEWED_40_HEX_COMMIT'
-source_parent=/absolute/path/to/new-empty-source-parent
-case "$source_revision" in REPLACE_*|*[!0-9a-f]*) exit 1 ;; esac
+source_root=$(git rev-parse --show-toplevel)
+cd "$source_root"
+source_revision=$(git rev-parse HEAD)
+case "$source_revision" in *[!0-9a-f]*) exit 1 ;; esac
 test "${#source_revision}" -eq 40
-case "$source_parent" in /absolute/path/*|'') exit 1 ;; esac
-test ! -e "$source_parent"
-/usr/bin/install -d -m 0755 "$source_parent"
-git clone --no-checkout \
-  https://github.com/dannyfranca/predator-pt315-53-fan-control.git \
-  "$source_parent/source"
-cd "$source_parent/source"
-git checkout --detach "$source_revision"
-test "$(git rev-parse HEAD)" = "$source_revision"
+test "$(git rev-parse --is-shallow-repository)" = false
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
 cargo fetch --locked
 cargo deny fetch
@@ -181,15 +175,32 @@ CARGO_NET_OFFLINE=true scripts/check-repository-policy
 controller_source_revision=$(/usr/bin/sed -n \
   "s/^_commit='\([0-9a-f]\{40\}\)'$/\1/p" packaging/controller/PKGBUILD)
 test "${#controller_source_revision}" -eq 40
-controller_source_checkout="$source_parent/controller-source"
-controller_cargo_home=/secure/controller-cargo-home
+controller_worktree_parent=$(/usr/bin/mktemp -d)
+controller_source_checkout="$controller_worktree_parent/source"
+controller_cargo_home=${PT31553_CONTROLLER_CARGO_HOME:?set an absolute private Cargo cache path}
+case "$controller_cargo_home" in /*) ;; *) exit 1 ;; esac
 test ! -e "$controller_source_checkout"
 /usr/bin/install -d -m 0700 "$controller_cargo_home"
+test -d "$controller_cargo_home"
+test ! -L "$controller_cargo_home"
+test "$(/usr/bin/realpath --canonicalize-existing --no-symlinks "$controller_cargo_home")" = \
+  "$controller_cargo_home"
+controller_cargo_home_mode=$(/usr/bin/stat -c %a "$controller_cargo_home")
+test "$(/usr/bin/stat -c %u "$controller_cargo_home")" = "$(/usr/bin/id -u)"
+test $((8#$controller_cargo_home_mode & 8#077)) -eq 0
+cleanup_controller_worktree() {
+  git -C "$source_root" worktree remove --force "$controller_source_checkout" \
+    >/dev/null 2>&1 || true
+  /usr/bin/rmdir "$controller_worktree_parent" >/dev/null 2>&1 || true
+}
+trap cleanup_controller_worktree EXIT HUP INT TERM
 git worktree add --detach "$controller_source_checkout" "$controller_source_revision"
 CARGO_HOME="$controller_cargo_home" cargo fetch --locked \
   --manifest-path "$controller_source_checkout/Cargo.toml" \
   --target x86_64-unknown-linux-gnu
 git worktree remove "$controller_source_checkout"
+/usr/bin/rmdir "$controller_worktree_parent"
+trap - EXIT HUP INT TERM
 ```
 
 That policy command runs formatting, linting, all simulated unit/integration
@@ -221,24 +232,45 @@ controller build is offline and does not install missing dependencies:
 
 ```sh
 set -eu
-source_root=$PWD
-test -d /bundle
-candidate_output=/absolute/path/to/new-source-candidate
+source_root=$(git rev-parse --show-toplevel)
+cd "$source_root"
+source_revision=$(git rev-parse HEAD)
+: "${PT31553_CONTROLLER_CARGO_HOME:?set an absolute private Cargo cache path}"
+controller_cargo_home=$PT31553_CONTROLLER_CARGO_HOME
+: "${PT31553_BUNDLE:?set the absolute reviewed bundle path}"
+: "${PT31553_KERNEL_SIGNING_DIR:?set the absolute private signing directory}"
+: "${PT31553_PACKAGE_CERT:?set the absolute package certificate path}"
+: "${PT31553_PACKAGE_CERT_SHA256:?set the independently reviewed SHA-256}"
+: "${PT31553_PACKAGE_KEY:?set the absolute private package key path}"
+: "${PT31553_MODULE_CERT_SHA256:?set the independently reviewed SHA-256}"
+: "${PT31553_KERNEL_CERT:?set the absolute enrolled image certificate path}"
+: "${PT31553_KERNEL_CERT_SHA256:?set the independently reviewed SHA-256}"
+: "${PT31553_CONTROLLER_GNUPG_HOME:?set the absolute private GnuPG home}"
+: "${PT31553_CONTROLLER_KEY:?set the reviewed primary-key fingerprint}"
+test -d "$PT31553_BUNDLE"
+candidate_output="$(dirname "$source_root")/pt31553-source-candidate-$source_revision"
 test ! -e "$candidate_output"
 scripts/build-source-candidate \
-  --bundle /bundle \
-  --kernel-signing-dir /secure/signing \
-  --package-cert /secure/public/package-signing-certificate.pem \
-  --package-cert-sha256 REPLACE_WITH_APPROVED_PACKAGE_CERT_SHA256 \
-  --package-key /secure/private/package-signing-key.pem \
-  --module-cert-sha256 REPLACE_WITH_APPROVED_MODULE_CERT_SHA256 \
-  --kernel-cert /secure/public/enrolled-image-signing-certificate.pem \
-  --kernel-cert-sha256 REPLACE_WITH_APPROVED_IMAGE_CERT_SHA256 \
-  --cargo-home /secure/controller-cargo-home \
-  --controller-gnupg-home /secure/controller-gnupg \
-  --controller-key REPLACE_WITH_CONTROLLER_PRIMARY_KEY_FINGERPRINT \
+  --bundle "$PT31553_BUNDLE" \
+  --kernel-signing-dir "$PT31553_KERNEL_SIGNING_DIR" \
+  --package-cert "$PT31553_PACKAGE_CERT" \
+  --package-cert-sha256 "$PT31553_PACKAGE_CERT_SHA256" \
+  --package-key "$PT31553_PACKAGE_KEY" \
+  --module-cert-sha256 "$PT31553_MODULE_CERT_SHA256" \
+  --kernel-cert "$PT31553_KERNEL_CERT" \
+  --kernel-cert-sha256 "$PT31553_KERNEL_CERT_SHA256" \
+  --cargo-home "$controller_cargo_home" \
+  --controller-gnupg-home "$PT31553_CONTROLLER_GNUPG_HOME" \
+  --controller-key "$PT31553_CONTROLLER_KEY" \
   --output "$candidate_output"
 ```
+
+The generated tree is exactly
+`pt31553-source-candidate-$source_revision/{kernel,controller,declarations,signatures}`.
+The declaration paths are `declarations/package-provenance-v1.json`,
+`declarations/compatibility.toml`, and
+`declarations/candidate-identity-v1.json`; the signed package-set manifest is
+`signatures/package-set.p7s`.
 
 The command fails before publication for a dirty source revision, incomplete
 or inconsistent source lock/package set, any signature or hash mismatch,
@@ -260,7 +292,18 @@ outputs. Every declaration remains explicitly **UNQUALIFIED** and
 ### 4. Install the controller disabled
 
 Do this on the clean stock boot, before installing or booting the candidate
-kernel. First obtain the approved candidate-manifest SHA-256 and controller
+kernel. The package's operator entrypoints, authority inputs, and state locations used below are:
+
+- `/usr/bin/pt31553-fand` (`--status` reads status; no argument starts control);
+- `/usr/bin/pt31553-fan-restore` (`--status` reads status; `--restore` writes);
+- `/usr/bin/pt31553-fan-qualify` (qualification and promotion coordinator);
+- `/etc/pt31553-fan-control/config.toml` (editable configuration);
+- `/usr/lib/pt31553-fan-control/compatibility.toml` (static declaration);
+- `/var/lib/pt31553-fan-control/` and `/var/lib/pt31553-fan-control/evidence/`
+  (empty protected state directories at install); and
+- `pt31553-fand.service` and `pt31553-fan-sleep-guard.service` (installed disabled).
+
+First obtain the approved candidate-manifest SHA-256 and controller
 signer fingerprint from the independent review record outside the candidate
 directory. Reverify the exact package and its embedded bindings, require that
 neither controller unit is already enabled or active, then install. Arch package
@@ -269,7 +312,9 @@ for both.
 
 ```sh
 set -eu
-candidate_output=/absolute/path/to/source-candidate
+source_root=$(git rev-parse --show-toplevel)
+source_revision=$(git -C "$source_root" rev-parse HEAD)
+candidate_output="$(dirname "$source_root")/pt31553-source-candidate-$source_revision"
 approved_candidate_manifest_sha256=REPLACE_WITH_APPROVED_CANDIDATE_MANIFEST_SHA256
 approved_controller_signer_fingerprint=REPLACE_WITH_APPROVED_CONTROLLER_SIGNER_FINGERPRINT
 candidate_manifest="$candidate_output/declarations/candidate-identity-v1.json"
@@ -592,7 +637,9 @@ replace either stock package:
 
 ```sh
 set -eu
-candidate_output=/absolute/path/to/source-candidate
+source_root=$(git rev-parse --show-toplevel)
+source_revision=$(git -C "$source_root" rev-parse HEAD)
+candidate_output="$(dirname "$source_root")/pt31553-source-candidate-$source_revision"
 candidate_manifest="$candidate_output/declarations/candidate-identity-v1.json"
 artifact_dir="$candidate_output/kernel"
 provenance_record="$candidate_output/declarations/package-provenance-v1.json"
@@ -1330,20 +1377,30 @@ The candidate entry must show `selected`; a stock entry must still show
 
 ## Canonical runbook: qualification and operation
 
-> **CURRENT REVISION: DO NOT ENABLE OR START.** This source revision is an
-> unqualified publication. Its daemon is deliberately status-only and cannot
-> become ready under systemd. The commands in step 8 are the post-qualification
-> operator contract for a later build that has passed every gate below; they are
-> not authorization to run this revision. Source-complete is not qualification.
-> CI success is not qualification. Neither result permits Custom control.
+> **THIS MACHINE IS UNQUALIFIED: DO NOT ENABLE OR START YET.** The production
+> daemon and qualification commands are implemented, but they do not create
+> authority by existing. Step 8 becomes eligible only after stages 1–7 create
+> the exact protected record and evidence, `validate-records` accepts them, and
+> the installed package, policy, kernel/module, firmware, machine, and fan
+> endpoints still match. Source-complete is not qualification. CI success is
+> not qualification. Neither result permits Custom control.
 
 Run this ladder only on the exact Predator PT315-53 / Civic_TLS machine and
-candidate package set verified above. Keep a second operator present for every
-stage that can enter Custom control. Never substitute raw EC writes, a forced
+candidate package set verified above. Obtain approval immediately before every
+root-only qualification command. Keep a second operator present for every
+workload or stage that can enter Custom control. Never substitute raw EC writes, a forced
 module capability, a replacement module, manual fan mode, or module unload.
 The fixed commands and schedules in
 [`qualification/workloads/README.md`](qualification/workloads/README.md) are
 part of the evidence identity; do not tune them during a run.
+
+The human observer is the physical safety sensor, not an approval rubber stamp.
+For every live Custom stage, stay at the machine with the terminal and power
+control available. Watch fan sound and visible operation, CPU/GPU temperature
+and throttling, RPM/mode/readback and telemetry continuity, workload control,
+smoke or unusual smell, instability, and the ability to intervene. Withdraw
+approval and abort immediately on any surprise. If both fans cannot be
+confirmed in Auto, power off; do not continue or reboot.
 
 Every successful stage boundary uses the same fail-closed handoff:
 
@@ -1401,6 +1458,20 @@ and accepted. At every handoff, repeat the Auto boundary above.
 > [`qualification/preflight-baseline-harness.md`](qualification/preflight-baseline-harness.md)
 > and the linked lifecycle/endurance protocol documents.
 
+The installed qualification and post-qualification CLI contracts are:
+
+```text
+sudo /usr/bin/pt31553-fan-qualify preflight --manifest FILE --harness FILE
+sudo /usr/bin/pt31553-fan-qualify firmware-auto-baselines --manifest FILE --harness FILE
+sudo /usr/bin/pt31553-fan-qualify fan-calibration --fan cpu|gpu --manifest FILE --harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING
+sudo /usr/bin/pt31553-fan-qualify matched-workload --manifest FILE --harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING
+sudo /usr/bin/pt31553-fan-qualify live-lifecycle --manifest FILE --harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING
+sudo /usr/bin/pt31553-fan-qualify supervised-endurance --manifest FILE --harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING --evidence-output FILE [--qualification-record FILE]
+sudo /usr/bin/pt31553-fan-qualify validate-records --qualification-record FILE --evidence FILE [--authorized-evidence-path FILE]
+sudo /usr/bin/pt31553-fan-qualify redact-evidence --qualification-record FILE --evidence FILE --authorized-evidence-path FILE --output FILE
+sudo /usr/bin/pt31553-fan-qualify check-promotion --manifest FILE --qualification-record FILE --evidence FILE --authorized-evidence-path FILE --sanitized-evidence FILE --protected-policy FILE --package-provenance FILE --controller-package FILE --controller-signature FILE --package-manifest-signature FILE --output FILE
+```
+
 ### 2. Run read-only preflight
 
 Preflight performs no fan writes. Capture exact DMI/board/BIOS, running kernel,
@@ -1411,8 +1482,10 @@ enable readbacks. Reject unexpected devices, paths, identities, permissions,
 values, missing prerequisites, or a non-`2` enable readback.
 
 Publish the protected result as `preflight.json` under the manifest's unique
-evidence session directory. The executable form is
-`pt31553-fan-qualify preflight --manifest FILE --harness FILE`. End by repeating
+evidence session directory. Although it performs no fan write, it requires UID
+0 to read protected inputs and publish protected evidence. After approval, the
+executable form is
+`sudo /usr/bin/pt31553-fan-qualify preflight --manifest FILE --harness FILE`. End by repeating
 the read-only preflight form of the Auto boundary. Until the reviewed harness is
 packaged, do not replace it with ad-hoc shell scripts or direct sysfs writes,
 or treat source tests as hardware evidence.
@@ -1433,8 +1506,9 @@ Store the seven root-owned evidence records under
 `/var/lib/pt31553-fan-control/evidence/`. Their identities and paths become the
 ordered `baselines` array in the endurance plan.
 
-The executable form is `pt31553-fan-qualify firmware-auto-baselines --manifest
-FILE --harness FILE`. It fixes the durations and workload identities, checks the
+After approval for its root-only workload boundary, the executable form is
+`sudo /usr/bin/pt31553-fan-qualify firmware-auto-baselines --manifest FILE
+--harness FILE`. It fixes the durations and workload identities, checks the
 full read-only preflight again before every new workload, and resumes only exact,
 fresh, complete evidence with unchanged fan endpoint identities.
 
@@ -1463,7 +1537,7 @@ blocks all later stages. Store the accepted records as
 `cpu-calibration.json` and `gpu-calibration.json` in the protected evidence
 directory.
 
-Executable forms are `pt31553-fan-qualify fan-calibration --fan cpu --manifest
+Executable forms are `sudo /usr/bin/pt31553-fan-qualify fan-calibration --fan cpu --manifest
 FILE --harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING`, followed only
 after acceptance by the same command with `--fan gpu`. Each command rechecks the
 fresh preflight and all seven baselines before its first Custom write. Every
@@ -1490,7 +1564,7 @@ tachometer/readback/deadline failure, workload escape, or restoration failure
 rejects the run. Store the twelve accepted protected records and list their
 paths, in plan order, as `matched_workload_runs`.
 
-The executable form is `pt31553-fan-qualify matched-workload --manifest FILE
+The executable form is `sudo /usr/bin/pt31553-fan-qualify matched-workload --manifest FILE
 --harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING`. It runs exactly
 the next fixed stage, restores and confirms Auto, then exits. Reinvoke and grant
 fresh physical-observer approval for each of the twelve stages. Failed evidence
@@ -1541,9 +1615,11 @@ the machine.
 The final run is 60 minutes total with two fixed load/idle cycles and one
 AC/battery/AC transition: AC load 15 minutes, AC idle 10, battery load 10,
 battery idle 5, AC load 10, then AC idle 10. Run it only after a fresh Auto
-boundary. The following is the exact invocation contract for a later package
-that actually installs the reviewed harness; it cannot succeed from this
-revision's package:
+boundary. The controller package intentionally does not install a
+machine-specific harness or either manifest. A reviewer must provision the
+digest-pinned harness and root-owned manifests at the exact paths below from
+the documented protocol; until then this stage is blocked. The executable
+itself is present in the current package:
 
 ```sh
 sudo /usr/bin/pt31553-fan-qualify supervised-endurance \
@@ -1575,9 +1651,10 @@ root-owned `/var/lib/pt31553-fan-control/evidence/` directory.
 
 ### 8. Enable, start, and inspect an authorized build
 
-This step is forbidden for the current status-only revision. For a later
-operational build, first reverify the installed hashes/signers and repeat
-`pt31553-fan-qualify validate-records` exactly as above. Confirm that the
+This step is ineligible on an unqualified machine. After stages 1–7 have
+produced authority, first reverify the installed hashes/signers and repeat
+`sudo /usr/bin/pt31553-fan-qualify validate-records --qualification-record FILE --evidence FILE [--authorized-evidence-path FILE]`
+exactly as above. Confirm that the
 Qualification record binds the installed protected policy and complete exact
 machine envelope, both fans read Auto, the stock recovery entry remains the
 default, and no fault latch is present. Then enable both required units:
@@ -1651,59 +1728,25 @@ candidate archived until its replacement passes the required qualification.
 ### Recover before changing anything
 
 Treat an unsafe temperature, unexpected mode or RPM, missing telemetry, daemon
-fault, planned update, rollback, and removal as the same safety boundary. In
-this order: contain the exact dedicated workload cgroup and prove it empty, stop
-the sleep guard, stop the daemon, request independent restoration, and confirm
-both fans report Firmware Auto (`2`). A supported workload launcher must create
-its cgroup below `/sys/fs/cgroup/pt31553-qualification/` and atomically install
-the root-owned record before starting load. It removes both only after the
-cgroup is empty. This source revision has no production workload launcher, so
-the only valid idle state is that both record and hierarchy are absent. A stale,
-broad, or untrusted record is a failed recovery, never permission to guess
-process names. The present-record command branch below is a future-only contract:
-it is reachable only after a package-owned production launcher is installed;
-do not create or substitute that executable manually. Stop the
-sleep guard before the daemon because a prepared guard can otherwise resume the
-daemon. The daemon stop hook requests Auto, but it is not the independent
-confirmation; run the separately installed restoration command afterward:
+fault, planned update, rollback, and removal as the same safety boundary. The
+qualification executable is the only supported workload owner. It creates a
+private top-level cgroup named `/sys/fs/cgroup/pt31553-fan-qualify-<pid>-<counter>`
+and must stop its child, prove every nested `cgroup.procs` empty, and remove the
+cgroup before returning. The production daemon launches no workload.
+
+First withdraw observer approval and interrupt the active qualification command
+in its controlling terminal so its cleanup path runs. Never guess a process
+name or create a replacement launcher. Then require every qualifier cgroup to
+be absent before stopping services. Stop the sleep guard before the daemon
+because a prepared guard can otherwise resume it. The daemon stop hook requests
+Auto, but it is not the independent confirmation; run the separately installed
+restoration command afterward:
 
 ```sh
 set -eu
-workload_cgroup_record=/run/pt31553-fan-control/active-workload-cgroup
-workload_cgroup_root=/sys/fs/cgroup/pt31553-qualification
-workload_launcher=/usr/bin/pt31553-fan-workload-launcher
-if test -x "$workload_launcher"; then
-  test -f "$workload_launcher"
-  test ! -L "$workload_launcher"
-  test "$(/usr/bin/pacman -Qqo "$workload_launcher")" = pt31553-fan-control
-  test "$(sudo /usr/bin/stat -c '%U:%G:%a:%h' "$workload_launcher")" = root:root:755:1
-  test -e "$workload_cgroup_record" || test -L "$workload_cgroup_record"
-  test ! -L "$workload_cgroup_record"
-  test -f "$workload_cgroup_record"
-  test "$(sudo /usr/bin/stat -c '%U:%G:%a:%h' "$workload_cgroup_record")" = root:root:400:1
-  workload_cgroup=$(sudo /usr/bin/cat "$workload_cgroup_record")
-  case "$workload_cgroup" in "$workload_cgroup_root"/workload-*) ;; *) exit 1 ;; esac
-  test "$workload_cgroup" = "$(/usr/bin/realpath -e "$workload_cgroup")"
-  test -f "$workload_cgroup/cgroup.kill"
-  /usr/bin/printf '1\n' | sudo /usr/bin/tee "$workload_cgroup/cgroup.kill" >/dev/null
-  sudo /usr/bin/timeout --foreground 30 /usr/bin/sh -eu -c '
-    while :; do
-      workload_pids=$(/usr/bin/find "$1" -name cgroup.procs -type f \
-        -exec /usr/bin/cat {} +)
-      test -z "$workload_pids" && break
-      /usr/bin/sleep 0.1
-    done
-  ' sh "$workload_cgroup"
-  workload_pids=$(sudo /usr/bin/find "$workload_cgroup" \
-    -name cgroup.procs -type f -exec /usr/bin/cat {} +)
-  test -z "$workload_pids"
-else
-  test ! -e "$workload_launcher"
-  test ! -L "$workload_launcher"
-  test ! -e "$workload_cgroup_record"
-  test ! -L "$workload_cgroup_record"
-  test ! -e "$workload_cgroup_root"
-fi
+qualification_cgroups=$(/usr/bin/find /sys/fs/cgroup \
+  -mindepth 1 -maxdepth 1 -type d -name 'pt31553-fan-qualify-*' -print)
+test -z "$qualification_cgroups"
 sudo /usr/bin/systemctl stop pt31553-fan-sleep-guard.service
 sudo /usr/bin/systemctl stop pt31553-fand.service || true
 sudo /usr/bin/pt31553-fan-restore --restore
@@ -1721,11 +1764,11 @@ for unit in pt31553-fand.service pt31553-fan-sleep-guard.service; do
 done
 ```
 
-Any invalid workload record, failed cgroup traversal, containment timeout, or
-nonempty final PID snapshot aborts before controller shutdown. In that state,
-do not change packages, remove components, or reboot; power the machine off
-immediately. Treat it as failed restoration and preserve evidence only after a
-later cold stock boot if safe.
+Any residual qualifier cgroup or failed cgroup traversal aborts before
+controller shutdown. It means workload cleanup is unproven. Do not change
+packages, remove components, or reboot; power the machine off immediately.
+Treat it as failed restoration and preserve evidence only after a later cold
+stock boot if safe.
 
 The restoration helper owns the controller lock, requests Auto for CPU and GPU
 independently, and returns success only after both enable readbacks are `2`. If
@@ -1787,8 +1830,9 @@ requalification.
 > Do not execute them manually, synthesize `AbbreviatedRecheckResults`, or reuse
 > the old record. Until a later package supplies those reviewed entrypoints, a
 > same-code rebuild stays disabled and must use the full qualification path.
-> The full live path is also blocked by the qualification runbook's current
-> implementation boundary. Therefore this revision cannot authorize any successor.
+> The full path uses the current qualification executable, but remains blocked
+> until its reviewed external harness and manifests are provisioned. No
+> successor is authorized until one exact path completes.
 
 Keep the successor disabled throughout either requalification path. A future
 reviewed runner must bind every result to the baseline record, candidate
@@ -1879,8 +1923,8 @@ kernel_cert_sha256='REPLACE_WITH_KERNEL_CERT_SHA256'
 archive_parent=/var/lib/pt31553-fan-control/rollback
 last_qualified=$archive_parent/pt31553-last-qualified-7.1.8-1
 previous_qualified=
-controller_package=/absolute/path/to/pt31553-fan-control-0.1.0-7-x86_64.pkg.tar.zst
-controller_package_signature=/absolute/path/to/pt31553-fan-control-0.1.0-7-x86_64.pkg.tar.zst.sig
+controller_package=/absolute/path/to/pt31553-fan-control-0.1.0-11-x86_64.pkg.tar.zst
+controller_package_signature=/absolute/path/to/pt31553-fan-control-0.1.0-11-x86_64.pkg.tar.zst.sig
 controller_package_sha256='REPLACE_WITH_CONTROLLER_PACKAGE_SHA256'
 qualification_record=/var/lib/pt31553-fan-control/qualification.json
 endurance_evidence=/var/lib/pt31553-fan-control/evidence/supervised-endurance.json
@@ -2925,5 +2969,10 @@ archive until a later qualified successor replaces it.
 ## Project boundary
 
 This project is limited to safe fan-control qualification for the exact Acer Predator PT315-53 on CachyOS through the standard in-tree `acer_wmi`/Acer hwmon interface. GUI work, other laptop models, other distributions, bypass backends, and unrelated system tuning are out of scope. See [CONTRIBUTING.md](CONTRIBUTING.md) for the required exact-model evidence.
+
+GitHub Actions are manual-dispatch validation only; the runbook never triggers
+them. Published releases are optional and out of scope for acquisition,
+qualification, installation, and operation: use the current clean source
+checkout and locally built artifacts.
 
 Original repository work is [MIT-licensed](LICENSE). Linux-derived material remains `GPL-2.0-only`; see [LICENSING.md](LICENSING.md) for the boundary and provenance rules. Report vulnerabilities, unsafe fan behavior, and sensitive qualification evidence privately according to [SECURITY.md](SECURITY.md).

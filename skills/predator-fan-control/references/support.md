@@ -6,7 +6,7 @@ preliminary match; it cannot qualify hardware or authorize Custom control.
 ## Select the declaration
 
 From the exact target checkout, read `compatibility/*.toml`, the supported
-scope in `README.md` and `CONTRIBUTING.md`, and current release support in
+scope in `README.md` and `CONTRIBUTING.md`, and security support in
 `SECURITY.md`. Do not carry identities from another revision. Treat impossible
 hashes, placeholder signers, or an explicit unqualified declaration as an
 authority blocker.

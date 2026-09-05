@@ -174,28 +174,18 @@ not itself qualify hardware or authorize fan writes.
 
 ## Coherent source-candidate build
 
-The canonical local wrapper performs the authenticated kernel build,
+Top-level README step 3 is the sole canonical local wrapper invocation. It
+derives the clean, non-shallow builder checkout's `source_revision` from
+`HEAD` and publishes exactly to
+`$(dirname "$source_root")/pt31553-source-candidate-$source_revision`. The
+wrapper performs the authenticated kernel build,
 package-manifest signing and provenance verification, generated compatibility
 binding, controller build/signature verification, and final identity
 declaration as one fail-closed operation. The three expected certificate
 fingerprints must come from independent review outside the repository and
-evidence; they must not be derived from the presented certificates:
-
-```sh
-scripts/build-source-candidate \
-  --bundle /bundle \
-  --kernel-signing-dir /secure/signing \
-  --package-cert /secure/public/package-signing-certificate.pem \
-  --package-cert-sha256 APPROVED_PACKAGE_CERT_SHA256 \
-  --package-key /secure/private/package-signing-key.pem \
-  --module-cert-sha256 APPROVED_MODULE_CERT_SHA256 \
-  --kernel-cert /secure/public/enrolled-image-signing-certificate.pem \
-  --kernel-cert-sha256 APPROVED_IMAGE_CERT_SHA256 \
-  --cargo-home /secure/controller-cargo-home \
-  --controller-gnupg-home /secure/controller-gnupg \
-  --controller-key CONTROLLER_PRIMARY_KEY_FINGERPRINT \
-  --output /absolute/path/to/new-source-candidate
-```
+evidence; they must not be derived from the presented certificates. Do not
+copy or translate that command here; follow the top-level runbook so build and
+install resolve the same deterministic tree.
 
 It requires a clean reviewed checkout and a new secure output directory. The
 output contains `package-provenance-v1.json`, the compatibility declaration,

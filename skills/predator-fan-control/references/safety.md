@@ -7,14 +7,18 @@ contradiction.
 
 ## Approval gate
 
-Read-only, unprivileged inspection may proceed autonomously. Present and obtain
-approval for the exact operation immediately before any of these:
+Unprivileged source inspection, dependency fetch, tests, builds, package
+preparation, configuration drafts, and read-only status may proceed
+autonomously. Present and obtain approval for the exact operation immediately
+before any of these privileged or live-control boundaries:
 
 - package installation, update, downgrade, or removal;
-- configuration or protected-artifact write;
+- write to `/etc`, `/usr`, `/var/lib`, a protected artifact, or another
+  privileged destination;
 - service enable, disable, start, stop, restart, or reset;
 - boot entry, boot default, kernel, module, or Secure Boot change;
-- qualification, restoration, or other hardware-affecting command.
+- live qualification, restoration, workload, or other hardware-affecting
+  command.
 
 Batch only mutations that share one stated outcome and rollback. A later or
 materially different mutation needs a new approval. Credential entry belongs
@@ -25,8 +29,8 @@ logs.
 
 Use these states:
 
-- `disabled-only`: source or installation is explicitly unqualified,
-  status-only, missing authority, or prohibited from enable/start.
+- `disabled-only`: the installation is explicitly unqualified, missing
+  authority, or prohibited from enable/start.
 - `authorized`: the exact revision's documented verifier accepts matching
   protected policy, qualification, evidence, package, kernel/module, machine,
   and Firmware Auto observations, and its runbook explicitly permits the

@@ -1,4 +1,5 @@
 const README: &str = include_str!("../../../README.md");
+const KERNEL_README: &str = include_str!("../../../packaging/kernel/README.md");
 
 fn runbook() -> &'static str {
     README
@@ -30,6 +31,33 @@ fn section<'a>(runbook: &'a str, start: &str, end: &str) -> &'a str {
         .0
 }
 
+fn command_arguments(source: &str) -> Vec<(String, String)> {
+    let tokens = source
+        .split_whitespace()
+        .filter(|token| *token != "\\")
+        .map(|token| token.trim_matches(['`', '"', '\'', ',', ';']).to_owned())
+        .collect::<Vec<_>>();
+    let mut arguments = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens[index].starts_with("--") {
+            let value = tokens
+                .get(index + 1)
+                .unwrap_or_else(|| panic!("{} has no value", tokens[index]));
+            assert!(
+                !value.starts_with("--"),
+                "{} is incorrectly bound to option {value}",
+                tokens[index]
+            );
+            arguments.push((tokens[index].clone(), value.clone()));
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    arguments
+}
+
 #[test]
 fn status_and_no_escape_hatch_boundary_are_conspicuous() {
     let runbook = runbook();
@@ -41,9 +69,10 @@ fn status_and_no_escape_hatch_boundary_are_conspicuous() {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(opening.contains(
-        "supports only the documented build and disabled package installation; it does not yet authorize Custom fan control or service enablement"
-    ));
+    assert!(
+        opening.contains("qualification-ready; this checkout is unqualified and not configured")
+    );
+    assert!(opening.contains("implements the production controller"));
     for statement in [
         "QUALIFICATION STATUS: UNQUALIFIED",
         "Firmware Auto (`2`)",
@@ -69,6 +98,7 @@ fn status_and_no_escape_hatch_boundary_are_conspicuous() {
             "missing normalized boundary: {statement}"
         );
     }
+    assert!(runbook.contains("cargo run -p fan-control-daemon -- --status"));
     assert!(runbook.contains("cargo run -p fan-control-qualify\n"));
     assert!(!runbook.contains("cargo run -p fan-control-qualify -- supervised-endurance --help"));
 }
@@ -77,13 +107,13 @@ fn status_and_no_escape_hatch_boundary_are_conspicuous() {
 fn clean_controller_and_kernel_builds_are_checkable() {
     let runbook = runbook();
     for command in [
-        "git clone --no-checkout",
+        "source_revision=$(git rev-parse HEAD)",
         "git status --porcelain=v1 --untracked-files=all",
         "scripts/check-repository-policy",
         "scripts/build-source-candidate",
         "pacman-key --verify",
         "candidate-identity-v1.json",
-        "--controller-key REPLACE_WITH_CONTROLLER_PRIMARY_KEY_FINGERPRINT",
+        "--controller-key \"$PT31553_CONTROLLER_KEY\"",
     ] {
         assert!(runbook.contains(command), "missing build check: {command}");
     }
@@ -97,22 +127,36 @@ fn clean_controller_and_kernel_builds_are_checkable() {
     assert_ordered(
         clean_source,
         &[
-            "case \"$source_parent\" in /absolute/path/*|'') exit 1 ;; esac",
-            "test ! -e \"$source_parent\"",
-            "git clone --no-checkout",
-            "git checkout --detach \"$source_revision\"",
-            "test \"$(git rev-parse HEAD)\" = \"$source_revision\"",
+            "source_root=$(git rev-parse --show-toplevel)",
+            "source_revision=$(git rev-parse HEAD)",
+            "test \"$(git rev-parse --is-shallow-repository)\" = false",
             "test -z \"$(git status --porcelain=v1 --untracked-files=all)\"",
             "cargo fetch --locked",
             "cargo deny fetch",
             "CARGO_NET_OFFLINE=true scripts/check-repository-policy",
             "controller_source_revision=$(/usr/bin/sed -n",
+            "/usr/bin/realpath --canonicalize-existing --no-symlinks \"$controller_cargo_home\"",
+            "/usr/bin/stat -c %u \"$controller_cargo_home\"",
+            "8#$controller_cargo_home_mode & 8#077",
+            "cleanup_controller_worktree()",
+            "trap cleanup_controller_worktree EXIT HUP INT TERM",
             "git worktree add --detach \"$controller_source_checkout\" \"$controller_source_revision\"",
             "CARGO_HOME=\"$controller_cargo_home\" cargo fetch --locked",
             "--manifest-path \"$controller_source_checkout/Cargo.toml\"",
             "git worktree remove \"$controller_source_checkout\"",
+            "/usr/bin/rmdir \"$controller_worktree_parent\"",
+            "trap - EXIT HUP INT TERM",
         ],
     );
+    assert!(clean_source.contains(
+        "git -C \"$source_root\" worktree remove --force \"$controller_source_checkout\""
+    ));
+    assert!(KERNEL_README.contains("Top-level README step 3 is the sole canonical"));
+    assert!(
+        KERNEL_README
+            .contains("$(dirname \"$source_root\")/pt31553-source-candidate-$source_revision")
+    );
+    assert!(!KERNEL_README.contains("/absolute/path/to/new-source-candidate"));
 
     let candidate = section(
         runbook,
@@ -122,23 +166,93 @@ fn clean_controller_and_kernel_builds_are_checkable() {
     assert_ordered(
         candidate,
         &[
-            "source_root=$PWD",
-            "test -d /bundle",
-            "candidate_output=/absolute/path/to/new-source-candidate",
+            "source_root=$(git rev-parse --show-toplevel)",
+            "source_revision=$(git rev-parse HEAD)",
+            "PT31553_PACKAGE_CERT_SHA256",
+            "PT31553_MODULE_CERT_SHA256",
+            "PT31553_KERNEL_CERT_SHA256",
+            "test -d \"$PT31553_BUNDLE\"",
+            "candidate_output=\"$(dirname \"$source_root\")/pt31553-source-candidate-$source_revision\"",
             "test ! -e \"$candidate_output\"",
             "scripts/build-source-candidate",
-            "--bundle /bundle",
-            "--kernel-signing-dir /secure/signing",
-            "--package-cert-sha256 REPLACE_WITH_APPROVED_PACKAGE_CERT_SHA256",
-            "--package-key /secure/private/package-signing-key.pem",
-            "--module-cert-sha256 REPLACE_WITH_APPROVED_MODULE_CERT_SHA256",
-            "--kernel-cert-sha256 REPLACE_WITH_APPROVED_IMAGE_CERT_SHA256",
-            "--cargo-home /secure/controller-cargo-home",
-            "--controller-gnupg-home /secure/controller-gnupg",
-            "--controller-key REPLACE_WITH_CONTROLLER_PRIMARY_KEY_FINGERPRINT",
+            "--bundle \"$PT31553_BUNDLE\"",
+            "--kernel-signing-dir \"$PT31553_KERNEL_SIGNING_DIR\"",
+            "--package-cert \"$PT31553_PACKAGE_CERT\"",
+            "--package-cert-sha256 \"$PT31553_PACKAGE_CERT_SHA256\"",
+            "--package-key \"$PT31553_PACKAGE_KEY\"",
+            "--module-cert-sha256 \"$PT31553_MODULE_CERT_SHA256\"",
+            "--kernel-cert \"$PT31553_KERNEL_CERT\"",
+            "--kernel-cert-sha256 \"$PT31553_KERNEL_CERT_SHA256\"",
+            "--cargo-home \"$controller_cargo_home\"",
+            "--controller-gnupg-home \"$PT31553_CONTROLLER_GNUPG_HOME\"",
+            "--controller-key \"$PT31553_CONTROLLER_KEY\"",
             "--output \"$candidate_output\"",
         ],
     );
+    let documented_command = candidate
+        .split_once("scripts/build-source-candidate")
+        .unwrap()
+        .1
+        .split_once("\n```")
+        .unwrap()
+        .0;
+    let builder = include_str!("../../../scripts/build-source-candidate");
+    let executable_usage = builder
+        .split_once("usage: scripts/build-source-candidate")
+        .unwrap()
+        .1
+        .split_once("\n\nBuilds")
+        .unwrap()
+        .0;
+    let documented_arguments = command_arguments(documented_command);
+    let usage_arguments = command_arguments(executable_usage);
+    assert_eq!(
+        documented_arguments
+            .iter()
+            .map(|(flag, _)| flag)
+            .collect::<Vec<_>>(),
+        usage_arguments
+            .iter()
+            .map(|(flag, _)| flag)
+            .collect::<Vec<_>>(),
+        "README candidate command drifted from the executable interface"
+    );
+    assert_eq!(
+        documented_arguments,
+        [
+            ("--bundle".into(), "$PT31553_BUNDLE".into()),
+            (
+                "--kernel-signing-dir".into(),
+                "$PT31553_KERNEL_SIGNING_DIR".into(),
+            ),
+            ("--package-cert".into(), "$PT31553_PACKAGE_CERT".into()),
+            (
+                "--package-cert-sha256".into(),
+                "$PT31553_PACKAGE_CERT_SHA256".into(),
+            ),
+            ("--package-key".into(), "$PT31553_PACKAGE_KEY".into()),
+            (
+                "--module-cert-sha256".into(),
+                "$PT31553_MODULE_CERT_SHA256".into(),
+            ),
+            ("--kernel-cert".into(), "$PT31553_KERNEL_CERT".into()),
+            (
+                "--kernel-cert-sha256".into(),
+                "$PT31553_KERNEL_CERT_SHA256".into(),
+            ),
+            ("--cargo-home".into(), "$controller_cargo_home".into()),
+            (
+                "--controller-gnupg-home".into(),
+                "$PT31553_CONTROLLER_GNUPG_HOME".into(),
+            ),
+            ("--controller-key".into(), "$PT31553_CONTROLLER_KEY".into(),),
+            ("--output".into(), "$candidate_output".into()),
+        ],
+        "README candidate values drifted or became misbound"
+    );
+    assert!(candidate.contains(
+        "pt31553-source-candidate-$source_revision/{kernel,controller,declarations,signatures}"
+    ));
     for boundary in [
         "dirty source revision",
         "placeholder identity",
@@ -194,6 +308,9 @@ fn first_install_and_boot_preserve_recovery_and_disabled_units() {
     assert_ordered(
         install,
         &[
+            "source_root=$(git rev-parse --show-toplevel)",
+            "source_revision=$(git -C \"$source_root\" rev-parse HEAD)",
+            "candidate_output=\"$(dirname \"$source_root\")/pt31553-source-candidate-$source_revision\"",
             "approved_candidate_manifest_sha256=REPLACE_WITH_APPROVED_CANDIDATE_MANIFEST_SHA256",
             "approved_controller_signer_fingerprint=REPLACE_WITH_APPROVED_CONTROLLER_SIGNER_FINGERPRINT",
             "candidate_manifest=\"$candidate_output/declarations/candidate-identity-v1.json\"",
@@ -241,7 +358,9 @@ fn first_install_and_boot_preserve_recovery_and_disabled_units() {
     assert_ordered(
         kernel_install,
         &[
-            "candidate_output=/absolute/path/to/source-candidate",
+            "source_root=$(git rev-parse --show-toplevel)",
+            "source_revision=$(git -C \"$source_root\" rev-parse HEAD)",
+            "candidate_output=\"$(dirname \"$source_root\")/pt31553-source-candidate-$source_revision\"",
             "artifact_dir=\"$candidate_output/kernel\"",
             "provenance_record=\"$candidate_output/declarations/package-provenance-v1.json\"",
             "package_manifest_signature=\"$candidate_output/signatures/package-set.p7s\"",

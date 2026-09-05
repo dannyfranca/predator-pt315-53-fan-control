@@ -1,68 +1,107 @@
-# Acquisition, installation, status, and use
+# Check, build, install, qualify, and operate
 
-The exact target checkout owns all commands. Read its top-level status,
-`SECURITY.md`, packaging recipes, and the complete relevant canonical runbook
-section before proposing a command.
+The current clean checkout owns every command. Read its top-level status,
+`SECURITY.md`, package recipe, and complete relevant canonical runbook section.
+GitHub Actions are manual-only and releases are optional/out of scope; never
+trigger Actions or download a release as part of this flow.
 
-## Acquire and build a target revision
+## Check and build autonomously
 
-Acquire source from the official repository. Use a user-selected release tag
-or reviewed pinned commit, resolve it to a 40-character commit, clone into a
-new directory, check out that commit detached, and require a clean tree. Never
-install a prebuilt release asset or substitute a floating branch at execution
-time.
+Resolve and record `git rev-parse HEAD`; reject a dirty or shallow checkout.
+These source-only commands are safe to run without approval:
 
-Fetch locked dependencies as documented, run the revision's local repository
-policy, and build every executable and package locally with that revision's
-documented commands. Retain the resolved source identity and locally built
-artifact hashes in the ledger. Do not trigger remote CI unless the user
-separately requests it; CI is not qualification authority.
+```sh
+cargo run -p fan-control-daemon -- --status
+cargo run -p fan-control-restore -- --status
+cargo run -p fan-control-qualify
+cargo fetch --locked
+cargo build --locked --workspace --bins
+cargo test --locked --workspace
+```
 
-If source, packaging, or installed identities disagree, stop. Never silently
-rebuild a package recipe for a different commit.
+For a candidate, follow README step 3 exactly. It derives the source identity
+from `HEAD`, runs `scripts/check-repository-policy`, and then runs
+`scripts/build-source-candidate` with externally reviewed trust inputs. Its
+generated output is
+`pt31553-source-candidate-<40-hex-HEAD>/{kernel,controller,declarations,signatures}`.
+Do not invent placeholder identities or silently rebuild a recipe for another
+commit.
 
-## Inspect status
+## Inspect installed status
 
-Use only status invocations documented by the target revision. Also inspect
-package identity, running kernel/module, process presence, and each service's
-enabled and active states. A command's zero exit status does not raise the
-authority state.
+The package installs these operator entrypoints and creates these state locations:
 
-Inspect command source when an interface is unclear. Do not assume `--help`,
-`check-device`, `preflight`, live reload, or other conventional subcommands
-exist. Never use a recovery command as a status query unless the revision
-documents a separate read-only status mode.
+- `/usr/bin/pt31553-fand` (`--status` is read-only; no argument starts the
+  production controller);
+- `/usr/bin/pt31553-fan-restore` (`--status` is read-only; `--restore` writes
+  fan mode and is privileged);
+- `/usr/bin/pt31553-fan-qualify`;
+- `/etc/pt31553-fan-control/config.toml`;
+- `/usr/lib/pt31553-fan-control/compatibility.toml`;
+- `/var/lib/pt31553-fan-control/` and
+  `/var/lib/pt31553-fan-control/evidence/`; a successful
+  supervised-endurance run later creates the authority record at
+  `/var/lib/pt31553-fan-control/qualification.json`;
+- `pt31553-fand.service` and `pt31553-fan-sleep-guard.service`, both packaged
+  disabled.
 
-## Install
+Inspect the builder-checkout identity, the separately pinned controller-payload
+identity in the package's `source-commit`, running kernel/module, processes, unit enabled
+and active states, and authority files. A zero exit status does not raise the
+authority state. Never run `/usr/bin/pt31553-fand` without `--status` as a
+probe, or use `--restore` as status.
 
-1. Complete the support classification and establish the safe starting state.
-2. Follow the selected revision's build/provenance and install runbook exactly.
-   Missing signer enrollment, artifact identities, tools, recovery entries, or
-   production stage commands are blockers, not placeholders to fill ad hoc.
-3. Show the verified artifact identities, every package/boot/service mutation,
-   and rollback path. Obtain approval immediately before the first mutation.
-4. After installation, recheck package hashes, processes, unit enablement and
-   activity, persistent boot default, and the fan state allowed by that boot.
+## Prepare and install disabled
 
-For a `disabled-only` revision, install only the disabled candidate artifacts
-explicitly allowed by its runbook. Keep controller units disabled and inactive,
-keep the stock recovery kernels/entries and stock default, and stop at the
-runbook's disabled-candidate boundary. Do not enable, start, qualify, promote,
-or claim working fan control.
+Run unprivileged artifact verification and package inspection autonomously.
+Pause immediately before the README's first `sudo` package, boot, or service
+mutation. Show exact artifacts, effect, and recovery path. After approval,
+follow the disabled-install and side-by-side boot commands without translation.
+Keep stock and stock-LTS entries, the stock persistent default, and both units
+disabled/inactive.
 
-## Operate
+## Qualify under supervision
 
-For `disabled-only`, ordinary use consists only of documented source/status
-commands and offline configuration preparation. State that active fan control
-is unavailable.
+The package includes the qualification executable and fixed workloads, but no
+machine-specific harness or manifests. A reviewed digest-pinned harness and
+root-owned manifests must be provisioned from the repository protocols. Never
+improvise them. Run stages only in README order:
 
-For `authorized`, re-run the exact revision's authority verifier immediately
-before enable/start or rearm. Follow its canonical operation commands without
-translation, require fresh Firmware Auto, inspect service readiness and
-structured faults, and preserve the documented stock recovery default. Any
-missing verifier, failed check, stale record, or runtime fault returns to the
-recovery path.
+1. `sudo /usr/bin/pt31553-fan-qualify preflight --manifest FILE --harness FILE`;
+2. `sudo /usr/bin/pt31553-fan-qualify firmware-auto-baselines --manifest FILE --harness FILE`;
+3. `sudo /usr/bin/pt31553-fan-qualify fan-calibration --fan cpu|gpu --manifest FILE --harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING`;
+4. `sudo /usr/bin/pt31553-fan-qualify matched-workload --manifest FILE --harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING`, twelve fresh invocations;
+5. `sudo /usr/bin/pt31553-fan-qualify live-lifecycle --manifest FILE --harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING`, across its reboot boundary;
+6. `sudo /usr/bin/pt31553-fan-qualify supervised-endurance --manifest FILE --harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING --evidence-output FILE [--qualification-record FILE]`;
+7. `sudo /usr/bin/pt31553-fan-qualify validate-records --qualification-record FILE --evidence FILE [--authorized-evidence-path FILE]`.
 
-Installation/use is complete only when observed package, process, service,
-boot, and fan states match the declared authority state and the user receives
-the exact safe next boundary.
+Every form above is privileged: show the exact command and obtain approval
+immediately before it. Preflight performs no fan write, but it still requires
+UID 0 for protected inputs and output. The human must remain physically present
+for every workload or fan-control stage,
+watch mode/RPM, fan sound/operation, temperatures, throttling, telemetry,
+workload control, smell/smoke, instability, and ability to intervene, then
+withdraw approval on any surprise.
+
+## Activate only with authority
+
+An installed production daemon is not authorization. After stages 1–7,
+reverify exact package, protected policy, record, evidence, machine,
+kernel/module, both Auto readbacks, recovery default, and absent fault latch.
+Only then, with approval, run README step 8. Inspect readiness and structured
+journal events. Any mismatch or runtime fault returns to recovery.
+
+Completion requires a compact ledger: source revision, package identity,
+machine classification, authority state, commands/files changed, service/fan
+state, validation evidence, blocker, and recovery path.
+
+## Maintain and promote later
+
+Promotion is not a qualification stage and does not precede initial activation.
+For a later successor or public claim, follow the README maintenance runbook in
+its stated order. After fresh qualification and artifact verification, run:
+
+1. `sudo /usr/bin/pt31553-fan-qualify redact-evidence --qualification-record FILE --evidence FILE --authorized-evidence-path FILE --output FILE`;
+2. `sudo /usr/bin/pt31553-fan-qualify check-promotion --manifest FILE --qualification-record FILE --evidence FILE --authorized-evidence-path FILE --sanitized-evidence FILE --protected-policy FILE --package-provenance FILE --controller-package FILE --controller-signature FILE --package-manifest-signature FILE --output FILE`.
+
+Both commands are privileged. Obtain approval immediately before each one.

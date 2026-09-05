@@ -486,6 +486,7 @@ fn source_candidate_wrapper_is_local_non_installing_and_fail_closed() {
     for required in [
         "#!/usr/bin/bash -p",
         "unsafe inherited environment",
+        "run_git -C \"$source_root\" rev-parse --is-shallow-repository",
         "run_git -C \"$source_root\" status --porcelain=v1 --untracked-files=all",
         "verify-source-lock\" --inputs \"$bundle\" --exec-verified",
         "verify-package-provenance\"",
@@ -706,6 +707,131 @@ fn source_candidate_wrapper_rejects_hidden_index_mutations_before_publication() 
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(!output.exists());
+}
+
+#[test]
+fn source_candidate_wrapper_rejects_a_shallow_checkout_before_publication() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let origin = sandbox.path().join("origin");
+    fs::create_dir_all(origin.join("scripts")).unwrap();
+    write_executable(
+        &origin.join("scripts/build-source-candidate"),
+        &fs::read_to_string(workspace().join("scripts/build-source-candidate")).unwrap(),
+    );
+    fs::write(origin.join("README.md"), "reviewed\n").unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "README.md", "scripts/build-source-candidate"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "reviewed source",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&origin)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let repository = sandbox.path().join("repository");
+    assert!(
+        Command::new("git")
+            .args([
+                "clone",
+                "--quiet",
+                "--depth",
+                "1",
+                &format!("file://{}", origin.display()),
+                repository.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let bundle = sandbox.path().join("bundle");
+    let kernel_signing = sandbox.path().join("kernel-signing");
+    let cargo_home = sandbox.path().join("cargo-home");
+    let gnupg_home = sandbox.path().join("gnupg-home");
+    let output_parent = sandbox.path().join("output");
+    for directory in [
+        &bundle,
+        &kernel_signing,
+        &cargo_home,
+        &gnupg_home,
+        &output_parent,
+    ] {
+        fs::create_dir(directory).unwrap();
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let package_cert = sandbox.path().join("package.pem");
+    let package_key = sandbox.path().join("package.key");
+    let kernel_cert = sandbox.path().join("kernel.pem");
+    fs::write(&package_cert, "certificate").unwrap();
+    fs::write(&package_key, "private key").unwrap();
+    fs::set_permissions(&package_key, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&kernel_cert, "certificate").unwrap();
+    let candidate_output = output_parent.join("candidate");
+    let mut command = Command::new(repository.join("scripts/build-source-candidate"));
+    command
+        .args(["--bundle"])
+        .arg(&bundle)
+        .args(["--kernel-signing-dir"])
+        .arg(&kernel_signing)
+        .args(["--package-cert"])
+        .arg(&package_cert)
+        .args(["--package-cert-sha256", &repeated('1')])
+        .args(["--package-key"])
+        .arg(&package_key)
+        .args(["--module-cert-sha256", &repeated('2')])
+        .args(["--kernel-cert"])
+        .arg(&kernel_cert)
+        .args(["--kernel-cert-sha256", &repeated('3')])
+        .args(["--cargo-home"])
+        .arg(&cargo_home)
+        .args(["--controller-gnupg-home"])
+        .arg(&gnupg_home)
+        .args([
+            "--controller-key",
+            "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+            "--output",
+        ])
+        .arg(&candidate_output);
+    for variable in [
+        "BASH_ENV",
+        "ENV",
+        "OPENSSL_CONF",
+        "OPENSSL_MODULES",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "CARGO_HOME",
+        "GNUPGHOME",
+        "PKGDEST",
+    ] {
+        command.env_remove(variable);
+    }
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("shallow"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !candidate_output.exists(),
+        "shallow rejection published candidate output"
+    );
 }
 
 #[test]

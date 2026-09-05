@@ -56,6 +56,7 @@ jobs:
           test "${#packages[@]}" -eq 1
           package=${packages[0]}
           test -f "$package"
+          source /opt/controller-package/PKGBUILD
           test "$(find /opt/controller-package -maxdepth 1 -type f -name '*.pkg.tar.zst' -print | wc -l)" -eq 1
           bsdtar -tf "$package" > /tmp/controller-package-contents
           bsdtar -tvf "$package" | awk '
@@ -94,7 +95,7 @@ jobs:
             grep -Fxq "$path" /tmp/controller-package-contents
           done
           bsdtar -xOf "$package" usr/share/pt31553-fan-control/source-commit \
-            | cmp - <(printf '%s\n' '530f5ea19f46df841e39325580d221d2d64fac7b')
+            | cmp - <(printf '%s\n' "$_commit")
           test "$(grep -Ev '^usr/share/pt31553-fan-control/(schemas|examples)/' /tmp/controller-package-contents \
             | grep -Ec '(^|/)(qualified-envelope\.toml|qualification-record\.json|qualification\.json|protected-policy|promotion|authorization)')" -eq 0
           test "$(grep -Ec '^(boot/|usr/lib/modules/|var/lib/pt31553-fan-control/rollback/)' /tmp/controller-package-contents)" -eq 0

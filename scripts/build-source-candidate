@@ -144,6 +144,10 @@ run_git() {
 }
 revision=$(run_git -C "$source_root" rev-parse HEAD)
 [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+[[ "$(run_git -C "$source_root" rev-parse --is-shallow-repository)" == false ]] || {
+    echo "candidate builds reject a shallow source checkout" >&2
+    exit 2
+}
 index_entries=$(run_git -C "$source_root" ls-files -v)
 while IFS= read -r index_entry; do
     [[ "${index_entry:0:2}" == 'H ' ]] || {

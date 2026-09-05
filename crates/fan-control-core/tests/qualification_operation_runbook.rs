@@ -1,4 +1,6 @@
 const README: &str = include_str!("../../../README.md");
+const OPERATIONS: &str =
+    include_str!("../../../skills/predator-fan-control/references/operations.md");
 
 fn runbook() -> &'static str {
     README
@@ -33,6 +35,11 @@ fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 #[test]
 fn qualification_ladder_and_abort_boundary_are_explicit_and_ordered() {
     let runbook = runbook();
+    let normalized = runbook
+        .replace("> ", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let boundary = section(
         runbook,
         "Every successful stage boundary",
@@ -41,7 +48,7 @@ fn qualification_ladder_and_abort_boundary_are_explicit_and_ordered() {
     assert_ordered(
         runbook,
         &[
-            "CURRENT REVISION: DO NOT ENABLE OR START",
+            "THIS MACHINE IS UNQUALIFIED: DO NOT ENABLE OR START YET",
             "### 1. Establish the qualification prerequisites",
             "### 2. Run read-only preflight",
             "### 3. Record Firmware Auto baselines",
@@ -70,10 +77,20 @@ fn qualification_ladder_and_abort_boundary_are_explicit_and_ordered() {
     );
     assert!(boundary.contains("Preflight itself never requests Auto"));
     assert!(runbook.contains("Source-complete is not qualification"));
-    assert!(runbook.contains("CI success is not qualification"));
+    assert!(normalized.contains("CI success is not qualification"));
+    assert!(normalized.contains("production daemon and qualification commands are implemented"));
+    assert!(normalized.contains("The human observer is the physical safety sensor"));
+    for observation in [
+        "fan sound and visible operation",
+        "CPU/GPU temperature",
+        "RPM/mode/readback",
+        "smoke or unusual smell",
+        "ability to intervene",
+    ] {
+        assert!(normalized.contains(observation));
+    }
     assert!(runbook.contains("An abort performs steps 1 through 4"));
     assert!(runbook.contains("A successful handoff advances only after"));
-    let normalized = runbook.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(normalized.contains("If both fans cannot be confirmed in Auto immediately, shut down"));
     assert!(runbook.contains("PACKAGING BLOCK"));
     assert!(runbook.contains("this source revision exposes the complete qualification"));
@@ -82,6 +99,26 @@ fn qualification_ladder_and_abort_boundary_are_explicit_and_ordered() {
     assert!(runbook.contains("qualification with an improvised harness"));
     assert!(runbook.contains("do not replace it with ad-hoc shell scripts"));
     assert!(runbook.contains("direct sysfs writes"));
+    for subcommand in [
+        "preflight",
+        "firmware-auto-baselines",
+        "fan-calibration",
+        "matched-workload",
+        "live-lifecycle",
+        "supervised-endurance",
+        "validate-records",
+        "redact-evidence",
+        "check-promotion",
+    ] {
+        assert!(
+            runbook.contains(&format!("sudo /usr/bin/pt31553-fan-qualify {subcommand}")),
+            "qualification command lost its privileged executable form: {subcommand}"
+        );
+    }
+    assert!(
+        normalized
+            .contains("Obtain approval immediately before every root-only qualification command")
+    );
     for limit in [
         "AC idle for 10 minutes",
         "AC CPU for 20",
@@ -100,6 +137,21 @@ fn qualification_ladder_and_abort_boundary_are_explicit_and_ordered() {
             "missing qualification limit: {limit}"
         );
     }
+}
+
+#[test]
+fn routed_operations_keep_promotion_in_the_later_maintenance_path() {
+    assert_ordered(
+        OPERATIONS,
+        &[
+            "## Qualify under supervision",
+            "7. `sudo /usr/bin/pt31553-fan-qualify validate-records",
+            "## Activate only with authority",
+            "## Maintain and promote later",
+            "1. `sudo /usr/bin/pt31553-fan-qualify redact-evidence",
+            "2. `sudo /usr/bin/pt31553-fan-qualify check-promotion",
+        ],
+    );
 }
 
 #[test]
@@ -159,6 +211,7 @@ fn operation_covers_enablement_inspection_evidence_and_fault_latch_recovery() {
         );
     }
     assert!(operation.contains("sudo /usr/bin/systemctl enable pt31553-fan-sleep-guard.service"));
+    assert!(operation.contains("This step is ineligible on an unqualified machine"));
     assert!(!operation.contains("enable --now pt31553-fan-sleep-guard.service"));
     assert!(!operation.contains("start pt31553-fan-sleep-guard.service"));
 

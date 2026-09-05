@@ -2,7 +2,6 @@
 name: predator-fan-control
 description: Safely inspect, install, configure, operate, recover, or remove Predator PT315-53 fan control. Use for device compatibility checks, fan-curve changes, service status, installation, restoration, rollback, and uninstall requests for this project.
 license: MIT
-compatibility: Requires shell and Git access to the exact target revision. Host requirements, supported hardware, packaging, and service interfaces come from that revision.
 ---
 
 # Predator PT315-53 fan control
@@ -15,19 +14,23 @@ separate facts. Agreement is required; one never substitutes for another.
 
 1. Classify the request as support inspection, status/use, installation,
    configuration, recovery, rollback, or removal.
-2. Resolve an exact source revision. Prefer a source checkout supplied by the
-   user. Otherwise obtain the official repository at
-   `https://github.com/dannyfranca/predator-pt315-53-fan-control`, resolve a
-   release tag or commit, and work from a clean detached checkout. Record the
-   40-character commit before using its instructions. Build every executable
-   and package locally from this checkout; do not install prebuilt release
-   assets.
+2. Use the supplied checkout. Resolve its current `HEAD` as the 40-character
+   builder-checkout identity and require a clean, non-shallow tree before a candidate build. If no
+   checkout exists, clone the official repository once and use its checked-out
+   commit; do not select a tag, download a release asset, or substitute a
+   floating remote identity. Build every executable and package locally. Also
+   read the distinct controller-payload revision pinned by `_commit` in
+   `packaging/controller/PKGBUILD`; the candidate builder archives that revision.
 3. Read that checkout's `SECURITY.md`, the status declaration at the start of
    `README.md`, and the relevant canonical runbook section. Inspect
    `compatibility/`, packaging, and command source when the runbook points to
    them. These files are authoritative for the selected revision; this skill
    supplies process and safety invariants, not cached commands.
-4. Compare the selected source identity with installed package, executable,
+4. Record the builder-checkout identity in the operator ledger and use it to
+   name the candidate directory; the current declaration schema does not sign
+   that orchestration identity. Compare the distinct controller-payload
+   identity with the candidate provenance and installed package's
+   `usr/share/pt31553-fan-control/source-commit`. Then compare the executable,
    kernel, module, service, configuration, and authority identities. Treat a
    missing fact, placeholder identity, stale record, or contradiction as a
    blocker.
@@ -45,18 +48,20 @@ observed installation state, host classification, and one authority state:
   [configuration](references/configuration.md).
 - For unsafe behavior, restoration, rollback, or removal, read
   [recovery](references/recovery.md).
-- Before any package, configuration, service, boot, hardware, recovery, or
-  removal mutation, also read [safety boundaries](references/safety.md).
+- Before any privileged or live-control operation, also read
+  [safety boundaries](references/safety.md).
 
 Load only the references reached by the request.
 
 ## Authorization boundary
 
-Run unprivileged, read-only inspection autonomously. Before a privileged or
-mutating command, show the exact command or diff, its target, expected effect,
-and rollback path; obtain explicit approval immediately before execution.
-Never request, receive, log, or store a password. Let the user's terminal own
-any credential prompt.
+Run unprivileged source inspection, dependency fetch, check, build, package
+preparation, configuration drafting, and read-only status autonomously. Before
+a privileged command or any command that can start a workload, change fan
+state, qualify live hardware, control a service, alter boot, or install/remove
+a package, show the exact operation, effect, and recovery boundary; obtain
+explicit approval immediately before execution. Never request, receive, log,
+or store a password. Let the user's terminal own any credential prompt.
 
 A request to install, configure, or operate the tool authorizes only that
 requested mutation. It does not authorize service enablement, a boot-default
@@ -67,7 +72,7 @@ change, qualification, hardware writes, or weaker cooling.
 - Keep both fans in Firmware Auto unless the exact revision and machine have
   complete, matching qualification authority that explicitly permits Custom
   control.
-- Never enable or start an unqualified/status-only build. A build, test,
+- Never enable or start an unqualified installation. A build, test,
   signature, release, package, boot, CI result, or preliminary hardware match
   is not runtime authority.
 - Use only the in-tree `acer_wmi` hwmon interface authorized by the target

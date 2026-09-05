@@ -26,7 +26,14 @@ fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 }
 
 fn normalized(source: &str) -> String {
-    source.split_whitespace().collect::<Vec<_>>().join(" ")
+    source
+        .lines()
+        .map(|line| line.strip_prefix("> ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn assert_ordered(haystack: &str, needles: &[&str]) {
@@ -51,30 +58,9 @@ fn recovery_commands_disable_control_before_any_change() {
     assert_ordered(
         commands,
         &[
-            "workload_cgroup_record=",
-            "workload_cgroup_root=/sys/fs/cgroup/pt31553-qualification",
-            "workload_launcher=/usr/bin/pt31553-fan-workload-launcher",
-            "test -x \"$workload_launcher\"",
-            "test -f \"$workload_launcher\"",
-            "pacman -Qqo",
-            "stat -c '%U:%G:%a:%h' \"$workload_launcher\"",
-            "test -e \"$workload_cgroup_record\" || test -L",
-            "test -f \"$workload_cgroup_record\"",
-            "stat -c '%U:%G:%a:%h' \"$workload_cgroup_record\"",
-            "realpath -e",
-            "cgroup.kill",
-            "timeout --foreground 30",
-            "while :",
-            "workload_pids=$(/usr/bin/find \"$1\"",
-            "test -z \"$workload_pids\" && break",
-            "workload_pids=$(sudo /usr/bin/find \"$workload_cgroup\"",
-            "test -z \"$workload_pids\"",
-            "else",
-            "test ! -e \"$workload_launcher\"",
-            "test ! -L \"$workload_launcher\"",
-            "test ! -e \"$workload_cgroup_record\"",
-            "test ! -L \"$workload_cgroup_record\"",
-            "test ! -e \"$workload_cgroup_root\"",
+            "qualification_cgroups=$(/usr/bin/find /sys/fs/cgroup",
+            "-name 'pt31553-fan-qualify-*' -print)",
+            "test -z \"$qualification_cgroups\"",
             "sudo /usr/bin/systemctl stop pt31553-fan-sleep-guard.service",
             "sudo /usr/bin/systemctl stop pt31553-fand.service || true",
             "sudo /usr/bin/pt31553-fan-restore --restore",
@@ -97,7 +83,8 @@ fn recovery_commands_disable_control_before_any_change() {
     );
     for requirement in [
         "maximum containment",
-        "Any invalid workload record, failed cgroup traversal, containment timeout",
+        "Any residual qualifier cgroup or failed cgroup traversal",
+        "workload cleanup is unproven",
         "power the machine off immediately",
         "do not remove either the controller or candidate kernel",
         "do not reboot",
@@ -130,7 +117,7 @@ fn updates_select_ordered_checks_or_full_requalification() {
         "Any abbreviated-check difference or failure expands to full requalification",
         "ABBREVIATED PATH BLOCKED IN THIS REVISION",
         "Do not execute them manually",
-        "cannot authorize any successor",
+        "No successor is authorized until one exact path completes",
     ] {
         assert!(
             normalized.contains(requirement),

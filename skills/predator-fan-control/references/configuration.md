@@ -43,9 +43,10 @@ A quieter/weaker candidate requires the full requalification path declared by
 the target revision. Keep the last working configuration active until that
 qualification succeeds.
 
-## Review and apply
+## Draft, review, and apply
 
-Before writing, show:
+Draft and validate a candidate in an unprivileged temporary path autonomously.
+Before writing a privileged destination or restarting a service, show:
 
 - the complete unified diff and destination;
 - parser/validator result and protected-envelope classification;
@@ -53,12 +54,12 @@ Before writing, show:
 - expected service effect, required requalification, backup, and rollback;
 - the exact privileged write and service commands.
 
-Wait for explicit approval. Then write a complete candidate atomically while
+Wait for explicit approval at that privileged/live boundary. Then write a complete candidate atomically while
 preserving the revision's required ownership and mode. Retain the protected
 copy or backup required by the runbook; never overwrite the only known-working
 copy.
 
-For a `disabled-only` or status-only revision, an approved edit is offline
+For a `disabled-only` installation, an approved protected-path edit is offline
 preparation only. State that it has no runtime effect, and do not start or
 restart services.
 
