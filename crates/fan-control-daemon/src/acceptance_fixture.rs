@@ -475,32 +475,32 @@ impl ServiceNotifier for FixtureNotifier {
             return Err(io::Error::other("injected watchdog notification failure"));
         }
         self.inner.notify(notification)?;
-        if notification == ServiceNotification::Ready
-            && let Some(barrier) = &self.ready_barrier
-        {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !barrier.exists() {
-                if Instant::now() >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "acceptance READY barrier timed out",
-                    ));
+        if notification == ServiceNotification::Ready {
+            if let Some(barrier) = &self.ready_barrier {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !barrier.exists() {
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "acceptance READY barrier timed out",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
                 }
-                std::thread::sleep(Duration::from_millis(10));
             }
         }
-        if notification == ServiceNotification::Watchdog
-            && let Some(barrier) = &self.watchdog_barrier
-        {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !barrier.exists() {
-                if Instant::now() >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "acceptance WATCHDOG barrier timed out",
-                    ));
+        if notification == ServiceNotification::Watchdog {
+            if let Some(barrier) = &self.watchdog_barrier {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !barrier.exists() {
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "acceptance WATCHDOG barrier timed out",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
                 }
-                std::thread::sleep(Duration::from_millis(10));
             }
         }
         if self.stop_after_watchdog && notification == ServiceNotification::Watchdog {
@@ -739,10 +739,7 @@ fn matching_record(policy: &str, evidence: &str) -> Result<String, io::Error> {
 }
 
 fn sha256(value: &str) -> String {
-    Sha256::digest(value.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
 fn startup_io_error(error: impl std::fmt::Display) -> io::Error {

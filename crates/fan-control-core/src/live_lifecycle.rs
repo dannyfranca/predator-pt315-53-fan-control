@@ -926,16 +926,16 @@ where
                 }
                 gate_not_before = strictly_after_timestamp(gate_not_before, requested_at);
                 case_completed_at = gate_not_before;
-                if let Some(observation) = observation.as_ref()
-                    && let Err(error) = validate_observer_attestations(
+                if let Some(observation) = observation.as_ref() {
+                    if let Err(error) = validate_observer_attestations(
                         case,
                         &observer_attestations,
                         observation,
                         case_started_at,
                         case_completed_at,
-                    )
-                {
-                    observation_error.get_or_insert(error);
+                    ) {
+                        observation_error.get_or_insert(error);
+                    }
                 }
             }
 

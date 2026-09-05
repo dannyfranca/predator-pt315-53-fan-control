@@ -245,13 +245,13 @@ where
         self.restoration_confirmed = false;
         self.reset_sampling_epoch();
         restore_firmware_auto(self.platform, device)?;
-        if let Some(admitted) = self.controlled_device
-            && admitted != device.backing_identity()
-        {
-            return Err(FirmwareAutoRestorationError::DifferentController {
-                admitted,
-                restored: device.backing_identity(),
-            });
+        if let Some(admitted) = self.controlled_device {
+            if admitted != device.backing_identity() {
+                return Err(FirmwareAutoRestorationError::DifferentController {
+                    admitted,
+                    restored: device.backing_identity(),
+                });
+            }
         }
         self.restoration_confirmed = true;
         Ok(())
