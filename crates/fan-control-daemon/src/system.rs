@@ -81,6 +81,7 @@ pub(crate) trait StartupDiscoveryEnvironment {
 
 struct ProductionStartupDiscoveryEnvironment {
     protected_files: SystemOwnershipPlatform,
+    archive_root: Option<PathBuf>,
 }
 
 trait LiveIdentityAccess {
@@ -162,6 +163,14 @@ impl ProductionStartupDiscoveryEnvironment {
     fn new() -> Self {
         Self {
             protected_files: SystemOwnershipPlatform::new(),
+            archive_root: None,
+        }
+    }
+
+    fn for_candidate(archive_root: &Path) -> Self {
+        Self {
+            protected_files: SystemOwnershipPlatform::new(),
+            archive_root: Some(archive_root.to_owned()),
         }
     }
 }
@@ -200,6 +209,10 @@ fn qualified_archive_paths() -> Result<QualifiedArchivePaths, StartupError> {
 pub(crate) fn qualified_archive_paths_for_version(version: &str) -> QualifiedArchivePaths {
     let root =
         Path::new(QUALIFIED_ARCHIVE_PARENT).join(format!("pt31553-last-qualified-{version}"));
+    archive_paths_at(&root)
+}
+
+fn archive_paths_at(root: &Path) -> QualifiedArchivePaths {
     QualifiedArchivePaths {
         protected_policy: root.join("protected-policy.toml"),
         package_provenance: root.join("package-provenance-v1.json"),
@@ -214,6 +227,27 @@ pub(crate) fn qualified_archive_paths_for_version(version: &str) -> QualifiedArc
 /// Loads immutable authority inputs and verifies the live platform before ownership is acquired.
 pub fn discover_system_startup() -> Result<SystemStartupDiscovery, StartupError> {
     let discovered = discover_startup_with(&mut ProductionStartupDiscoveryEnvironment::new())?;
+    Ok(SystemStartupDiscovery {
+        editable_config: discovered.editable_config,
+        compatibility_declaration: discovered.compatibility_declaration,
+        protected_policy: discovered.protected_policy,
+        observation: discovered.observation,
+        device: discovered.device,
+        sources: discovered.sources,
+    })
+}
+
+/// Verifies a protected candidate archive before its first qualification record exists.
+///
+/// This performs the same package, signature, running-kernel, module, Secure Boot, and hardware
+/// checks as production discovery, but reads candidate inputs from the explicitly supplied
+/// root-owned archive instead of the last-qualified archive.
+pub fn discover_system_candidate(
+    archive_root: &Path,
+) -> Result<SystemStartupDiscovery, StartupError> {
+    let discovered = discover_startup_with(
+        &mut ProductionStartupDiscoveryEnvironment::for_candidate(archive_root),
+    )?;
     Ok(SystemStartupDiscovery {
         editable_config: discovered.editable_config,
         compatibility_declaration: discovered.compatibility_declaration,
@@ -271,7 +305,10 @@ impl StartupDiscoveryEnvironment for ProductionStartupDiscoveryEnvironment {
     fn load_qualified_archive(
         &mut self,
     ) -> Result<(QualifiedArchivePaths, String, PackageProvenanceV1), StartupError> {
-        let archive = qualified_archive_paths()?;
+        let archive = match &self.archive_root {
+            Some(root) => archive_paths_at(root),
+            None => qualified_archive_paths()?,
+        };
         let protected_policy = self
             .protected_files
             .read_root_owned_qualification_record(&archive.protected_policy)

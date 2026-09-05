@@ -233,6 +233,7 @@ name = "fan-control-qualify"
 version = "0.1.0"
 dependencies = [
  "fan-control-core",
+ "fan-control-daemon",
  "flate2",
  "jsonschema",
  "libc",

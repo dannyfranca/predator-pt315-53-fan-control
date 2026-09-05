@@ -22,7 +22,7 @@ pub use acceptance_fixture::run_acceptance_fixture;
 pub use system::{
     COMPATIBILITY_DECLARATION_PATH, EDITABLE_CONFIG_PATH, HWMON_ROOT, POWER_SUPPLY_ROOT,
     SystemSampleSources, SystemSensorSourceDiscovery, SystemStartupDiscovery,
-    discover_system_startup,
+    discover_system_candidate, discover_system_startup,
 };
 
 /// Immutable and editable inputs needed for one fail-closed production admission.

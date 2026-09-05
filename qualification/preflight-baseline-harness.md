@@ -14,6 +14,7 @@ Both commands accept the same protected, root-owned JSON manifest:
   "compatibility": "/usr/lib/pt31553-fan-control/compatibility.toml",
   "config": "/etc/pt31553-fan-control/config.toml",
   "protected_policy": "/var/lib/pt31553-fan-control/candidate-policy.toml",
+  "candidate_archive": "/var/lib/pt31553-fan-control/candidate",
   "nvidia_gpu_uuid": "GPU-REPLACE_WITH_EXACT_UUID",
   "hwmon_root": "/sys/class/hwmon",
   "evidence_root": "/var/lib/pt31553-fan-control/evidence/SESSION",
@@ -47,8 +48,6 @@ JSON request to stdin, and expects exactly one JSON response on stdout. Deadline
 and every harness process. Stdout is capped at 1 MiB and stderr is discarded, so failures must use
 a nonzero exit status or a bounded JSON response. The protected executable must support:
 
-- `compatibility-observations`: return an array of serialized `CompatibilityObservation` values
-  gathered from the live system.
 - `qualification-readiness`: return booleans `signing_trust_ready`, `recovery_ready`,
   `stock_boot_fallback_ready`, and `qualification_workload_absent` after verifying the exact
   package/signers, independent restoration, present bootable stock + stock-LTS entries with a stock
@@ -65,6 +64,12 @@ a nonzero exit status or a bounded JSON response. The protected executable must 
 - `contain-baseline-workload`: independently kill/verify the fixed workload after a failed or timed
   out stop; return any JSON value only after it is absent.
 - `cleanup-baseline-workload`: return `{"fan_control_write_count":0}`. Any other count fails.
+
+The root coordinator verifies the protected candidate archive, signed package set, installed
+packages, running kernel image, loaded modules, Secure Boot, and live hardware before it invokes
+the sandbox. The archive must contain `protected-policy.toml`, `package-provenance-v1.json`,
+`enrolled-image-signing-certificate.pem`, `package-set-manifest.p7s`,
+`package-signing-certificate.pem`, and the signed package-set files under `build-output/`.
 
 Passing preflight evidence includes the timestamped result and detail for all 12 checks. Each
 baseline contains the SHA-256 binding of the exact serialized `preflight.json` it follows.

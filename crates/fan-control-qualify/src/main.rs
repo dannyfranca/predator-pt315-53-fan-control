@@ -22,17 +22,17 @@ use std::{
 use fan_control_core::{
     BaselineCleanupAttestation, BaselineObservation, BaselineStartingConditions,
     CalibrationLevelObservation, CalibrationStep, CapturedBaselineStartingConditions,
-    CapturedMatchedWorkloadStartingConditions, CompatibilityObservation,
-    ConservativeFanCalibration, EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceTimestamp,
-    Fan, FanCalibrationEvidence, FanHoldObservation, FanReadbackField, FileAccess,
-    FirmwareAutoBaselineEnvironment, FirmwareAutoBaselinePlan, LiveLifecycleCase,
-    LiveLifecycleCaseObservation, LiveLifecycleCheckpoint, LiveLifecycleEnvironment,
-    LiveLifecycleFanAutoObservation, LiveLifecycleObserved, LiveLifecycleProgress,
-    LiveLifecycleRebootArmObservation, LiveLifecycleRebootContinuation, MatchedWorkloadEnvironment,
-    MatchedWorkloadFanRestoration, MatchedWorkloadObservation, MatchedWorkloadPlan,
-    MatchedWorkloadTachometerCalibrations, NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind,
-    NvmlGpuSample, PlatformError, PlatformErrorKind, PreflightArtifact, PreflightEnvironment,
-    PreflightInputs, PreflightRequirements, ProtectedFileRequirement, QUALIFICATION_CGROUP_PREFIX,
+    CapturedMatchedWorkloadStartingConditions, ConservativeFanCalibration, EvidenceFan,
+    EvidenceProfile, EvidenceRecord, EvidenceTimestamp, Fan, FanCalibrationEvidence,
+    FanHoldObservation, FanReadbackField, FileAccess, FirmwareAutoBaselineEnvironment,
+    FirmwareAutoBaselinePlan, LiveLifecycleCase, LiveLifecycleCaseObservation,
+    LiveLifecycleCheckpoint, LiveLifecycleEnvironment, LiveLifecycleFanAutoObservation,
+    LiveLifecycleObserved, LiveLifecycleProgress, LiveLifecycleRebootArmObservation,
+    LiveLifecycleRebootContinuation, MatchedWorkloadEnvironment, MatchedWorkloadFanRestoration,
+    MatchedWorkloadObservation, MatchedWorkloadPlan, MatchedWorkloadTachometerCalibrations,
+    NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, PlatformError,
+    PlatformErrorKind, PreflightArtifact, PreflightEnvironment, PreflightInputs,
+    PreflightRequirements, ProtectedFileRequirement, QUALIFICATION_CGROUP_PREFIX,
     QUALIFICATION_RECORD_PATH, QualificationEnvelopeIdentityV1, RestorationOutcome,
     RootOwnedQualificationRecordAccess, RunOutcomeStatus, SUPERVISED_ENDURANCE_WORKLOAD_ID,
     ShutdownRequest, StartupStatus, SupervisedEnduranceEnvironment,
@@ -48,6 +48,7 @@ use fan_control_core::{
     write_qualification_record_after_endurance_with_guard, write_root_owned_bytes_atomically,
     write_root_owned_evidence_atomically,
 };
+use fan_control_daemon::discover_system_candidate;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -77,6 +78,7 @@ struct QualificationStagesManifest {
     compatibility: PathBuf,
     config: PathBuf,
     protected_policy: PathBuf,
+    candidate_archive: PathBuf,
     nvidia_gpu_uuid: String,
     hwmon_root: PathBuf,
     evidence_root: PathBuf,
@@ -1593,31 +1595,48 @@ fn execute_read_only_preflight(
         let protected_policy = read_protected_file(&manifest.protected_policy)?;
         let selector = NvidiaGpuSelector::uuid(&manifest.nvidia_gpu_uuid)?;
         validate_sandbox_fan_boundary(manifest)?;
-        Ok((compatibility, config, protected_policy, selector))
+        Ok((
+            compatibility_source,
+            compatibility,
+            config,
+            protected_policy,
+            selector,
+        ))
     })();
-    let (compatibility, config, protected_policy, selector) = match protected_inputs {
-        Ok(inputs) => inputs,
-        Err(error) => {
+    let (compatibility_source, compatibility, config, protected_policy, selector) =
+        match protected_inputs {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                return failed_preflight_collection(
+                    manifest,
+                    harness,
+                    started_at,
+                    format!("protected preflight input collection failed: {error}"),
+                );
+            }
+        };
+    let observations = match discover_system_candidate(&manifest.candidate_archive) {
+        Ok(discovery)
+            if discovery.compatibility_declaration == compatibility_source
+                && discovery.editable_config == config
+                && discovery.protected_policy == protected_policy =>
+        {
+            vec![discovery.observation]
+        }
+        Ok(_) => {
             return failed_preflight_collection(
                 manifest,
                 harness,
                 started_at,
-                format!("protected preflight input collection failed: {error}"),
+                "candidate archive, installed configuration, and manifest inputs differ".into(),
             );
         }
-    };
-    let observations: Vec<CompatibilityObservation> = match harness.invoke(
-        "compatibility-observations",
-        json!({}),
-        harness.deadline(30_000),
-    ) {
-        Ok(observations) => observations,
         Err(error) => {
             return failed_preflight_collection(
                 manifest,
                 harness,
                 started_at,
-                format!("compatibility observation collection failed: {error}"),
+                format!("protected candidate verification failed: {error}"),
             );
         }
     };
@@ -3315,6 +3334,7 @@ mod tests {
             "compatibility": "/usr/lib/pt31553-fan-control/compatibility.toml",
             "config": "/etc/pt31553-fan-control/config.toml",
             "protected_policy": "/var/lib/pt31553-fan-control/candidate-policy.toml",
+            "candidate_archive": "/var/lib/pt31553-fan-control/candidate",
             "nvidia_gpu_uuid": "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             "hwmon_root": "/sys/class/hwmon",
             "evidence_root": "/var/lib/pt31553-fan-control/evidence/session",
