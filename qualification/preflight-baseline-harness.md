@@ -15,6 +15,8 @@ Both commands accept the same protected, root-owned JSON manifest:
   "config": "/etc/pt31553-fan-control/config.toml",
   "protected_policy": "/var/lib/pt31553-fan-control/candidate-policy.toml",
   "candidate_archive": "/var/lib/pt31553-fan-control/candidate",
+  "stock_boot_entry_id": "exact stock linux-cachyos bootctl entry ID",
+  "stock_lts_boot_entry_id": "exact stock linux-cachyos-lts bootctl entry ID",
   "nvidia_gpu_uuid": "GPU-REPLACE_WITH_EXACT_UUID",
   "hwmon_root": "/sys/class/hwmon",
   "evidence_root": "/var/lib/pt31553-fan-control/evidence/SESSION",
@@ -46,12 +48,10 @@ For each operation the runner executes `HARNESS OPERATION ABSOLUTE_MONOTONIC_DEA
 JSON request to stdin, and expects exactly one JSON response on stdout. Deadlines and every
 `monotonic_millis` field use Linux `CLOCK_MONOTONIC`: milliseconds since boot, shared by the runner
 and every harness process. Stdout is capped at 1 MiB and stderr is discarded, so failures must use
-a nonzero exit status or a bounded JSON response. The protected executable must support:
+a nonzero exit status or a bounded JSON response. The root coordinator—not the sandbox—verifies
+signing trust, independent restoration, both stock boot fallbacks, and workload absence. The
+protected executable must support:
 
-- `qualification-readiness`: return booleans `signing_trust_ready`, `recovery_ready`,
-  `stock_boot_fallback_ready`, and `qualification_workload_absent` after verifying the exact
-  package/signers, independent restoration, present bootable stock + stock-LTS entries with a stock
-  persistent default, and no leftover qualification workload/cgroup.
 - `sample-nvidia`: request `{"uuid":"..."}`; return `uuid`, `pci_bus_id`, and
   `temperature_celsius`, or `error_kind` plus `error`. `reset-required` is a blocking result.
 - `capture-baseline-starting-conditions`: request the manifest's exact `nvidia_gpu_uuid`; return
@@ -66,8 +66,9 @@ a nonzero exit status or a bounded JSON response. The protected executable must 
 - `cleanup-baseline-workload`: return `{"fan_control_write_count":0}`. Any other count fails.
 
 The root coordinator verifies the protected candidate archive, signed package set, installed
-packages, running kernel image, loaded modules, Secure Boot, and live hardware before it invokes
-the sandbox. The archive must contain `protected-policy.toml`, `package-provenance-v1.json`,
+packages, running kernel image, loaded modules, Secure Boot, live hardware, exact boot entries,
+disabled/never-activated controller units, and daemon/workload absence before it invokes the
+sandbox. The archive must contain `protected-policy.toml`, `package-provenance-v1.json`,
 `enrolled-image-signing-certificate.pem`, `package-set-manifest.p7s`,
 `package-signing-certificate.pem`, and the signed package-set files under `build-output/`.
 

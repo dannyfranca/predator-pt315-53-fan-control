@@ -75,6 +75,7 @@ impl HandoffSandbox {
             "crates/fan-control-core/tests/read_only_preflight.rs",
             "crates/fan-control-core/tests/source_complete_handoff.rs",
             "crates/fan-control-qualify/src/main.rs",
+            "crates/fan-control-qualify/src/system_preflight.rs",
             "crates/fan-control-qualify/tests/qualification_stages.rs",
             "handoff/source-complete-files.txt",
             "packaging/kernel/README.md",

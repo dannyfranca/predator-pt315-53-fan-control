@@ -4,11 +4,7 @@ use std::{
     ffi::{CString, OsString},
     fs,
     io::{Read, Write},
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{FileTypeExt, MetadataExt, PermissionsExt},
-        process::CommandExt,
-    },
+    os::unix::{ffi::OsStrExt, fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -30,8 +26,7 @@ use fan_control_core::{
     LiveLifecycleObserved, LiveLifecycleProgress, LiveLifecycleRebootArmObservation,
     LiveLifecycleRebootContinuation, MatchedWorkloadEnvironment, MatchedWorkloadFanRestoration,
     MatchedWorkloadObservation, MatchedWorkloadPlan, MatchedWorkloadTachometerCalibrations,
-    NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, PlatformError,
-    PlatformErrorKind, PreflightArtifact, PreflightEnvironment, PreflightInputs,
+    NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, PreflightInputs,
     PreflightRequirements, ProtectedFileRequirement, QUALIFICATION_CGROUP_PREFIX,
     QUALIFICATION_RECORD_PATH, QualificationEnvelopeIdentityV1, RestorationOutcome,
     RootOwnedQualificationRecordAccess, RunOutcomeStatus, SUPERVISED_ENDURANCE_WORKLOAD_ID,
@@ -40,9 +35,9 @@ use fan_control_core::{
     SupervisedEnduranceProcessStopConfirmation, SupervisedEnduranceSegment,
     SupervisedEnduranceSegmentConfirmation, SystemOwnershipPlatform, TelemetrySampleEvidence,
     TerminationSignalHandlers, WorkloadEvidence, discover_acer_hwmon, parse_compatibility_v1,
-    parse_evidence_v2, path_has_extended_acl, resume_live_lifecycle_qualification,
-    run_firmware_auto_baseline, run_live_lifecycle_until_reboot, run_matched_custom_workload,
-    run_read_only_preflight, run_supervised_endurance, validate_firmware_auto_baseline_resume,
+    parse_evidence_v2, resume_live_lifecycle_qualification, run_firmware_auto_baseline,
+    run_live_lifecycle_until_reboot, run_matched_custom_workload, run_read_only_preflight,
+    run_supervised_endurance, validate_firmware_auto_baseline_resume,
     validate_matched_workload_plan, validate_qualification_evidence_v2,
     validate_root_owned_output_destination, validate_root_owned_protected_file,
     write_qualification_record_after_endurance_with_guard, write_root_owned_bytes_atomically,
@@ -52,6 +47,13 @@ use fan_control_daemon::discover_system_candidate;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+
+#[cfg(test)]
+use fan_control_core::PlatformErrorKind;
+
+mod system_preflight;
+
+use system_preflight::SystemPreflightEnvironment;
 
 static NEXT_HARNESS_CGROUP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -79,6 +81,8 @@ struct QualificationStagesManifest {
     config: PathBuf,
     protected_policy: PathBuf,
     candidate_archive: PathBuf,
+    stock_boot_entry_id: String,
+    stock_lts_boot_entry_id: String,
     nvidia_gpu_uuid: String,
     hwmon_root: PathBuf,
     evidence_root: PathBuf,
@@ -142,15 +146,6 @@ struct HarnessBaselineObservation {
     system_stable: bool,
     kernel_faults: Vec<String>,
     nvidia_faults: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HarnessQualificationReadiness {
-    signing_trust_ready: bool,
-    recovery_ready: bool,
-    stock_boot_fallback_ready: bool,
-    qualification_workload_absent: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1401,6 +1396,10 @@ fn read_stages_manifest(path: &Path) -> Result<QualificationStagesManifest, Box<
     if !manifest.evidence_root.is_absolute() || !manifest.hwmon_root.is_absolute() {
         return Err("manifest hwmon_root and evidence_root must be absolute".into());
     }
+    system_preflight::validate_stock_entry_ids(
+        &manifest.stock_boot_entry_id,
+        &manifest.stock_lts_boot_entry_id,
+    )?;
     canonicalize_manifest_gpu_uuid(&mut manifest.nvidia_gpu_uuid);
     Ok(manifest)
 }
@@ -1641,22 +1640,10 @@ fn execute_read_only_preflight(
         }
     };
     let mut nvml = HarnessNvml { harness };
-    let readiness: HarnessQualificationReadiness = match harness.invoke(
-        "qualification-readiness",
-        json!({}),
-        harness.deadline(30_000),
-    ) {
-        Ok(readiness) => readiness,
-        Err(error) => {
-            return failed_preflight_collection(
-                manifest,
-                harness,
-                started_at,
-                format!("qualification readiness collection failed: {error}"),
-            );
-        }
-    };
-    let mut environment = SystemPreflightEnvironment { readiness };
+    let mut environment = SystemPreflightEnvironment::for_verified_candidate(
+        &manifest.stock_boot_entry_id,
+        &manifest.stock_lts_boot_entry_id,
+    );
     let mut platform = SystemOwnershipPlatform::new();
     let report = run_read_only_preflight(
         &mut platform,
@@ -2787,114 +2774,6 @@ impl MatchedWorkloadEnvironment for HarnessEnvironment {
     }
 }
 
-struct SystemPreflightEnvironment {
-    readiness: HarnessQualificationReadiness,
-}
-
-impl PreflightEnvironment for SystemPreflightEnvironment {
-    fn timestamp_now(&mut self) -> EvidenceTimestamp {
-        system_timestamp()
-    }
-
-    fn signing_trust_is_ready(&mut self) -> Result<bool, PlatformError> {
-        Ok(self.readiness.signing_trust_ready)
-    }
-
-    fn recovery_is_ready(&mut self) -> Result<bool, PlatformError> {
-        Ok(self.readiness.recovery_ready)
-    }
-
-    fn stock_boot_fallback_is_ready(&mut self) -> Result<bool, PlatformError> {
-        Ok(self.readiness.stock_boot_fallback_ready)
-    }
-
-    fn qualification_workload_is_absent(&mut self) -> Result<bool, PlatformError> {
-        Ok(self.readiness.qualification_workload_absent)
-    }
-
-    fn artifact_is_ready(&mut self, artifact: PreflightArtifact) -> Result<bool, PlatformError> {
-        let path = Path::new(artifact.path());
-        match artifact {
-            PreflightArtifact::QualificationTool
-            | PreflightArtifact::RestorationTool
-            | PreflightArtifact::Daemon => {
-                validate_root_owned_protected_file(path, ProtectedFileRequirement::Executable)
-            }
-            PreflightArtifact::DaemonServiceUnit | PreflightArtifact::SleepGuardServiceUnit => {
-                validate_root_owned_protected_file(path, ProtectedFileRequirement::Regular)
-            }
-            PreflightArtifact::Journald => validate_root_owned_socket(path),
-        }
-        .map(|()| true)
-        .or_else(|error| match error.kind() {
-            PlatformErrorKind::Unavailable | PlatformErrorKind::PermissionDenied => Ok(false),
-            _ => Err(error),
-        })
-    }
-
-    fn available_bytes(&mut self, path: &Path) -> Result<u64, PlatformError> {
-        let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-            PlatformError::new(
-                PlatformErrorKind::Unavailable,
-                "disk path contains a NUL byte",
-            )
-        })?;
-        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-        // SAFETY: `path` is NUL-terminated and `stats` points to writable storage.
-        if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
-            return Err(PlatformError::new(
-                PlatformErrorKind::Unavailable,
-                format!("statvfs failed: {}", std::io::Error::last_os_error()),
-            ));
-        }
-        // SAFETY: successful statvfs initialized the structure.
-        let stats = unsafe { stats.assume_init() };
-        Ok(stats.f_bavail.saturating_mul(stats.f_frsize))
-    }
-}
-
-fn validate_root_owned_socket(path: &Path) -> Result<(), PlatformError> {
-    validate_owned_socket(path, 0)
-}
-
-fn validate_owned_socket(path: &Path, required_owner: u32) -> Result<(), PlatformError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        let metadata = std::fs::symlink_metadata(&current)
-            .map_err(|error| platform_io_error(&current, error))?;
-        let has_extended_acl =
-            path_has_extended_acl(&current).map_err(|error| platform_io_error(&current, error))?;
-        let leaf = current == path;
-        if metadata.file_type().is_symlink()
-            || (metadata.uid() != 0 && metadata.uid() != required_owner)
-            || (!leaf && metadata.permissions().mode() & 0o022 != 0)
-            || has_extended_acl
-        {
-            return Err(PlatformError::new(
-                PlatformErrorKind::PermissionDenied,
-                format!("unprotected artifact path: {}", current.display()),
-            ));
-        }
-        if leaf && !metadata.file_type().is_socket() {
-            return Err(PlatformError::new(
-                PlatformErrorKind::Unavailable,
-                format!("artifact is not a socket: {}", path.display()),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn platform_io_error(path: &Path, error: std::io::Error) -> PlatformError {
-    let kind = match error.kind() {
-        std::io::ErrorKind::NotFound => PlatformErrorKind::NotFound,
-        std::io::ErrorKind::PermissionDenied => PlatformErrorKind::PermissionDenied,
-        _ => PlatformErrorKind::Unavailable,
-    };
-    PlatformError::new(kind, format!("cannot inspect {}: {error}", path.display()))
-}
-
 impl FirmwareAutoBaselineEnvironment for HarnessEnvironment {
     fn timestamp(&mut self) -> EvidenceTimestamp {
         self.timestamp_now()
@@ -3335,6 +3214,8 @@ mod tests {
             "config": "/etc/pt31553-fan-control/config.toml",
             "protected_policy": "/var/lib/pt31553-fan-control/candidate-policy.toml",
             "candidate_archive": "/var/lib/pt31553-fan-control/candidate",
+            "stock_boot_entry_id": "linux-cachyos.conf",
+            "stock_lts_boot_entry_id": "linux-cachyos-lts.conf",
             "nvidia_gpu_uuid": "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             "hwmon_root": "/sys/class/hwmon",
             "evidence_root": "/var/lib/pt31553-fan-control/evidence/session",
@@ -3366,7 +3247,7 @@ mod tests {
         set_default_acl(&root);
 
         assert!(matches!(
-            validate_owned_socket(&socket, owner),
+            system_preflight::validate_owned_socket(&socket, owner),
             Err(error) if error.kind() == PlatformErrorKind::PermissionDenied
         ));
         let root_name = CString::new(root.as_os_str().as_bytes()).unwrap();
@@ -3377,7 +3258,7 @@ mod tests {
         );
         set_access_acl(&socket, owner);
         assert!(matches!(
-            validate_owned_socket(&socket, owner),
+            system_preflight::validate_owned_socket(&socket, owner),
             Err(error) if error.kind() == PlatformErrorKind::PermissionDenied
         ));
 

@@ -130,6 +130,7 @@ crates/fan-control-observer/src/main.rs
 crates/fan-control-qualify/Cargo.toml
 crates/fan-control-qualify/src/lib.rs
 crates/fan-control-qualify/src/main.rs
+crates/fan-control-qualify/src/system_preflight.rs
 crates/fan-control-qualify/tests/promotion.rs
 crates/fan-control-qualify/tests/qualification_stages.rs
 crates/fan-control-qualify/tests/startup.rs
