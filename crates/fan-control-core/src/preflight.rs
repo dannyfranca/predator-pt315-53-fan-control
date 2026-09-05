@@ -8,7 +8,7 @@ use crate::{
     NvidiaGpuSampleError, NvidiaGpuSelector, NvmlAccess, NvmlErrorKind, ObservationOutcome,
     PlatformError, PlatformErrorKind, PreflightCheckEvidence, QualificationEnvelopeIdentityV1,
     RunOutcomeEvidence, RunOutcomeStatus, ServiceAccess,
-    authority::validate_policy_authority_sources,
+    authority::validate_qualification_candidate_sources,
     compatibility::{
         check_fan_abi_compatibility, check_platform_compatibility, check_trust_compatibility,
     },
@@ -265,7 +265,7 @@ pub struct PreflightInputs<'a> {
     pub observations: &'a [CompatibilityObservation],
     pub config_source: &'a str,
     pub protected_policy_source: &'a str,
-    pub qualification_record_source: &'a str,
+    pub qualification_envelope: &'a QualificationEnvelopeIdentityV1,
     pub nvidia_selector: &'a NvidiaGpuSelector,
 }
 
@@ -328,12 +328,12 @@ where
     );
     record_check!(
         PreflightCheck::Policy,
-        validate_policy_authority_sources(
+        validate_qualification_candidate_sources(
             inputs.protected_policy_source,
-            inputs.qualification_record_source,
+            inputs.qualification_envelope,
             inputs.observations,
         )
-        .map(|()| "protected policy and qualification record agree".to_owned())
+        .map(|()| "candidate protected policy and qualification envelope agree".to_owned())
         .map_err(|error| error.to_string())
     );
     record_check!(

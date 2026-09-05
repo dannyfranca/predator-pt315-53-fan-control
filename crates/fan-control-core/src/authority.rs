@@ -368,19 +368,47 @@ where
     }
 }
 
-/// Validates the protected policy and qualification record without acquiring ownership or
-/// changing fan state.
-pub(crate) fn validate_policy_authority_sources(
+/// Validates a protected policy as a qualification candidate before any final
+/// qualification record exists.
+pub(crate) fn validate_qualification_candidate_sources(
     protected_policy_source: &str,
-    qualification_record_source: &str,
+    qualification_envelope: &QualificationEnvelopeIdentityV1,
     compatibility_observations: &[CompatibilityObservation],
 ) -> Result<(), PolicyAuthorityError> {
-    validate_policy_authority(
-        protected_policy_source,
-        qualification_record_source,
-        compatibility_observations,
-    )
-    .map(|_| ())
+    let manifest = parse_protected_policy_v2(protected_policy_source)?;
+
+    require_equal(
+        "qualification_id",
+        &manifest.qualification_id,
+        &qualification_envelope.qualification_id,
+    )?;
+    require_equal(
+        "policy_version",
+        &manifest.policy_version,
+        &qualification_envelope.policy_version,
+    )?;
+    require_equal(
+        "compatibility",
+        &manifest.compatibility,
+        &qualification_envelope.compatibility,
+    )?;
+    admit_compatibility(&manifest.compatibility, compatibility_observations)
+        .map_err(PolicyAuthorityError::CompatibilityAdmission)?;
+
+    let protected_policy_sha256 = sha256_hex(protected_policy_source.as_bytes());
+    require_equal(
+        "protected_policy_sha256",
+        &protected_policy_sha256,
+        &qualification_envelope.protected_policy_sha256,
+    )?;
+
+    let protected = validate_config_v1(manifest.protected)
+        .map_err(PolicyAuthorityError::InvalidProtectedPolicy)?;
+    manifest
+        .calibration
+        .qualify(&protected)
+        .map_err(PolicyAuthorityError::InvalidTachometerCalibration)?;
+    Ok(())
 }
 
 fn validate_policy_authority(

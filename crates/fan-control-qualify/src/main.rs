@@ -77,7 +77,6 @@ struct QualificationStagesManifest {
     compatibility: PathBuf,
     config: PathBuf,
     protected_policy: PathBuf,
-    qualification_record: PathBuf,
     nvidia_gpu_uuid: String,
     hwmon_root: PathBuf,
     evidence_root: PathBuf,
@@ -1592,29 +1591,21 @@ fn execute_read_only_preflight(
         }
         let config = read_protected_file(&manifest.config)?;
         let protected_policy = read_protected_file(&manifest.protected_policy)?;
-        let qualification_record = read_protected_file(&manifest.qualification_record)?;
         let selector = NvidiaGpuSelector::uuid(&manifest.nvidia_gpu_uuid)?;
         validate_sandbox_fan_boundary(manifest)?;
-        Ok((
-            compatibility,
-            config,
-            protected_policy,
-            qualification_record,
-            selector,
-        ))
+        Ok((compatibility, config, protected_policy, selector))
     })();
-    let (compatibility, config, protected_policy, qualification_record, selector) =
-        match protected_inputs {
-            Ok(inputs) => inputs,
-            Err(error) => {
-                return failed_preflight_collection(
-                    manifest,
-                    harness,
-                    started_at,
-                    format!("protected preflight input collection failed: {error}"),
-                );
-            }
-        };
+    let (compatibility, config, protected_policy, selector) = match protected_inputs {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            return failed_preflight_collection(
+                manifest,
+                harness,
+                started_at,
+                format!("protected preflight input collection failed: {error}"),
+            );
+        }
+    };
     let observations: Vec<CompatibilityObservation> = match harness.invoke(
         "compatibility-observations",
         json!({}),
@@ -1657,7 +1648,7 @@ fn execute_read_only_preflight(
             observations: &observations,
             config_source: &config,
             protected_policy_source: &protected_policy,
-            qualification_record_source: &qualification_record,
+            qualification_envelope: &manifest.qualification_envelope,
             nvidia_selector: &selector,
         },
         &PreflightRequirements {
@@ -3306,6 +3297,36 @@ mod tests {
         let mut uuid = "GPU-AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE".to_owned();
         canonicalize_manifest_gpu_uuid(&mut uuid);
         assert_eq!(uuid, "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    }
+
+    #[test]
+    fn first_qualification_manifest_does_not_require_a_final_record() {
+        let compatibility =
+            parse_compatibility_v1(include_str!("../../../compatibility/pt315-53.toml")).unwrap();
+        let manifest = serde_json::json!({
+            "qualification_harness_sha256": "a".repeat(64),
+            "qualification_envelope": {
+                "qualification_record_schema_version": 1,
+                "qualification_id": "pt31553-v1",
+                "policy_version": "1.0.0",
+                "protected_policy_sha256": "b".repeat(64),
+                "compatibility": compatibility,
+            },
+            "compatibility": "/usr/lib/pt31553-fan-control/compatibility.toml",
+            "config": "/etc/pt31553-fan-control/config.toml",
+            "protected_policy": "/var/lib/pt31553-fan-control/candidate-policy.toml",
+            "nvidia_gpu_uuid": "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "hwmon_root": "/sys/class/hwmon",
+            "evidence_root": "/var/lib/pt31553-fan-control/evidence/session",
+            "minimum_available_bytes": 1_073_741_824_u64,
+        });
+
+        serde_json::from_value::<QualificationStagesManifest>(manifest.clone()).unwrap();
+
+        let mut legacy = manifest;
+        legacy["qualification_record"] =
+            "/var/lib/pt31553-fan-control/candidate-qualification.json".into();
+        assert!(serde_json::from_value::<QualificationStagesManifest>(legacy).is_err());
     }
 
     #[test]

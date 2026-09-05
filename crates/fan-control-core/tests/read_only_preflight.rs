@@ -10,7 +10,8 @@ use fan_control_core::{
     QualificationEnvelopeIdentityV1, ServiceAccess, parse_evidence_v2, run_read_only_preflight,
 };
 use support::{
-    PROTECTED_POLICY, compatibility_declaration, matching_observation_for_policy, matching_record,
+    PROTECTED_POLICY, compatibility_declaration, matching_observation_for_policy,
+    qualification_envelope,
 };
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
@@ -122,7 +123,7 @@ fn reports_every_required_check_and_passes_without_any_write_or_lock() {
     let (mut platform, mut nvml, mut environment) = passing_fixture();
     let declaration = compatibility_declaration(PROTECTED_POLICY);
     let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-    let record = matching_record(PROTECTED_POLICY);
+    let envelope = qualification_envelope(PROTECTED_POLICY);
     let selector = NvidiaGpuSelector::uuid(EXPECTED_UUID).unwrap();
 
     let report = run_read_only_preflight(
@@ -134,7 +135,7 @@ fn reports_every_required_check_and_passes_without_any_write_or_lock() {
             observations: &observations,
             config_source: VALID_CONFIG,
             protected_policy_source: PROTECTED_POLICY,
-            qualification_record_source: &record,
+            qualification_envelope: &envelope,
             nvidia_selector: &selector,
         },
         &PreflightRequirements {
@@ -170,20 +171,10 @@ fn reports_every_required_check_and_passes_without_any_write_or_lock() {
     let plain = report.to_string();
     assert!(plain.lines().all(|line| line.starts_with("PASS ")));
     assert!(plain.contains("PASS firmware-auto: both fans are already in Firmware Auto"));
-    let record_value: serde_json::Value = serde_json::from_str(&record).unwrap();
     let evidence = report
         .clone()
         .into_evidence(
-            QualificationEnvelopeIdentityV1 {
-                qualification_record_schema_version: 1,
-                qualification_id: record_value["qualification_id"].as_str().unwrap().into(),
-                policy_version: record_value["policy_version"].as_str().unwrap().into(),
-                protected_policy_sha256: record_value["protected_policy_sha256"]
-                    .as_str()
-                    .unwrap()
-                    .into(),
-                compatibility: declaration.clone(),
-            },
+            envelope,
             Some("GPU-11111111-2222-3333-4444-555555555555".into()),
             EvidenceTimestamp {
                 monotonic_millis: 10,
@@ -325,14 +316,14 @@ fn nvidia_reset_required_is_a_clear_blocking_sensor_failure() {
     )));
     let declaration = compatibility_declaration(PROTECTED_POLICY);
     let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-    let record = matching_record(PROTECTED_POLICY);
+    let envelope = qualification_envelope(PROTECTED_POLICY);
     let selector = NvidiaGpuSelector::uuid(EXPECTED_UUID).unwrap();
     let inputs = PreflightInputs {
         compatibility: &declaration,
         observations: &observations,
         config_source: VALID_CONFIG,
         protected_policy_source: PROTECTED_POLICY,
-        qualification_record_source: &record,
+        qualification_envelope: &envelope,
         nvidia_selector: &selector,
     };
     let requirements = PreflightRequirements {
@@ -362,7 +353,7 @@ fn missing_cpu_sensor_is_a_blocking_sensor_failure() {
     platform.remove_path(Path::new(HWMON_ROOT).join("hwmon1"));
     let declaration = compatibility_declaration(PROTECTED_POLICY);
     let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-    let record = matching_record(PROTECTED_POLICY);
+    let envelope = qualification_envelope(PROTECTED_POLICY);
     let selector = NvidiaGpuSelector::uuid(EXPECTED_UUID).unwrap();
     let report = run_read_only_preflight(
         &mut platform,
@@ -373,7 +364,7 @@ fn missing_cpu_sensor_is_a_blocking_sensor_failure() {
             observations: &observations,
             config_source: VALID_CONFIG,
             protected_policy_source: PROTECTED_POLICY,
-            qualification_record_source: &record,
+            qualification_envelope: &envelope,
             nvidia_selector: &selector,
         },
         &PreflightRequirements {
@@ -393,7 +384,7 @@ fn missing_cpu_sensor_is_a_blocking_sensor_failure() {
 fn temperatures_at_absolute_abort_limits_fail_safe_start() {
     let declaration = compatibility_declaration(PROTECTED_POLICY);
     let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-    let record = matching_record(PROTECTED_POLICY);
+    let envelope = qualification_envelope(PROTECTED_POLICY);
 
     let (mut platform, mut nvml, mut environment) = passing_fixture();
     platform.insert_file_with_permissions(
@@ -407,7 +398,7 @@ fn temperatures_at_absolute_abort_limits_fail_safe_start() {
         &mut environment,
         &declaration,
         &observations,
-        &record,
+        &envelope,
     );
     assert!(
         report
@@ -429,7 +420,7 @@ fn temperatures_at_absolute_abort_limits_fail_safe_start() {
         &mut environment,
         &declaration,
         &observations,
-        &record,
+        &envelope,
     );
     assert!(
         report
@@ -451,7 +442,7 @@ fn incompatible_platform_trust_abi_and_policy_each_fail_their_reported_check() {
         let (mut platform, mut nvml, mut environment) = passing_fixture();
         let declaration = compatibility_declaration(PROTECTED_POLICY);
         let mut observation = matching_observation_for_policy(PROTECTED_POLICY);
-        let mut record = matching_record(PROTECTED_POLICY);
+        let mut envelope = qualification_envelope(PROTECTED_POLICY);
         match check {
             PreflightCheck::Platform => observation.hardware.bios_version = "V1.18".to_owned(),
             PreflightCheck::Trust => observation.module_signature_trusted = false,
@@ -459,11 +450,7 @@ fn incompatible_platform_trust_abi_and_policy_each_fail_their_reported_check() {
                 observation.fan_abi.endpoints.pop();
             }
             PreflightCheck::Policy => {
-                record = record.replacen(
-                    "\"policy_version\":\"1.0.0\"",
-                    "\"policy_version\":\"2.0.0\"",
-                    1,
-                );
+                envelope.policy_version = "2.0.0".into();
             }
             _ => unreachable!(),
         }
@@ -475,7 +462,7 @@ fn incompatible_platform_trust_abi_and_policy_each_fail_their_reported_check() {
             &mut environment,
             &declaration,
             &observations,
-            &record,
+            &envelope,
         );
 
         assert!(!report.result(check).unwrap().passed(), "{check:?}");
@@ -499,7 +486,7 @@ fn failures_are_all_reported_instead_of_short_circuiting() {
     environment.stock_boot_fallback_ready = false;
     let declaration = compatibility_declaration(PROTECTED_POLICY);
     let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-    let record = matching_record(PROTECTED_POLICY);
+    let envelope = qualification_envelope(PROTECTED_POLICY);
     let selector = NvidiaGpuSelector::uuid(EXPECTED_UUID).unwrap();
 
     let report = run_read_only_preflight(
@@ -511,7 +498,7 @@ fn failures_are_all_reported_instead_of_short_circuiting() {
             observations: &observations,
             config_source: "schema_version = 1",
             protected_policy_source: PROTECTED_POLICY,
-            qualification_record_source: &record,
+            qualification_envelope: &envelope,
             nvidia_selector: &selector,
         },
         &PreflightRequirements {
@@ -546,19 +533,9 @@ fn failures_are_all_reported_instead_of_short_circuiting() {
     assert!(competing.contains("nbfc.service"));
 
     let trust_timestamp = report.result(PreflightCheck::Trust).unwrap().timestamp();
-    let record_value: serde_json::Value = serde_json::from_str(&record).unwrap();
     let evidence = report
         .into_evidence(
-            QualificationEnvelopeIdentityV1 {
-                qualification_record_schema_version: 1,
-                qualification_id: record_value["qualification_id"].as_str().unwrap().into(),
-                policy_version: record_value["policy_version"].as_str().unwrap().into(),
-                protected_policy_sha256: record_value["protected_policy_sha256"]
-                    .as_str()
-                    .unwrap()
-                    .into(),
-                compatibility: declaration,
-            },
+            envelope,
             Some("GPU-11111111-2222-3333-4444-555555555555".into()),
             EvidenceTimestamp {
                 monotonic_millis: 1,
@@ -591,7 +568,7 @@ fn either_fan_outside_firmware_auto_blocks_preflight() {
         );
         let declaration = compatibility_declaration(PROTECTED_POLICY);
         let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-        let record = matching_record(PROTECTED_POLICY);
+        let envelope = qualification_envelope(PROTECTED_POLICY);
         let selector = NvidiaGpuSelector::uuid(EXPECTED_UUID).unwrap();
         let report = run_read_only_preflight(
             &mut platform,
@@ -602,7 +579,7 @@ fn either_fan_outside_firmware_auto_blocks_preflight() {
                 observations: &observations,
                 config_source: VALID_CONFIG,
                 protected_policy_source: PROTECTED_POLICY,
-                qualification_record_source: &record,
+                qualification_envelope: &envelope,
                 nvidia_selector: &selector,
             },
             &PreflightRequirements {
@@ -645,14 +622,14 @@ fn fan_mode_endpoints_writable_outside_root_block_the_sandbox() {
             );
             let declaration = compatibility_declaration(PROTECTED_POLICY);
             let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-            let record = matching_record(PROTECTED_POLICY);
+            let envelope = qualification_envelope(PROTECTED_POLICY);
             let report = run_fixture_report(
                 &mut platform,
                 &mut nvml,
                 &mut environment,
                 &declaration,
                 &observations,
-                &record,
+                &envelope,
             );
             assert!(
                 !report.result(PreflightCheck::FanAbi).unwrap().passed()
@@ -673,14 +650,14 @@ fn project_writers_and_leftover_workloads_block_preflight() {
         platform.insert_service(service, true);
         let declaration = compatibility_declaration(PROTECTED_POLICY);
         let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-        let record = matching_record(PROTECTED_POLICY);
+        let envelope = qualification_envelope(PROTECTED_POLICY);
         let report = run_fixture_report(
             &mut platform,
             &mut nvml,
             &mut environment,
             &declaration,
             &observations,
-            &record,
+            &envelope,
         );
         assert!(
             report
@@ -695,14 +672,14 @@ fn project_writers_and_leftover_workloads_block_preflight() {
     environment.qualification_workload_absent = false;
     let declaration = compatibility_declaration(PROTECTED_POLICY);
     let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-    let record = matching_record(PROTECTED_POLICY);
+    let envelope = qualification_envelope(PROTECTED_POLICY);
     let report = run_fixture_report(
         &mut platform,
         &mut nvml,
         &mut environment,
         &declaration,
         &observations,
-        &record,
+        &envelope,
     );
     assert!(
         report
@@ -722,14 +699,14 @@ fn final_fan_generation_rechecks_sandbox_write_boundary() {
     };
     let declaration = compatibility_declaration(PROTECTED_POLICY);
     let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-    let record = matching_record(PROTECTED_POLICY);
+    let envelope = qualification_envelope(PROTECTED_POLICY);
     let report = run_fixture_report(
         &mut platform,
         &mut nvml,
         &mut environment,
         &declaration,
         &observations,
-        &record,
+        &envelope,
     );
 
     assert!(
@@ -756,14 +733,14 @@ fn malformed_fan_mode_becomes_identity_bound_unreadable_valid_failed_evidence() 
     );
     let declaration = compatibility_declaration(PROTECTED_POLICY);
     let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-    let record = matching_record(PROTECTED_POLICY);
+    let envelope = qualification_envelope(PROTECTED_POLICY);
     let report = run_fixture_report(
         &mut platform,
         &mut nvml,
         &mut environment,
         &declaration,
         &observations,
-        &record,
+        &envelope,
     );
     assert!(
         report
@@ -773,19 +750,9 @@ fn malformed_fan_mode_becomes_identity_bound_unreadable_valid_failed_evidence() 
             .contains("invalid mode")
     );
 
-    let record_value: serde_json::Value = serde_json::from_str(&record).unwrap();
     let evidence = report
         .into_evidence(
-            QualificationEnvelopeIdentityV1 {
-                qualification_record_schema_version: 1,
-                qualification_id: record_value["qualification_id"].as_str().unwrap().into(),
-                policy_version: record_value["policy_version"].as_str().unwrap().into(),
-                protected_policy_sha256: record_value["protected_policy_sha256"]
-                    .as_str()
-                    .unwrap()
-                    .into(),
-                compatibility: declaration,
-            },
+            envelope,
             Some("GPU-11111111-2222-3333-4444-555555555555".into()),
             EvidenceTimestamp {
                 monotonic_millis: 1,
@@ -826,7 +793,7 @@ fn fan_mode_reads_fail_closed_when_the_discovered_hwmon_identity_rebinds() {
     let mut platform = RebindOnCpuModeRead { inner: platform };
     let declaration = compatibility_declaration(PROTECTED_POLICY);
     let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-    let record = matching_record(PROTECTED_POLICY);
+    let envelope = qualification_envelope(PROTECTED_POLICY);
     let selector = NvidiaGpuSelector::uuid(EXPECTED_UUID).unwrap();
     let report = run_read_only_preflight(
         &mut platform,
@@ -837,7 +804,7 @@ fn fan_mode_reads_fail_closed_when_the_discovered_hwmon_identity_rebinds() {
             observations: &observations,
             config_source: VALID_CONFIG,
             protected_policy_source: PROTECTED_POLICY,
-            qualification_record_source: &record,
+            qualification_envelope: &envelope,
             nvidia_selector: &selector,
         },
         &PreflightRequirements {
@@ -853,19 +820,9 @@ fn fan_mode_reads_fail_closed_when_the_discovered_hwmon_identity_rebinds() {
             .unwrap()
             .passed()
     );
-    let record_value: serde_json::Value = serde_json::from_str(&record).unwrap();
     let evidence = report
         .into_evidence(
-            QualificationEnvelopeIdentityV1 {
-                qualification_record_schema_version: 1,
-                qualification_id: record_value["qualification_id"].as_str().unwrap().into(),
-                policy_version: record_value["policy_version"].as_str().unwrap().into(),
-                protected_policy_sha256: record_value["protected_policy_sha256"]
-                    .as_str()
-                    .unwrap()
-                    .into(),
-                compatibility: declaration,
-            },
+            envelope,
             Some("GPU-11111111-2222-3333-4444-555555555555".into()),
             EvidenceTimestamp {
                 monotonic_millis: 1,
@@ -988,7 +945,7 @@ fn run_fixture_report(
     environment: &mut dyn PreflightEnvironment,
     declaration: &fan_control_core::CompatibilityDeclarationV1,
     observations: &[fan_control_core::CompatibilityObservation],
-    record: &str,
+    qualification_envelope: &QualificationEnvelopeIdentityV1,
 ) -> PreflightReport {
     let selector = NvidiaGpuSelector::uuid(EXPECTED_UUID).unwrap();
     run_read_only_preflight(
@@ -1000,7 +957,7 @@ fn run_fixture_report(
             observations,
             config_source: VALID_CONFIG,
             protected_policy_source: PROTECTED_POLICY,
-            qualification_record_source: record,
+            qualification_envelope,
             nvidia_selector: &selector,
         },
         &PreflightRequirements {
@@ -1124,7 +1081,7 @@ fn environment_errors_are_failures_not_panics() {
     ));
     let declaration = compatibility_declaration(PROTECTED_POLICY);
     let observations = [matching_observation_for_policy(PROTECTED_POLICY)];
-    let record = matching_record(PROTECTED_POLICY);
+    let envelope = qualification_envelope(PROTECTED_POLICY);
     let selector = NvidiaGpuSelector::uuid(EXPECTED_UUID).unwrap();
     let report = run_read_only_preflight(
         &mut platform,
@@ -1135,7 +1092,7 @@ fn environment_errors_are_failures_not_panics() {
             observations: &observations,
             config_source: VALID_CONFIG,
             protected_policy_source: PROTECTED_POLICY,
-            qualification_record_source: &record,
+            qualification_envelope: &envelope,
             nvidia_selector: &selector,
         },
         &PreflightRequirements {

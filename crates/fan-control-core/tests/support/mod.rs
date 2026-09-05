@@ -11,9 +11,9 @@ use fan_control_core::{
     CompatibilityDeclarationV1, CompatibilityObservation, ConservativeFanCalibration,
     EvidenceCompleteness, EvidenceFan, EvidenceRecord, EvidenceTimestamp, Fan,
     FanCalibrationEvidence, FanCommandEvidence, FanControlField, FanEndpointIdentitiesEvidence,
-    FanHoldObservation, FanWriteBackend, ObservedFanAbi, RestorationAttemptEvidence,
-    RestorationOutcome, RunOutcomeStatus, StateTransitionEvidence, ValidatedConfig,
-    parse_compatibility_v1, parse_config_v1, validate_config_v1,
+    FanHoldObservation, FanWriteBackend, ObservedFanAbi, QualificationEnvelopeIdentityV1,
+    RestorationAttemptEvidence, RestorationOutcome, RunOutcomeStatus, StateTransitionEvidence,
+    ValidatedConfig, parse_compatibility_v1, parse_config_v1, validate_config_v1,
 };
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
@@ -265,6 +265,17 @@ pub fn matching_record(policy: &str) -> String {
         }
     }))
     .expect("qualification fixture serializes")
+}
+
+pub fn qualification_envelope(policy: &str) -> QualificationEnvelopeIdentityV1 {
+    let compatibility = compatibility_for_fixture(policy);
+    QualificationEnvelopeIdentityV1 {
+        qualification_record_schema_version: 1,
+        qualification_id: "pt31553-v1".into(),
+        policy_version: "1.0.0".into(),
+        protected_policy_sha256: sha256(policy),
+        compatibility,
+    }
 }
 
 pub fn matching_endurance_evidence(policy: &str) -> String {

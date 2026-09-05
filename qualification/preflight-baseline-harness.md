@@ -14,7 +14,6 @@ Both commands accept the same protected, root-owned JSON manifest:
   "compatibility": "/usr/lib/pt31553-fan-control/compatibility.toml",
   "config": "/etc/pt31553-fan-control/config.toml",
   "protected_policy": "/var/lib/pt31553-fan-control/candidate-policy.toml",
-  "qualification_record": "/var/lib/pt31553-fan-control/candidate-qualification.json",
   "nvidia_gpu_uuid": "GPU-REPLACE_WITH_EXACT_UUID",
   "hwmon_root": "/sys/class/hwmon",
   "evidence_root": "/var/lib/pt31553-fan-control/evidence/SESSION",
