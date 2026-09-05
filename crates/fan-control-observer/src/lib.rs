@@ -1,9 +1,23 @@
-use std::{fmt, str::FromStr};
+use std::{
+    fmt,
+    io::{self, Read},
+    os::{
+        fd::AsRawFd,
+        unix::{
+            fs::{FileTypeExt, MetadataExt, PermissionsExt},
+            net::UnixStream,
+        },
+    },
+    path::Path,
+    str::FromStr,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_SOCKET_PATH: &str = "/run/pt31553-fan-control/observer.sock";
 pub const PRESENCE_WINDOW_MILLIS: u64 = 2_500;
+const MAX_CONFIRMATION_BYTES: u64 = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AmbientTemperature(i32);
@@ -111,6 +125,129 @@ pub struct ObserverTimestamp {
     pub wall_unix_millis: i64,
 }
 
+/// Reads one confirmation only from the protected root observer endpoint.
+pub fn query_protected_observer(path: &Path) -> Result<ObserverConfirmation, ObserverClientError> {
+    validate_protected_parent(path)?;
+    let before = socket_identity(path)?;
+    let stream = UnixStream::connect(path).map_err(ObserverClientError::Io)?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .map_err(ObserverClientError::Io)?;
+    require_root_peer(&stream)?;
+    if socket_identity(path)? != before {
+        return Err(ObserverClientError::Untrusted(
+            "observer socket identity changed while connecting",
+        ));
+    }
+    let mut response = Vec::new();
+    stream
+        .take(MAX_CONFIRMATION_BYTES + 1)
+        .read_to_end(&mut response)
+        .map_err(ObserverClientError::Io)?;
+    if response.is_empty() || response.len() as u64 > MAX_CONFIRMATION_BYTES {
+        return Err(ObserverClientError::Untrusted(
+            "observer response has an invalid size",
+        ));
+    }
+    serde_json::from_slice(&response).map_err(ObserverClientError::Json)
+}
+
+#[derive(Debug)]
+pub enum ObserverClientError {
+    Io(io::Error),
+    Json(serde_json::Error),
+    Untrusted(&'static str),
+}
+
+impl fmt::Display for ObserverClientError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "observer I/O failed: {error}"),
+            Self::Json(error) => write!(formatter, "observer response is invalid: {error}"),
+            Self::Untrusted(reason) => formatter.write_str(reason),
+        }
+    }
+}
+
+impl std::error::Error for ObserverClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Json(error) => Some(error),
+            Self::Untrusted(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn validate_protected_parent(path: &Path) -> Result<(), ObserverClientError> {
+    let parent = path.parent().ok_or(ObserverClientError::Untrusted(
+        "observer socket has no parent",
+    ))?;
+    for ancestor in parent.ancestors() {
+        let metadata = std::fs::symlink_metadata(ancestor).map_err(ObserverClientError::Io)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != 0
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(ObserverClientError::Untrusted(
+                "observer socket parent is not protected by root",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn socket_identity(path: &Path) -> Result<SocketIdentity, ObserverClientError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(ObserverClientError::Io)?;
+    if !metadata.file_type().is_socket() || metadata.uid() != 0 || metadata.nlink() != 1 {
+        return Err(ObserverClientError::Untrusted(
+            "observer endpoint is not a unique root-owned socket",
+        ));
+    }
+    Ok(SocketIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+fn require_root_peer(stream: &UnixStream) -> Result<(), ObserverClientError> {
+    let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: the descriptor is a connected Unix stream and the output buffer/length are valid.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if result != 0 {
+        return Err(ObserverClientError::Io(io::Error::last_os_error()));
+    }
+    if length as usize != std::mem::size_of::<libc::ucred>() {
+        return Err(ObserverClientError::Untrusted(
+            "observer peer credentials have an invalid size",
+        ));
+    }
+    // SAFETY: successful getsockopt initialized a complete ucred value.
+    let credentials = unsafe { credentials.assume_init() };
+    if credentials.uid != 0 {
+        return Err(ObserverClientError::Untrusted(
+            "observer peer is not running as root",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +293,23 @@ mod tests {
                 ambient_millicelsius: 23_750,
             }
         );
+    }
+
+    #[test]
+    fn client_rejects_a_socket_below_a_world_writable_parent() {
+        let error = validate_protected_parent(Path::new("/tmp/observer.sock")).unwrap_err();
+        assert!(matches!(error, ObserverClientError::Untrusted(_)));
+    }
+
+    #[test]
+    fn client_rejects_a_regular_file_as_the_observer_endpoint() {
+        let path = std::env::temp_dir().join(format!(
+            "pt31553-observer-regular-file-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"not a socket").unwrap();
+        let error = socket_identity(&path).unwrap_err();
+        let _ = std::fs::remove_file(path);
+        assert!(matches!(error, ObserverClientError::Untrusted(_)));
     }
 }

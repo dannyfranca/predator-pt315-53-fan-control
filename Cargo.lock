@@ -220,6 +220,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fan-control-harness"
+version = "0.1.0"
+dependencies = [
+ "fan-control-core",
+ "fan-control-daemon",
+ "fan-control-observer",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fan-control-observer"
 version = "0.1.0"
 dependencies = [
