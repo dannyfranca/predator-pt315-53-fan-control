@@ -46,12 +46,41 @@ pub struct SystemQualificationSample {
     pub external_power: ExternalPower,
 }
 
+/// One identity-directed NVIDIA observation used only for qualification evidence.
+///
+/// Temperature, utilization, and the thermal-slowdown state are returned by the same bounded
+/// `nvidia-smi` query so evidence cannot accidentally combine different devices or instants.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SystemNvidiaQualificationSample {
+    pub gpu: NvmlGpuSample,
+    pub utilization_basis_points: u16,
+    pub thermal_throttling: bool,
+}
+
 /// Samples one explicitly selected NVIDIA device with the production identity parser and timeout.
 pub fn sample_system_nvidia(selector: &NvidiaGpuSelector) -> Result<NvmlGpuSample, NvmlError> {
     NvidiaSmi {
         selector: selector.clone(),
     }
     .sample_by_identity_with_timeout(selector, Duration::from_secs(1))
+}
+
+/// Samples qualification-only NVIDIA utilization and thermal state for one explicit device.
+pub fn sample_system_nvidia_qualification(
+    selector: &NvidiaGpuSelector,
+) -> Result<SystemNvidiaQualificationSample, StartupError> {
+    let id = format!("--id={}", selector.value());
+    let output = run_nvidia_smi_command(
+        Path::new("nvidia-smi"),
+        &[
+            id.as_str(),
+            "--query-gpu=uuid,pci.bus_id,temperature.gpu,utilization.gpu,clocks_event_reasons.sw_thermal_slowdown",
+            "--format=csv,noheader,nounits",
+        ],
+        Duration::from_secs(1),
+    )
+    .map_err(StartupError::Device)?;
+    parse_nvidia_qualification_output(&output, selector).map_err(StartupError::Device)
 }
 
 /// Discovers the production read-only sources and captures one complete qualification sample.
@@ -1106,6 +1135,62 @@ fn parse_nvidia_smi_row_raw(row: &str) -> Result<NvmlGpuSample, String> {
         .parse::<f64>()
         .map_err(|_| "NVIDIA query returned a malformed temperature".to_owned())?;
     Ok(NvmlGpuSample::new(*uuid, *pci_bus_id, temperature))
+}
+
+fn parse_nvidia_qualification_output(
+    output: &str,
+    expected: &NvidiaGpuSelector,
+) -> Result<SystemNvidiaQualificationSample, String> {
+    let rows = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    let [row] = rows.as_slice() else {
+        return Err(format!(
+            "identity-directed NVIDIA qualification query returned {} rows",
+            rows.len()
+        ));
+    };
+    let fields = row.split(',').map(str::trim).collect::<Vec<_>>();
+    let [uuid, pci_bus_id, temperature, utilization, thermal_slowdown] = fields.as_slice() else {
+        return Err("NVIDIA qualification query returned a malformed row".into());
+    };
+    let uuid_selector = NvidiaGpuSelector::uuid(uuid).map_err(|error| error.to_string())?;
+    let pci_selector =
+        NvidiaGpuSelector::pci_bus_id(pci_bus_id).map_err(|error| error.to_string())?;
+    let observed = match expected.kind() {
+        fan_control_core::NvidiaGpuSelectorKind::Uuid => &uuid_selector,
+        fan_control_core::NvidiaGpuSelectorKind::PciBusId => &pci_selector,
+    };
+    if observed != expected {
+        return Err(format!(
+            "NVIDIA GPU identity changed during qualification sampling: expected {}, observed {}",
+            expected.value(),
+            observed.value()
+        ));
+    }
+    let temperature_celsius = temperature
+        .parse::<f64>()
+        .map_err(|_| "NVIDIA qualification query returned a malformed temperature")?;
+    if !temperature_celsius.is_finite() || !(1.0..=125.0).contains(&temperature_celsius) {
+        return Err("NVIDIA qualification temperature is implausible".into());
+    }
+    let utilization_percent = utilization
+        .parse::<u16>()
+        .map_err(|_| "NVIDIA qualification query returned malformed utilization")?;
+    if utilization_percent > 100 {
+        return Err("NVIDIA qualification utilization exceeds 100 percent".into());
+    }
+    let thermal_throttling = match *thermal_slowdown {
+        "Active" => true,
+        "Not Active" => false,
+        _ => return Err("NVIDIA qualification thermal state is unknown".into()),
+    };
+    Ok(SystemNvidiaQualificationSample {
+        gpu: NvmlGpuSample::new(*uuid, *pci_bus_id, temperature_celsius),
+        utilization_basis_points: utilization_percent * 100,
+        thermal_throttling,
+    })
 }
 
 fn observe_live_compatibility_with(
@@ -2595,6 +2680,36 @@ mod tests {
         assert_eq!(sample.temperature_celsius(), 61.0);
         assert!(parse_nvidia_smi_row_raw("GPU-x, 61").is_err());
         assert!(parse_nvidia_smi_row_raw("GPU-x, pci, unknown").is_err());
+    }
+
+    #[test]
+    fn qualification_nvidia_row_binds_identity_utilization_and_thermal_state() {
+        let expected = NvidiaGpuSelector::uuid("GPU-12345678-1234-1234-1234-123456789abc").unwrap();
+        let sample = parse_nvidia_qualification_output(
+            "GPU-12345678-1234-1234-1234-123456789abc, 00000000:01:00.0, 61, 37, Not Active\n",
+            &expected,
+        )
+        .unwrap();
+
+        assert_eq!(sample.gpu.uuid(), expected.value());
+        assert_eq!(sample.gpu.pci_bus_id(), "00000000:01:00.0");
+        assert_eq!(sample.gpu.temperature_celsius(), 61.0);
+        assert_eq!(sample.utilization_basis_points, 3_700);
+        assert!(!sample.thermal_throttling);
+    }
+
+    #[test]
+    fn qualification_nvidia_row_rejects_ambiguous_or_substituted_evidence() {
+        let expected = NvidiaGpuSelector::uuid("GPU-12345678-1234-1234-1234-123456789abc").unwrap();
+        for output in [
+            "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee, 00000000:01:00.0, 61, 37, Not Active\n",
+            "GPU-12345678-1234-1234-1234-123456789abc, 00000000:01:00.0, 61, 101, Not Active\n",
+            "GPU-12345678-1234-1234-1234-123456789abc, 00000000:01:00.0, 61, 37, [N/A]\n",
+            "GPU-12345678-1234-1234-1234-123456789abc, 00000000:01:00.0, 61, 37\n",
+            "",
+        ] {
+            assert!(parse_nvidia_qualification_output(output, &expected).is_err());
+        }
     }
 
     #[test]
