@@ -220,6 +220,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fan-control-observer"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fan-control-qualify"
 version = "0.1.0"
 dependencies = [

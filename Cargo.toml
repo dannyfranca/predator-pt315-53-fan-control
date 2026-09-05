@@ -2,6 +2,7 @@
 members = [
     "crates/fan-control-core",
     "crates/fan-control-daemon",
+    "crates/fan-control-observer",
     "crates/fan-control-qualify",
     "crates/fan-control-restore",
 ]
