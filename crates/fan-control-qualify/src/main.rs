@@ -191,7 +191,7 @@ struct Arguments {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("fan-control-qualify: {error}");
+        eprintln!("pt31553-fan-qualify: {error}");
         std::process::exit(1);
     }
 }
@@ -200,7 +200,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut values = env::args_os().skip(1);
     let Some(command) = values.next() else {
         println!(
-            "fan-control-qualify: {}; run `fan-control-qualify supervised-endurance --help`",
+            "pt31553-fan-qualify: {}; run `pt31553-fan-qualify supervised-endurance --help`",
             StartupStatus::UnqualifiedNotConfigured
         );
         return Ok(());
@@ -211,7 +211,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         .map_err(|_| "qualification command must be UTF-8")?;
     if command == "--help" {
         println!(
-            "usage: fan-control-qualify COMMAND [OPTIONS]\n\ncommands:\n  {}",
+            "usage: pt31553-fan-qualify COMMAND [OPTIONS]\n\ncommands:\n  {}",
             QUALIFICATION_COMMANDS.join("\n  ")
         );
         return Ok(());
@@ -246,7 +246,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     debug_assert_eq!(command, "supervised-endurance");
     if remaining.first().is_some_and(|value| value == "--help") {
         println!(
-            "usage: fan-control-qualify supervised-endurance --manifest FILE --harness FILE \
+            "usage: pt31553-fan-qualify supervised-endurance --manifest FILE --harness FILE \
              --observer-approval {OBSERVER_APPROVAL} --evidence-output FILE \
              [--qualification-record FILE]"
         );
@@ -1940,7 +1940,7 @@ fn redact_evidence(values: impl Iterator<Item = OsString>) -> Result<(), Box<dyn
     let values = values.collect::<Vec<_>>();
     if values.iter().any(|value| value == "--help") {
         println!(
-            "usage: fan-control-qualify redact-evidence --qualification-record FILE \
+            "usage: pt31553-fan-qualify redact-evidence --qualification-record FILE \
              --evidence FILE --authorized-evidence-path FILE --output FILE"
         );
         return Ok(());
@@ -1958,7 +1958,7 @@ fn check_promotion(values: impl Iterator<Item = OsString>) -> Result<(), Box<dyn
     let values = values.collect::<Vec<_>>();
     if values.iter().any(|value| value == "--help") {
         println!(
-            "usage: fan-control-qualify check-promotion --manifest FILE \
+            "usage: pt31553-fan-qualify check-promotion --manifest FILE \
              --qualification-record FILE --evidence FILE \
              --authorized-evidence-path FILE --sanitized-evidence FILE \
              --protected-policy FILE --package-provenance FILE \
@@ -1983,7 +1983,7 @@ fn validate_records(mut values: impl Iterator<Item = OsString>) -> Result<(), Bo
     while let Some(flag) = values.next() {
         if flag == "--help" {
             println!(
-                "usage: fan-control-qualify validate-records --qualification-record FILE \
+                "usage: pt31553-fan-qualify validate-records --qualification-record FILE \
                  --evidence FILE [--authorized-evidence-path FILE]"
             );
             return Ok(());
