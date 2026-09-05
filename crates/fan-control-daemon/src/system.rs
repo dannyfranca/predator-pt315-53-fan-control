@@ -12,10 +12,10 @@ use std::{
 
 use fan_control_core::{
     AcerHwmonDevice, BoundedIdentityBoundFileAccess, BoundedIdentityBoundReadAccess, Clock,
-    CompatibilityDeclarationV1, CompatibilityObservation, CoretempDevice, EvidenceCompleteness,
-    ExternalPower, FanWriteBackend, FileIdentity, FilePermissions, HardwareIdentity,
-    IdentityBoundReadAccess, ModuleIdentity, ModuleProvenance, NvidiaGpuSelector, NvmlAccess,
-    NvmlError, NvmlErrorKind, NvmlGpuSample, ObservedFanAbi, ObservedSample,
+    CompatibilityDeclarationV1, CompatibilityObservation, ControlCycleSampleGate, CoretempDevice,
+    EvidenceCompleteness, ExternalPower, FanWriteBackend, FileIdentity, FilePermissions,
+    HardwareIdentity, IdentityBoundReadAccess, ModuleIdentity, ModuleProvenance, NvidiaGpuSelector,
+    NvmlAccess, NvmlError, NvmlErrorKind, NvmlGpuSample, ObservedFanAbi, ObservedSample,
     PackageProvenanceModuleV1, PackageProvenanceV1, PlatformError, PlatformErrorKind,
     RootOwnedQualificationRecordAccess, SampleCapture, SampleSourceError, SampleSources,
     SensorSourceDiscovery, SystemOwnershipPlatform, TemperatureCelsius, discover_acer_hwmon,
@@ -33,6 +33,69 @@ const QUALIFIED_ARCHIVE_PARENT: &str = "/var/lib/pt31553-fan-control/rollback";
 const QUALIFIED_KERNEL_PACKAGE: &str = "linux-cachyos-pt31553";
 pub const HWMON_ROOT: &str = "/sys/class/hwmon";
 pub const POWER_SUPPLY_ROOT: &str = "/sys/class/power_supply";
+
+/// One identity-bound, deadline-bounded CPU/GPU/power observation for qualification evidence.
+///
+/// This deliberately exposes values rather than the underlying platform so an unprivileged
+/// qualification harness can reuse production sensor discovery without gaining a fan-write
+/// capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemQualificationSample {
+    pub cpu_millicelsius: i32,
+    pub gpu_millicelsius: i32,
+    pub external_power: ExternalPower,
+}
+
+/// Samples one explicitly selected NVIDIA device with the production identity parser and timeout.
+pub fn sample_system_nvidia(selector: &NvidiaGpuSelector) -> Result<NvmlGpuSample, NvmlError> {
+    NvidiaSmi {
+        selector: selector.clone(),
+    }
+    .sample_by_identity_with_timeout(selector, Duration::from_secs(1))
+}
+
+/// Discovers the production read-only sources and captures one complete qualification sample.
+pub fn capture_system_qualification_sample(
+    selector: &NvidiaGpuSelector,
+) -> Result<SystemQualificationSample, StartupError> {
+    let mut platform = SystemOwnershipPlatform::new();
+    let coretemp = discover_coretemp(&mut platform, Path::new(HWMON_ROOT))
+        .map_err(|error| StartupError::Device(error.to_string()))?;
+    let nvidia = NvidiaSmi::rediscover_with_timeout(selector, Duration::from_secs(1))?;
+    let power = BoundExternalPower::discover(&mut platform, Path::new(POWER_SUPPLY_ROOT))?;
+    let mut sources = SystemSampleSources {
+        platform,
+        coretemp,
+        nvidia,
+        power,
+    };
+    let mut clock = SystemOwnershipPlatform::new();
+    capture_qualification_sample_with(&mut sources, &mut clock)
+}
+
+fn capture_qualification_sample_with(
+    sources: &mut dyn SampleSources,
+    clock: &mut dyn Clock,
+) -> Result<SystemQualificationSample, StartupError> {
+    let sample = ControlCycleSampleGate::new()
+        .sample(sources, clock)
+        .map_err(|error| StartupError::Sampling(error.to_string()))?;
+    Ok(SystemQualificationSample {
+        cpu_millicelsius: temperature_millicelsius(sample.cpu_temperature())?,
+        gpu_millicelsius: temperature_millicelsius(sample.gpu_temperature())?,
+        external_power: sample.external_power(),
+    })
+}
+
+fn temperature_millicelsius(value: TemperatureCelsius) -> Result<i32, StartupError> {
+    let scaled = value.value() * 1_000.0;
+    if !scaled.is_finite() || scaled < i32::MIN as f64 || scaled > i32::MAX as f64 {
+        return Err(StartupError::Sampling(
+            "temperature cannot be represented as millicelsius".into(),
+        ));
+    }
+    Ok(scaled.round() as i32)
+}
 
 pub struct SystemStartupDiscovery {
     pub editable_config: String,
@@ -1971,6 +2034,23 @@ mod tests {
         ) -> Result<ObservedSample<ExternalPower>, SampleSourceError> {
             Ok(capture.capture(ExternalPower::Connected))
         }
+    }
+
+    #[test]
+    fn qualification_sample_reuses_the_complete_production_sample_gate() {
+        let mut sources = FixtureSources;
+        let mut clock = FakePlatform::new();
+
+        let sample = capture_qualification_sample_with(&mut sources, &mut clock).unwrap();
+
+        assert_eq!(
+            sample,
+            SystemQualificationSample {
+                cpu_millicelsius: 60_000,
+                gpu_millicelsius: 55_000,
+                external_power: ExternalPower::Connected,
+            }
+        );
     }
 
     struct FixtureDiscoveryEnvironment {

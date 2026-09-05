@@ -21,8 +21,9 @@ mod system;
 pub use acceptance_fixture::run_acceptance_fixture;
 pub use system::{
     COMPATIBILITY_DECLARATION_PATH, EDITABLE_CONFIG_PATH, HWMON_ROOT, POWER_SUPPLY_ROOT,
-    SystemSampleSources, SystemSensorSourceDiscovery, SystemStartupDiscovery,
-    discover_system_candidate, discover_system_startup,
+    SystemQualificationSample, SystemSampleSources, SystemSensorSourceDiscovery,
+    SystemStartupDiscovery, capture_system_qualification_sample, discover_system_candidate,
+    discover_system_startup, sample_system_nvidia,
 };
 
 /// Immutable and editable inputs needed for one fail-closed production admission.
