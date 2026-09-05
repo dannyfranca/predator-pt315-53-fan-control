@@ -2,13 +2,16 @@ use std::{
     env,
     error::Error,
     io::{self, Read},
+    os::unix::{fs::MetadataExt, fs::PermissionsExt, process::CommandExt},
     path::Path,
-    process::ExitCode,
-    time::{SystemTime, UNIX_EPOCH},
+    process::{Command, ExitCode, Stdio},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use fan_control_core::{
     EvidenceProfile, EvidenceTimestamp, ExternalPower, NvidiaGpuSelector, NvmlErrorKind,
+    QUALIFICATION_CGROUP_PREFIX, SUPERVISED_ENDURANCE_WORKLOAD_ID, WorkloadEvidence,
 };
 use fan_control_daemon::{capture_system_qualification_sample, sample_system_nvidia};
 use fan_control_observer::{DEFAULT_SOCKET_PATH, ObserverConfirmation, query_protected_observer};
@@ -42,6 +45,25 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
             capture_baseline_starting_conditions(read_request()?, deadline)
         }
         "confirm-endurance-observer" => confirm_endurance_observer(read_request()?, deadline),
+        "start-baseline-workload" => {
+            start_workload(read_request()?, deadline, StartResponse::Plain)
+        }
+        "start-matched-workload" => {
+            start_workload(read_request()?, deadline, StartResponse::Observed)
+        }
+        "start-workload" => start_workload(read_request()?, deadline, StartResponse::Plain),
+        "stop-baseline-workload" => {
+            stop_workload(deadline, StopMode::Graceful, StopResponse::Plain)
+        }
+        "contain-baseline-workload" => stop_workload(deadline, StopMode::Kill, StopResponse::Plain),
+        "stop-matched-workload" => {
+            stop_workload(deadline, StopMode::Graceful, StopResponse::Observed)
+        }
+        "stop-workload" => stop_workload(deadline, StopMode::Graceful, StopResponse::Endurance),
+        "contain-workload" | "force-contain-workload" => {
+            stop_workload(deadline, StopMode::Kill, StopResponse::Endurance)
+        }
+        "cleanup-baseline-workload" => cleanup_baseline(read_request()?, deadline),
         _ => Err(format!("unsupported qualification harness operation: {operation}").into()),
     }
 }
@@ -143,6 +165,281 @@ fn confirm_endurance_observer(_: EmptyRequest, deadline: u64) -> Result<(), Box<
     write_response(&response)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartWorkloadRequest {
+    workload: WorkloadEvidence,
+}
+
+#[derive(Clone, Copy)]
+enum StartResponse {
+    Plain,
+    Observed,
+}
+
+#[derive(Serialize)]
+struct ObservedWorkloadStart {
+    observer_present: bool,
+    started_at: EvidenceTimestamp,
+}
+
+fn start_workload(
+    request: StartWorkloadRequest,
+    deadline: u64,
+    response: StartResponse,
+) -> Result<(), Box<dyn Error>> {
+    let executable = canonical_workload_executable(&request.workload)?;
+    require_protected_workload(executable)?;
+    if current_cgroup_processes()?
+        .iter()
+        .any(|pid| *pid != std::process::id())
+    {
+        return Err("qualification cgroup already contains a workload".into());
+    }
+    if matches!(response, StartResponse::Observed) {
+        require_observer(deadline)?;
+    }
+    let mut child = Command::new(executable)
+        .arg("--fixed")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    let confirmation_at = match require_running_child(&mut child, deadline) {
+        Ok(timestamp) => timestamp,
+        Err(error) => {
+            let _ = kill_other_cgroup_processes_once();
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    match response {
+        StartResponse::Plain => write_response(&confirmation_at),
+        StartResponse::Observed => write_response(&ObservedWorkloadStart {
+            observer_present: true,
+            started_at: confirmation_at,
+        }),
+    }
+}
+
+fn canonical_workload_executable(workload: &WorkloadEvidence) -> Result<&Path, Box<dyn Error>> {
+    let executable = match (workload.workload_id.as_str(), workload.power_profile) {
+        ("idle-ac-v1", EvidenceProfile::Ac) | ("idle-battery-v1", EvidenceProfile::Battery) => {
+            "idle"
+        }
+        ("cpu-ac-v1", EvidenceProfile::Ac) | ("cpu-battery-v1", EvidenceProfile::Battery) => "cpu",
+        ("gpu-ac-v1", EvidenceProfile::Ac) | ("gpu-battery-v1", EvidenceProfile::Battery) => "gpu",
+        ("combined-ac-v1", EvidenceProfile::Ac) => "combined",
+        (SUPERVISED_ENDURANCE_WORKLOAD_ID, EvidenceProfile::Ac) => "mixed",
+        _ => return Err("workload identity and power profile are not canonical".into()),
+    };
+    let path = match executable {
+        "idle" => Path::new("/usr/lib/pt31553-fan-control/workloads/idle"),
+        "cpu" => Path::new("/usr/lib/pt31553-fan-control/workloads/cpu"),
+        "gpu" => Path::new("/usr/lib/pt31553-fan-control/workloads/gpu"),
+        "combined" => Path::new("/usr/lib/pt31553-fan-control/workloads/combined"),
+        "mixed" => Path::new("/usr/lib/pt31553-fan-control/workloads/mixed"),
+        _ => unreachable!(),
+    };
+    let expected_command = [path.display().to_string(), "--fixed".into()];
+    if workload.version != "1.0.0" || workload.command != expected_command {
+        return Err("workload command or version is not canonical".into());
+    }
+    Ok(path)
+}
+
+fn require_protected_workload(path: &Path) -> Result<(), Box<dyn Error>> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    let mode = metadata.permissions().mode();
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.nlink() != 1
+        || mode & 0o022 != 0
+        || mode & 0o111 == 0
+    {
+        return Err(format!("workload executable is not protected: {}", path.display()).into());
+    }
+    for ancestor in path.parent().into_iter().flat_map(Path::ancestors) {
+        let metadata = std::fs::symlink_metadata(ancestor)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != 0
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(format!(
+                "workload executable ancestor is not protected: {}",
+                ancestor.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn require_running_child(
+    child: &mut std::process::Child,
+    deadline: u64,
+) -> Result<EvidenceTimestamp, Box<dyn Error>> {
+    let confirm_after = require_before_deadline(deadline)?.saturating_add(100);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Err(format!("qualification workload exited during launch: {status}").into());
+        }
+        if !current_cgroup_processes()?.contains(&child.id()) {
+            return Err("qualification workload escaped its cgroup".into());
+        }
+        let now = require_before_deadline(deadline)?;
+        if now >= confirm_after {
+            return evidence_timestamp();
+        }
+        thread::sleep(Duration::from_millis((confirm_after - now).min(10)));
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StopMode {
+    Graceful,
+    Kill,
+}
+
+#[derive(Clone, Copy)]
+enum StopResponse {
+    Plain,
+    Observed,
+    Endurance,
+}
+
+#[derive(Serialize)]
+struct StopConfirmation {
+    confirmed: bool,
+    observer_present: bool,
+}
+
+#[derive(Serialize)]
+struct EnduranceStopConfirmation {
+    observed_at: EvidenceTimestamp,
+    process_identity: &'static str,
+    running: bool,
+}
+
+fn stop_workload(
+    deadline: u64,
+    mode: StopMode,
+    response: StopResponse,
+) -> Result<(), Box<dyn Error>> {
+    let signal = match mode {
+        StopMode::Graceful => libc::SIGTERM,
+        StopMode::Kill => libc::SIGKILL,
+    };
+    loop {
+        let processes = current_cgroup_processes()?
+            .into_iter()
+            .filter(|pid| *pid != std::process::id())
+            .collect::<Vec<_>>();
+        if processes.is_empty() {
+            break;
+        }
+        for pid in processes {
+            let pid = i32::try_from(pid).map_err(|_| "workload PID cannot be represented")?;
+            // SAFETY: the PID came from this harness's private cgroup; ESRCH is accepted only
+            // because absence is rechecked from cgroup.procs on the next iteration.
+            if unsafe { libc::kill(pid, signal) } != 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error.into());
+                }
+            }
+        }
+        require_before_deadline(deadline)?;
+        thread::sleep(Duration::from_millis(10));
+    }
+    let observed_at = evidence_timestamp()?;
+    match response {
+        StopResponse::Plain => write_response(&serde_json::json!({ "confirmed": true })),
+        StopResponse::Observed => write_response(&StopConfirmation {
+            confirmed: true,
+            observer_present: query_observer(deadline)
+                .is_ok_and(|confirmation| confirmation.observer_present),
+        }),
+        StopResponse::Endurance => write_response(&EnduranceStopConfirmation {
+            observed_at,
+            process_identity: "/usr/lib/pt31553-fan-control/workloads/mixed",
+            running: false,
+        }),
+    }
+}
+
+fn kill_other_cgroup_processes_once() -> Result<(), Box<dyn Error>> {
+    for pid in current_cgroup_processes()?
+        .into_iter()
+        .filter(|pid| *pid != std::process::id())
+    {
+        let pid = i32::try_from(pid).map_err(|_| "workload PID cannot be represented")?;
+        // SAFETY: the PID came from this harness's exact private qualification cgroup.
+        if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error.into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn current_cgroup_processes() -> Result<Vec<u32>, Box<dyn Error>> {
+    let membership = std::fs::read_to_string("/proc/self/cgroup")?;
+    let relative = qualification_cgroup_relative_path(&membership)?;
+    let source = std::fs::read_to_string(
+        Path::new("/sys/fs/cgroup")
+            .join(relative)
+            .join("cgroup.procs"),
+    )?;
+    source
+        .lines()
+        .map(|line| line.parse::<u32>().map_err(Into::into))
+        .collect()
+}
+
+fn qualification_cgroup_relative_path(membership: &str) -> Result<&str, &'static str> {
+    let mut paths = membership
+        .lines()
+        .filter_map(|line| line.strip_prefix("0::"));
+    let path = paths
+        .next()
+        .ok_or("unified cgroup membership is unavailable")?;
+    if paths.next().is_some() {
+        return Err("unified cgroup membership is malformed");
+    }
+    let relative = path
+        .strip_prefix('/')
+        .ok_or("unified cgroup membership is malformed")?;
+    if relative.contains('/') {
+        return Err("qualification harness is not in a private root cgroup");
+    }
+    let suffix = relative
+        .strip_prefix(QUALIFICATION_CGROUP_PREFIX)
+        .ok_or("qualification harness is outside a qualification cgroup")?;
+    let (pid, counter) = suffix
+        .split_once('-')
+        .ok_or("qualification cgroup identity is malformed")?;
+    if pid.is_empty()
+        || counter.is_empty()
+        || !pid.bytes().all(|byte| byte.is_ascii_digit())
+        || !counter.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("qualification cgroup identity is malformed");
+    }
+    Ok(relative)
+}
+
+fn cleanup_baseline(_: EmptyRequest, deadline: u64) -> Result<(), Box<dyn Error>> {
+    require_before_deadline(deadline)?;
+    write_response(&serde_json::json!({ "fan_control_write_count": 0 }))
+}
+
 fn require_observer(deadline: u64) -> Result<ObserverConfirmation, Box<dyn Error>> {
     let confirmation = query_observer(deadline)?;
     if !confirmation.observer_present || !confirmation.confirmed {
@@ -233,6 +530,25 @@ fn monotonic_millis() -> io::Result<u64> {
 mod tests {
     use super::*;
 
+    fn workload(
+        workload_id: &str,
+        executable: &str,
+        power_profile: EvidenceProfile,
+    ) -> WorkloadEvidence {
+        WorkloadEvidence {
+            workload_id: workload_id.into(),
+            command: vec![
+                format!("/usr/lib/pt31553-fan-control/workloads/{executable}"),
+                "--fixed".into(),
+            ],
+            version: "1.0.0".into(),
+            power_profile,
+            ambient_millicelsius: 22_000,
+            starting_cpu_millicelsius: 45_000,
+            starting_gpu_millicelsius: 43_000,
+        }
+    }
+
     #[test]
     fn power_profile_requires_a_known_physical_state() {
         assert_eq!(
@@ -271,5 +587,66 @@ mod tests {
     #[test]
     fn expired_deadline_is_rejected() {
         assert!(require_before_deadline(0).is_err());
+    }
+
+    #[test]
+    fn canonical_workloads_map_to_fixed_protected_paths() {
+        for (workload_id, executable, power_profile) in [
+            ("idle-ac-v1", "idle", EvidenceProfile::Ac),
+            ("idle-battery-v1", "idle", EvidenceProfile::Battery),
+            ("cpu-ac-v1", "cpu", EvidenceProfile::Ac),
+            ("cpu-battery-v1", "cpu", EvidenceProfile::Battery),
+            ("gpu-ac-v1", "gpu", EvidenceProfile::Ac),
+            ("gpu-battery-v1", "gpu", EvidenceProfile::Battery),
+            ("combined-ac-v1", "combined", EvidenceProfile::Ac),
+            (
+                SUPERVISED_ENDURANCE_WORKLOAD_ID,
+                "mixed",
+                EvidenceProfile::Ac,
+            ),
+        ] {
+            assert_eq!(
+                canonical_workload_executable(&workload(workload_id, executable, power_profile))
+                    .unwrap(),
+                Path::new(&format!(
+                    "/usr/lib/pt31553-fan-control/workloads/{executable}"
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn workload_identity_command_version_and_profile_must_match() {
+        let canonical = workload("cpu-ac-v1", "cpu", EvidenceProfile::Ac);
+
+        let mut wrong_command = canonical.clone();
+        wrong_command.command[0] = "/usr/bin/stress".into();
+        assert!(canonical_workload_executable(&wrong_command).is_err());
+
+        let mut wrong_version = canonical.clone();
+        wrong_version.version = "latest".into();
+        assert!(canonical_workload_executable(&wrong_version).is_err());
+
+        let mut wrong_profile = canonical;
+        wrong_profile.power_profile = EvidenceProfile::Battery;
+        assert!(canonical_workload_executable(&wrong_profile).is_err());
+    }
+
+    #[test]
+    fn workload_management_requires_an_exact_private_qualification_cgroup() {
+        assert_eq!(
+            qualification_cgroup_relative_path("0::/pt31553-fan-qualify-123-4\n").unwrap(),
+            "pt31553-fan-qualify-123-4"
+        );
+        for membership in [
+            "0::/\n",
+            "0::/user.slice/session.scope\n",
+            "0::/pt31553-fan-qualify-123-4/nested\n",
+            "0::/pt31553-fan-qualify--4\n",
+            "0::/pt31553-fan-qualify-123-x\n",
+            "0::/pt31553-fan-qualify-123-4\n0::/pt31553-fan-qualify-123-5\n",
+        ] {
+            assert!(qualification_cgroup_relative_path(membership).is_err());
+        }
     }
 }
