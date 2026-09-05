@@ -32,10 +32,11 @@ use fan_control_core::{
     MatchedWorkloadFanRestoration, MatchedWorkloadObservation, MatchedWorkloadPlan,
     MatchedWorkloadTachometerCalibrations, NvidiaGpuSelector, NvmlAccess, NvmlError, NvmlErrorKind,
     NvmlGpuSample, PlatformError, PlatformErrorKind, PreflightArtifact, PreflightEnvironment,
-    PreflightInputs, PreflightRequirements, ProtectedFileRequirement, QUALIFICATION_RECORD_PATH,
-    QualificationEnvelopeIdentityV1, RestorationOutcome, RootOwnedQualificationRecordAccess,
-    RunOutcomeStatus, SUPERVISED_ENDURANCE_WORKLOAD_ID, ShutdownRequest, StartupStatus,
-    SupervisedEnduranceEnvironment, SupervisedEnduranceFanContainment, SupervisedEndurancePlan,
+    PreflightInputs, PreflightRequirements, ProtectedFileRequirement, QUALIFICATION_CGROUP_PREFIX,
+    QUALIFICATION_RECORD_PATH, QualificationEnvelopeIdentityV1, RestorationOutcome,
+    RootOwnedQualificationRecordAccess, RunOutcomeStatus, SUPERVISED_ENDURANCE_WORKLOAD_ID,
+    ShutdownRequest, StartupStatus, SupervisedEnduranceEnvironment,
+    SupervisedEnduranceFanContainment, SupervisedEndurancePlan,
     SupervisedEnduranceProcessStopConfirmation, SupervisedEnduranceSegment,
     SupervisedEnduranceSegmentConfirmation, SystemOwnershipPlatform, TelemetrySampleEvidence,
     TerminationSignalHandlers, WorkloadEvidence, discover_acer_hwmon, parse_compatibility_v1,
@@ -2459,7 +2460,7 @@ impl HarnessCgroup {
         }
         reject_stale_harness_cgroups_at(cgroup_root)?;
         let root = cgroup_root.join(format!(
-            "pt31553-fan-qualify-{}-{}",
+            "{QUALIFICATION_CGROUP_PREFIX}{}-{}",
             std::process::id(),
             NEXT_HARNESS_CGROUP_ID.fetch_add(1, Ordering::Relaxed)
         ));
