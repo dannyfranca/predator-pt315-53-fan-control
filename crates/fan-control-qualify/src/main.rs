@@ -89,6 +89,17 @@ struct StageArguments {
 }
 
 const OBSERVER_APPROVAL: &str = "I-AM-PHYSICALLY-OBSERVING";
+const QUALIFICATION_COMMANDS: &[&str] = &[
+    "preflight",
+    "firmware-auto-baselines",
+    "fan-calibration",
+    "matched-workload",
+    "live-lifecycle",
+    "supervised-endurance",
+    "validate-records",
+    "redact-evidence",
+    "check-promotion",
+];
 
 struct SupervisedStageArguments {
     stage: StageArguments,
@@ -194,6 +205,19 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Ok(());
     };
     let remaining = values.collect::<Vec<_>>();
+    let command = command
+        .into_string()
+        .map_err(|_| "qualification command must be UTF-8")?;
+    if command == "--help" {
+        println!(
+            "usage: fan-control-qualify COMMAND [OPTIONS]\n\ncommands:\n  {}",
+            QUALIFICATION_COMMANDS.join("\n  ")
+        );
+        return Ok(());
+    }
+    if !QUALIFICATION_COMMANDS.contains(&command.as_str()) {
+        return Err(format!("unknown qualification command: {command}").into());
+    }
     if command == "validate-records" {
         return validate_records(remaining.into_iter());
     }
@@ -203,9 +227,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     if command == "check-promotion" {
         return check_promotion(remaining.into_iter());
     }
-    let command = command
-        .into_string()
-        .map_err(|_| "qualification command must be UTF-8")?;
     if command == "preflight" {
         return preflight_command(remaining);
     }
@@ -221,9 +242,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     if command == "live-lifecycle" {
         return live_lifecycle_command(remaining);
     }
-    if command != "supervised-endurance" {
-        return Err(format!("unknown qualification command: {command}").into());
-    }
+    debug_assert_eq!(command, "supervised-endurance");
     if remaining.first().is_some_and(|value| value == "--help") {
         println!(
             "usage: fan-control-qualify supervised-endurance --manifest FILE --harness FILE \
