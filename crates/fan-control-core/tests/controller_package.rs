@@ -10,8 +10,8 @@ use fan_control_core::{
     QUALIFICATION_CGROUP_PREFIX, parse_compatibility_v1, parse_config_v1, validate_config_v1,
 };
 
-const SOURCE_COMMIT: &str = "b69e719d78d23f3987bb3eefb9e3ca801bafd50f";
-const SOURCE_SHA256: &str = "df8984936913f072987c8af2b88b643b905f001a7b460403c43e85c74334764e";
+const SOURCE_COMMIT: &str = "6df66e2ecb2ecf45cd8b4eb3955762d03f26563c";
+const SOURCE_SHA256: &str = "1616992a0374664455f230e7d1d496b59339b38e2eb744dbc4d366f8754f85ce";
 const README: &str = include_str!("../../../README.md");
 const SKILL: &str = include_str!("../../../skills/predator-fan-control/SKILL.md");
 const OPERATIONS: &str =

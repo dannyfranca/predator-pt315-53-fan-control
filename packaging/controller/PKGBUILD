@@ -2,7 +2,7 @@
 
 pkgname=pt31553-fan-control
 pkgver=0.1.0
-pkgrel=12
+pkgrel=13
 pkgdesc='Fail-closed PT315-53 fan controller and qualification suite'
 arch=('x86_64')
 url='https://github.com/dannyfranca/predator-pt315-53-fan-control'
@@ -11,12 +11,12 @@ depends=('bash' 'coreutils' 'gcc-libs' 'glibc' 'glmark2' 'kmod' 'nvidia-utils' '
 makedepends=('cargo')
 options=('!debug' '!lto')
 backup=('etc/pt31553-fan-control/config.toml')
-_commit='b69e719d78d23f3987bb3eefb9e3ca801bafd50f'
+_commit='6df66e2ecb2ecf45cd8b4eb3955762d03f26563c'
 source=(
   "$pkgname-$pkgver.tar.gz::$url/archive/$_commit.tar.gz"
 )
 sha256sums=(
-  'df8984936913f072987c8af2b88b643b905f001a7b460403c43e85c74334764e'
+  '1616992a0374664455f230e7d1d496b59339b38e2eb744dbc4d366f8754f85ce'
 )
 
 prepare() {
