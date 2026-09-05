@@ -345,8 +345,8 @@ where
 /// The admitted authority and armed state stay in one capability chain. Every watchdog advance is
 /// downstream of a successful real control/recovery iteration. All exits request permanent
 /// cancellation, restore both fans to Firmware Auto, and only then release exclusive ownership.
-pub fn run_production_control_loop<'a, P, D, N>(
-    startup: QualifiedStartup<'a, P>,
+pub fn run_production_control_loop<P, D, N>(
+    startup: QualifiedStartup<'_, P>,
     sources: D::Sources,
     discovery: D,
     shutdown: &mut ShutdownController,

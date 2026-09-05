@@ -1489,15 +1489,17 @@ fn confirm_shutdown_observer<E>(
 {
     let requested_at = environment.timestamp();
     let deadline = observer_bounded_deadline(requested_at, faults, "observer-shutdown-boundary");
-    if let Some(deadline) = deadline
-        && let Err(error) = record_observer_confirmation(environment, deadline, checks)
-    {
-        push_fault(
-            faults,
-            requested_at,
-            "observer-withdrawn",
-            format!("physical safety observer was not present through service shutdown: {error}"),
-        );
+    if let Some(deadline) = deadline {
+        if let Err(error) = record_observer_confirmation(environment, deadline, checks) {
+            push_fault(
+                faults,
+                requested_at,
+                "observer-withdrawn",
+                format!(
+                    "physical safety observer was not present through service shutdown: {error}"
+                ),
+            );
+        }
     }
     *not_before = later_timestamp(environment.timestamp(), *not_before);
 }
