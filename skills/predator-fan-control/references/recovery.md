@@ -6,16 +6,18 @@ revision's canonical maintenance/recovery boundary.
 
 ## Immediate response
 
-Stop the exact dedicated workload using the revision's trusted ownership
-record and prove it absent. Do not guess process names or kill unrelated work.
-Then follow the documented service-stop order and independent Firmware Auto
-restoration path for the current boot.
+Withdraw observer approval and interrupt the active qualifier at its controlling
+terminal so its cleanup runs. It owns private top-level cgroups named
+`/sys/fs/cgroup/pt31553-fan-qualify-<pid>-<counter>`; prove all are absent before
+stopping services. The production daemon launches no workloads. Do not guess
+process names, kill unrelated work, or invent a launcher/record. Then follow
+the documented sleep-guard stop, daemon stop, and independent Firmware Auto
+restoration order for the current boot.
 
-If the revision lacks the trusted workload launcher/record or the record is
-invalid, do not improvise one. If either fan cannot be confirmed in Firmware
-Auto immediately, stop load, keep AC connected when safe, and shut down. Do
-not reboot, remove packages, clear faults, terminate an active restoration
-helper, or try another backend.
+Any residual qualifier cgroup means cleanup is unproven. If it remains, or if
+either fan cannot be confirmed in Firmware Auto immediately, stop load, keep AC
+connected when safe, and shut down. Do not reboot, remove packages, clear
+faults, terminate an active restoration helper, or try another backend.
 
 Never invoke a candidate-only restoration helper from a stock kernel. Use only
 normal firmware/operating-system restoration there.

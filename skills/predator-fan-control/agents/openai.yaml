@@ -1,7 +1,7 @@
 interface:
   display_name: "Predator PT315-53 Fan Control"
-  short_description: "Safely operate PT315-53 fan control"
-  default_prompt: "Use $predator-fan-control to inspect this device and determine the safest supported next action."
+  short_description: "Build, qualify, and safely operate PT315-53 fan control"
+  default_prompt: "Use $predator-fan-control to check, build, qualify, operate, or recover this PT315-53 installation, working autonomously until a privileged or live-control boundary."
 
 policy:
   allow_implicit_invocation: true

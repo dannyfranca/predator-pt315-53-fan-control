@@ -2,6 +2,9 @@
 
 use std::fmt;
 
+/// Stable operator-visible prefix for per-invocation qualification cgroups.
+pub const QUALIFICATION_CGROUP_PREFIX: &str = "pt31553-fan-qualify-";
+
 mod acer_hwmon;
 mod arming;
 mod authority;
