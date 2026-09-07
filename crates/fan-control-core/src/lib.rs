@@ -186,7 +186,7 @@ pub use qualification_control::{
     QualificationControlObservation, QualificationControlPolicy, begin_qualification_control,
     command_qualification_calibration_fan_before, observe_qualification_calibration_fan_before,
     observe_qualification_control_before, prepare_qualification_control_policy,
-    qualification_control_monotonic_now,
+    qualification_control_monotonic_now, qualification_profile_for_power,
 };
 pub use requalification::{
     ABBREVIATED_RECHECKS, AbbreviatedRecheck, AbbreviatedRecheckOutcome, AbbreviatedRecheckResults,

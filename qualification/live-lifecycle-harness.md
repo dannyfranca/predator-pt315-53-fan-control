@@ -32,7 +32,11 @@ stdin, and reads one JSON response from stdout. The reviewed root-owned harness 
 `LiveLifecycleObserved<T>` is `{ "observation": T, "observer_attestations": [...] }`. Each
 attestation contains `action`, `started_at`, `completed_at`, and `checks`. `checks` includes both
 endpoints and has no monotonic or wall-clock gap over 5 seconds. The first and last attestations
-must also bridge the complete live case boundary within 5 seconds. The exact ordered live actions are:
+must also bridge the complete live case boundary within 5 seconds. The only cross-attestation gap
+exception is between `pre-suspend-custom` and `post-resume-custom`, because no process can poll the
+observer while the machine is suspended; both attestations independently retain the 5-second
+cadence and the typed Auto-before-sleep/resume timestamps bind the gap. The exact ordered live
+actions are:
 
 - duplicate process: `duplicate-owner-custom`, `duplicate-process-cleanup`
 - normal stop/restart: `normal-owner-before-stop`, `normal-restart-custom`, `normal-stop-restart-cleanup`

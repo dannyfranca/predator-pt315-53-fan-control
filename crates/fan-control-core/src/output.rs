@@ -68,9 +68,16 @@ fn selected_profile(
     config: &ValidatedConfig,
     external_power: ExternalPower,
 ) -> &ValidatedProfileConfig {
+    match profile_for_external_power(external_power) {
+        crate::Profile::Ac => config.profiles().ac(),
+        crate::Profile::Battery => config.profiles().battery(),
+    }
+}
+
+pub(crate) const fn profile_for_external_power(external_power: ExternalPower) -> crate::Profile {
     match external_power {
-        ExternalPower::Disconnected => config.profiles().battery(),
-        ExternalPower::Connected | ExternalPower::Unknown => config.profiles().ac(),
+        ExternalPower::Disconnected => crate::Profile::Battery,
+        ExternalPower::Connected | ExternalPower::Unknown => crate::Profile::Ac,
     }
 }
 

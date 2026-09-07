@@ -2373,16 +2373,10 @@ fn validate_observer_attestations(
             case.id()
         ));
     }
-    if attestations.windows(2).any(|pair| {
-        let previous = pair[0].completed_at;
-        let next = pair[1].started_at;
-        next.monotonic_millis > previous.monotonic_millis
-            && next.monotonic_millis - previous.monotonic_millis
-                > LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS
-            || next.wall_unix_millis > previous.wall_unix_millis
-                && next.wall_unix_millis - previous.wall_unix_millis
-                    > LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS as i64
-    }) {
+    if attestations
+        .windows(2)
+        .any(|pair| observer_attestation_transition_is_gapped(case, &pair[0], &pair[1]))
+    {
         return Err(format!(
             "{} failed: observer coverage is not continuous between Custom-control actions",
             case.id()
@@ -2444,6 +2438,29 @@ fn validate_observer_attestations(
         }
     }
     Ok(())
+}
+
+fn observer_attestation_transition_is_gapped(
+    case: LiveLifecycleCase,
+    previous: &LiveLifecycleObserverAttestation,
+    next: &LiveLifecycleObserverAttestation,
+) -> bool {
+    // No observer process can issue checks while the machine is actually suspended. The two
+    // action attestations still require five-second internal cadence on each side of sleep, and
+    // their typed timestamps prove the pre-sleep Auto boundary and fresh post-resume process.
+    if case == LiveLifecycleCase::SuspendResume
+        && previous.action == "pre-suspend-custom"
+        && next.action == "post-resume-custom"
+    {
+        return false;
+    }
+    let previous = previous.completed_at;
+    let next = next.started_at;
+    next.monotonic_millis > previous.monotonic_millis
+        && next.monotonic_millis - previous.monotonic_millis > LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS
+        || next.wall_unix_millis > previous.wall_unix_millis
+            && next.wall_unix_millis - previous.wall_unix_millis
+                > LIVE_OBSERVER_MAX_CHECK_GAP_MILLIS as i64
 }
 
 fn observation_values_fit_schema(observation: &LiveLifecycleCaseObservation) -> bool {
@@ -2729,9 +2746,10 @@ pub(crate) fn live_lifecycle_is_complete(record: &EvidenceRecord) -> bool {
 mod firmware_auto_observation_tests {
     use std::{path::Path, time::Duration};
 
+    use super::observer_attestation_transition_is_gapped;
     use crate::{
-        EvidenceFan, EvidenceTimestamp, FakePlatform, FilePermissions, discover_acer_hwmon,
-        observe_fan_firmware_auto_before,
+        EvidenceFan, EvidenceTimestamp, FakePlatform, FilePermissions, LiveLifecycleCase,
+        LiveLifecycleObserverAttestation, discover_acer_hwmon, observe_fan_firmware_auto_before,
     };
 
     const HWMON_ROOT: &str = "/sys/class/hwmon";
@@ -2804,5 +2822,47 @@ mod firmware_auto_observation_tests {
         );
 
         assert!(result.is_err());
+    }
+
+    fn attestation(action: &str, start: u64, completed: u64) -> LiveLifecycleObserverAttestation {
+        let timestamp = |value| EvidenceTimestamp {
+            monotonic_millis: value,
+            wall_unix_millis: value as i64,
+        };
+        LiveLifecycleObserverAttestation {
+            action: action.into(),
+            started_at: timestamp(start),
+            completed_at: timestamp(completed),
+            checks: vec![timestamp(start), timestamp(completed)],
+        }
+    }
+
+    #[test]
+    fn real_suspend_gap_is_allowed_only_between_the_two_suspend_actions() {
+        let before = attestation("pre-suspend-custom", 1, 2);
+        let after = attestation("post-resume-custom", 60_000, 60_001);
+
+        assert!(!observer_attestation_transition_is_gapped(
+            LiveLifecycleCase::SuspendResume,
+            &before,
+            &after,
+        ));
+        assert!(observer_attestation_transition_is_gapped(
+            LiveLifecycleCase::NormalStopRestart,
+            &before,
+            &after,
+        ));
+    }
+
+    #[test]
+    fn suspend_cleanup_still_requires_continuous_observer_coverage() {
+        let after = attestation("post-resume-custom", 1, 2);
+        let cleanup = attestation("suspend-resume-cleanup", 60_000, 60_001);
+
+        assert!(observer_attestation_transition_is_gapped(
+            LiveLifecycleCase::SuspendResume,
+            &after,
+            &cleanup,
+        ));
     }
 }

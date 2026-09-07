@@ -84,6 +84,11 @@ pub fn begin_qualification_control(
     )
 }
 
+/// Returns the profile selected by the production policy for a sampled power source.
+pub const fn qualification_profile_for_power(power: crate::ExternalPower) -> crate::Profile {
+    crate::output::profile_for_external_power(power)
+}
+
 /// Captures an identity-bound trace of the output selected by the production control cycle.
 /// Any stale receipt, changed endpoint, mode/PWM mismatch, or malformed tachometer immediately
 /// restores Firmware Auto (or escalates to maximum containment) before returning an error.
