@@ -1,13 +1,14 @@
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     env,
     error::Error,
     ffi::{CString, OsString},
     fs,
-    io::{Read, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Write},
     os::unix::{ffi::OsStrExt, fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, ChildStdin, Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc,
@@ -2195,9 +2196,10 @@ struct HarnessEnvironment {
     previous_cpu_time: Option<HarnessCpuTimeSnapshot>,
     starting_cpu_throttles: Option<HarnessCpuThrottleSnapshot>,
     system_health: Option<SystemHealthMonitor>,
+    control_session: RefCell<Option<ControlHarnessSession>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum HarnessPrivilege {
     ReadOnlySandbox,
     RootControl,
@@ -2217,6 +2219,7 @@ impl HarnessEnvironment {
             previous_cpu_time: None,
             starting_cpu_throttles: None,
             system_health: None,
+            control_session: RefCell::new(None),
         })
     }
 
@@ -2295,6 +2298,7 @@ impl HarnessEnvironment {
     }
 
     fn cleanup_containment(&mut self) -> std::io::Result<()> {
+        self.close_control_session()?;
         let Some(mut cgroup) = self.cgroup.take() else {
             return Ok(());
         };
@@ -2391,6 +2395,11 @@ impl HarnessEnvironment {
         }
         if self.now_millis() >= deadline {
             return Err(format!("{operation} deadline expired before launch"));
+        }
+        if self.privilege == HarnessPrivilege::RootControl
+            && uses_persistent_control_session(operation)
+        {
+            return self.invoke_control_session(operation, request, deadline, interruptible);
         }
         let mut command = Command::new(&self.harness);
         command
@@ -2524,6 +2533,247 @@ impl HarnessEnvironment {
             None => error,
         }
     }
+
+    fn invoke_control_session<T: DeserializeOwned>(
+        &self,
+        operation: &str,
+        request: Value,
+        deadline: u64,
+        interruptible: bool,
+    ) -> Result<T, String> {
+        if self.control_session.borrow().is_none() {
+            let session = self.spawn_control_session()?;
+            *self.control_session.borrow_mut() = Some(session);
+        }
+        let mut session = self.control_session.borrow_mut();
+        let session = session
+            .as_mut()
+            .expect("control session was initialized above");
+        let message = HarnessServerRequest {
+            operation,
+            deadline,
+            request,
+        };
+        serde_json::to_writer(&mut session.input, &message)
+            .map_err(|error| format!("cannot encode {operation} request: {error}"))?;
+        session
+            .input
+            .write_all(b"\n")
+            .and_then(|()| session.input.flush())
+            .map_err(|error| format!("cannot write {operation} request: {error}"))?;
+
+        loop {
+            match session.responses.recv_timeout(Duration::from_millis(10)) {
+                Ok(Ok(line)) => {
+                    if line.len() as u64 > MAX_HARNESS_OUTPUT_BYTES {
+                        return Err(self.terminate_control_session(
+                            session,
+                            format!("{operation} response exceeds 1 MiB"),
+                        ));
+                    }
+                    let response: HarnessServerResponse =
+                        serde_json::from_str(&line).map_err(|error| {
+                            self.terminate_control_session(
+                                session,
+                                format!("invalid {operation} response: {error}"),
+                            )
+                        })?;
+                    if !response.ok {
+                        return Err(response.error.unwrap_or_else(|| {
+                            format!("{operation} failed without an error detail")
+                        }));
+                    }
+                    let value = response
+                        .response
+                        .ok_or_else(|| format!("{operation} succeeded without a response"))?;
+                    return serde_json::from_value(value)
+                        .map_err(|error| format!("invalid {operation} response: {error}"));
+                }
+                Ok(Err(error)) => {
+                    return Err(self.terminate_control_session(
+                        session,
+                        format!("cannot read {operation} response: {error}"),
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(self.terminate_control_session(
+                        session,
+                        format!("{operation} control session disconnected"),
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if interruptible && self.shutdown_requested() {
+                return Err(self.terminate_control_session(
+                    session,
+                    format!("{operation} cancelled by termination signal"),
+                ));
+            }
+            if self.now_millis() >= deadline {
+                return Err(self.terminate_control_session(
+                    session,
+                    format!("{operation} exceeded its absolute deadline"),
+                ));
+            }
+            match session.child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!("{operation} control session exited with {status}"));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(self.terminate_control_session(
+                        session,
+                        format!("cannot wait for {operation} control session: {error}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn spawn_control_session(&self) -> Result<ControlHarnessSession, String> {
+        let mut command = Command::new(&self.harness);
+        command
+            .arg("serve")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0);
+        configure_root_harness(
+            &mut command,
+            self.cgroup
+                .as_ref()
+                .map(|cgroup| cgroup.processes_path.clone()),
+            HarnessPrivilege::RootControl,
+        );
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("cannot launch qualification control session: {error}"))?;
+        let input = child
+            .stdin
+            .take()
+            .ok_or("cannot open qualification control session input")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("cannot open qualification control session output")?;
+        let (sender, responses) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let mut output = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match output.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if sender.send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error.to_string()));
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(ControlHarnessSession {
+            child,
+            input: BufWriter::new(input),
+            responses,
+        })
+    }
+
+    fn terminate_control_session(
+        &self,
+        session: &mut ControlHarnessSession,
+        error: String,
+    ) -> String {
+        unsafe {
+            libc::kill(-(session.child.id() as i32), libc::SIGTERM);
+        }
+        let graceful_deadline = self.now_millis().saturating_add(5_000);
+        loop {
+            match session.child.try_wait() {
+                Ok(Some(_)) => return error,
+                Ok(None) if self.now_millis() < graceful_deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                _ => break,
+            }
+        }
+        let containment_error = self.cgroup.as_ref().and_then(|cgroup| {
+            cgroup
+                .kill_all()
+                .err()
+                .map(|source| (cgroup.root.display().to_string(), source))
+        });
+        terminate_process_group(&mut session.child);
+        match containment_error {
+            Some((cgroup, source)) => format!(
+                "{error}; CRITICAL: harness cgroup containment failed for {cgroup}: {source}; recovery: stop qualification and kill every process in that cgroup"
+            ),
+            None => error,
+        }
+    }
+
+    fn close_control_session(&mut self) -> std::io::Result<()> {
+        let Some(mut session) = self.control_session.get_mut().take() else {
+            return Ok(());
+        };
+        drop(session.input);
+        let deadline = self.now_millis().saturating_add(5_000);
+        loop {
+            match session.child.try_wait()? {
+                Some(status) if status.success() => return Ok(()),
+                Some(status) => {
+                    return Err(std::io::Error::other(format!(
+                        "qualification control session exited with {status}"
+                    )));
+                }
+                None if self.now_millis() < deadline => thread::sleep(Duration::from_millis(10)),
+                None => {
+                    terminate_process_group(&mut session.child);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "qualification control session did not restore and exit after EOF",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+const MAX_HARNESS_OUTPUT_BYTES: u64 = 1024 * 1024;
+
+struct ControlHarnessSession {
+    child: Child,
+    input: BufWriter<ChildStdin>,
+    responses: mpsc::Receiver<Result<String, String>>,
+}
+
+#[derive(Serialize)]
+struct HarnessServerRequest<'a> {
+    operation: &'a str,
+    deadline: u64,
+    request: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarnessServerResponse {
+    ok: bool,
+    response: Option<Value>,
+    error: Option<String>,
+}
+
+fn uses_persistent_control_session(operation: &str) -> bool {
+    matches!(
+        operation,
+        "begin-fan-calibration"
+            | "observe-calibration-level"
+            | "observe-calibration-hold"
+            | "restore-fan-calibration"
+            | "finalize-fan-calibration"
+    )
 }
 
 fn complete_harness_stage(
@@ -3677,13 +3927,22 @@ esac"#,
             NEXT_HARNESS_ID.fetch_add(1, Ordering::Relaxed)
         ));
         let script = TestHarness::new(&format!(
-            r#"request=$(cat)
-case "$request" in
-  *'"fan":"cpu"'*) printf 'cpu\n' >> {marker}; exit 9 ;;
-  *'"fan":"gpu"'*)
-    printf 'gpu\n' >> {marker}
-    printf '%s' '{{"auto_write_succeeded":true,"enable_readback":2,"endpoint_identity":"gpu-enable","outcome":"firmware-auto-confirmed"}}'
+            r#"case "$1" in
+  serve)
+    while IFS= read -r request; do
+      case "$request" in
+        *'"fan":"cpu"'*)
+          printf 'cpu\n' >> {marker}
+          printf '%s\n' '{{"ok":false,"response":null,"error":"cpu restore failed"}}'
+          ;;
+        *'"fan":"gpu"'*)
+          printf 'gpu\n' >> {marker}
+          printf '%s\n' '{{"ok":true,"response":{{"auto_write_succeeded":true,"enable_readback":2,"endpoint_identity":"gpu-enable","outcome":"firmware-auto-confirmed"}},"error":null}}'
+          ;;
+      esac
+    done
     ;;
+  *) exit 9 ;;
 esac"#,
             marker = marker.display()
         ));
