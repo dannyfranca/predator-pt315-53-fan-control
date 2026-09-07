@@ -20,6 +20,7 @@ use fan_control_daemon::{HWMON_ROOT, capture_system_qualification_sample, sample
 use fan_control_observer::{DEFAULT_SOCKET_PATH, ObserverConfirmation, query_protected_observer};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+mod server;
 mod telemetry;
 
 const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
@@ -36,6 +37,12 @@ fn main() -> ExitCode {
 
 fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
     let operation = arguments.next().ok_or("operation is required")?;
+    if operation == "serve" {
+        if arguments.next().is_some() {
+            return Err("unexpected qualification harness argument".into());
+        }
+        return server::serve();
+    }
     let deadline = arguments
         .next()
         .ok_or("absolute monotonic deadline is required")?
