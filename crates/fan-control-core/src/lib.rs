@@ -31,6 +31,7 @@ mod policy;
 mod preflight;
 mod promotion;
 mod qualification;
+mod qualification_control;
 mod requalification;
 mod restoration;
 mod sampling;
@@ -176,6 +177,10 @@ pub use qualification::{
     QualificationAuthorizationError, QualificationRecordV3, QualificationTachometerCalibrationsV1,
     SupervisedEnduranceAuthorizationV1, write_qualification_record_after_endurance,
     write_qualification_record_after_endurance_with_guard,
+};
+pub use qualification_control::{
+    QualificationCommandedCalibrationSample, QualificationControlError,
+    command_qualification_calibration_fan_before, observe_qualification_calibration_fan_before,
 };
 pub use requalification::{
     ABBREVIATED_RECHECKS, AbbreviatedRecheck, AbbreviatedRecheckOutcome, AbbreviatedRecheckResults,

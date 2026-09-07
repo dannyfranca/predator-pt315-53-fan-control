@@ -15,7 +15,8 @@ use fan_control_core::{
     SampleSources, ServiceAccess, ShutdownRequest, TemperatureCelsius, ValidatedConfig,
     acquire_controller_ownership, admit_policy_authority,
     arm_both_fans_for_qualification_at_maximum_until, arm_both_fans_safely,
-    arm_both_fans_safely_until, discover_acer_hwmon,
+    arm_both_fans_safely_until, command_qualification_calibration_fan_before, discover_acer_hwmon,
+    observe_qualification_calibration_fan_before,
 };
 
 mod support;
@@ -142,6 +143,77 @@ fn qualification_handover_failure_restores_auto_before_returning() {
         ownership.platform().inner.file_contents(gpu_enable()),
         Some("2")
     );
+    ownership.release().unwrap();
+}
+
+#[test]
+fn qualification_calibration_command_pins_other_fan_at_maximum() {
+    let (mut platform, device) = fixture("2400\n", "2600\n");
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let shutdown = ShutdownRequest::new();
+    let armed =
+        arm_both_fans_for_qualification_at_maximum_until(&mut ownership, &device, &shutdown)
+            .unwrap();
+    let deadline = Duration::from_secs(100);
+
+    let commanded = command_qualification_calibration_fan_before(
+        &mut ownership,
+        &armed,
+        Fan::Cpu,
+        128,
+        deadline,
+    )
+    .unwrap();
+
+    assert_eq!(commanded.sample.selected_pwm_readback, 128);
+    assert_eq!(commanded.sample.other_pwm_readback, 255);
+    assert_eq!(commanded.sample.selected_rpm, Some(2400));
+    assert_eq!(ownership.platform().file_contents(cpu_pwm()), Some("128"));
+    assert_eq!(ownership.platform().file_contents(gpu_pwm()), Some("255"));
+
+    ownership.delay(Duration::from_millis(500));
+    let observed = observe_qualification_calibration_fan_before(
+        &mut ownership,
+        &armed,
+        Fan::Cpu,
+        128,
+        deadline,
+    )
+    .unwrap();
+    assert_eq!(
+        observed.monotonic_millis,
+        commanded.sample.monotonic_millis + 500
+    );
+
+    ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
+fn obsolete_qualification_receipt_fails_safe_in_auto() {
+    let (mut platform, device) = fixture("2400\n", "2600\n");
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let armed = arm_both_fans_for_qualification_at_maximum_until(
+        &mut ownership,
+        &device,
+        &ShutdownRequest::new(),
+    )
+    .unwrap();
+    ownership.restore_firmware_auto(&device).unwrap();
+    let deadline = Duration::from_secs(100);
+
+    let error = observe_qualification_calibration_fan_before(
+        &mut ownership,
+        &armed,
+        Fan::Gpu,
+        255,
+        deadline,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("receipt is not current"));
+    assert_eq!(ownership.platform().file_contents(cpu_enable()), Some("2"));
+    assert_eq!(ownership.platform().file_contents(gpu_enable()), Some("2"));
     ownership.release().unwrap();
 }
 
