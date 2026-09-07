@@ -164,6 +164,7 @@ pub struct CompletedFanCalibrationRun {
     pub calibration: FanCalibrationEvidence,
     pub endpoint_identities: FanEndpointIdentitiesEvidence,
     pub started_at: EvidenceTimestamp,
+    pub custom_control_confirmed_at: EvidenceTimestamp,
     pub restoration_attempted_at: EvidenceTimestamp,
     pub restoration_confirmed_at: EvidenceTimestamp,
     pub completed_at: EvidenceTimestamp,
@@ -308,7 +309,7 @@ pub fn build_fan_calibration_record(
     record.readbacks = readbacks;
     record.state_transitions = vec![
         StateTransitionEvidence {
-            timestamp: run.started_at,
+            timestamp: run.custom_control_confirmed_at,
             boot_id: None,
             from: "firmware-auto".to_owned(),
             to: "custom-control".to_owned(),
@@ -497,8 +498,7 @@ pub(crate) fn fan_calibration_is_complete(record: &EvidenceRecord) -> bool {
     let transitions_match = matches!(
         record.state_transitions.as_slice(),
         [entered, restored]
-            if entered.timestamp == record.started_at
-                && entered.boot_id.is_none()
+            if entered.boot_id.is_none()
                 && entered.from == "firmware-auto"
                 && entered.to == "custom-control"
                 && restored.boot_id.is_none()

@@ -15,6 +15,19 @@ pub struct QualificationCommandedCalibrationSample {
     pub sample: CalibrationReadbackSample,
 }
 
+/// Returns the controller clock used by qualification I/O deadlines and observations.
+///
+/// This narrow accessor lets an external qualification harness bridge its process-wide monotonic
+/// protocol clock without exposing the owned platform or bypassing guarded fan operations.
+pub fn qualification_control_monotonic_now<P>(
+    ownership: &mut ControllerOwnership<'_, P>,
+) -> Duration
+where
+    P: Clock + RuntimeLockAccess,
+{
+    ownership.platform_mut().monotonic_now()
+}
+
 #[derive(Debug)]
 pub enum QualificationControlError {
     Rejected {

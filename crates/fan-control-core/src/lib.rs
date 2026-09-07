@@ -183,6 +183,7 @@ pub use qualification::{
 pub use qualification_control::{
     QualificationCommandedCalibrationSample, QualificationControlError,
     command_qualification_calibration_fan_before, observe_qualification_calibration_fan_before,
+    qualification_control_monotonic_now,
 };
 pub use requalification::{
     ABBREVIATED_RECHECKS, AbbreviatedRecheck, AbbreviatedRecheckOutcome, AbbreviatedRecheckResults,

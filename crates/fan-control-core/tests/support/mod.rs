@@ -468,6 +468,7 @@ pub fn completed_calibration_record(mut record: EvidenceRecord, fan: Fan) -> Evi
         calibration,
         endpoint_identities: fan_endpoint_identities(),
         started_at: record.started_at,
+        custom_control_confirmed_at: record.state_transitions[0].timestamp,
         restoration_attempted_at: record.restoration_attempts[0].timestamp,
         restoration_confirmed_at: record.state_transitions.last().unwrap().timestamp,
         completed_at: record.completed_at,

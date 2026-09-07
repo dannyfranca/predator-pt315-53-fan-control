@@ -208,6 +208,7 @@ fn passing_publication_record(session: &ConservativeFanCalibration) -> EvidenceR
         calibration: session.evidence().unwrap().clone(),
         endpoint_identities: test_endpoint_identities(),
         started_at: record.started_at,
+        custom_control_confirmed_at: record.state_transitions[0].timestamp,
         restoration_attempted_at: record.restoration_attempts[0].timestamp,
         restoration_confirmed_at: record.state_transitions.last().unwrap().timestamp,
         completed_at: record.completed_at,
@@ -695,6 +696,7 @@ fn completed_run_builds_calibration_specific_evidence_without_a_fake_workload() 
         calibration: session.evidence().unwrap().clone(),
         endpoint_identities: test_endpoint_identities(),
         started_at: fixture.started_at,
+        custom_control_confirmed_at: fixture.state_transitions[0].timestamp,
         restoration_attempted_at,
         restoration_confirmed_at,
         completed_at: fixture.completed_at,
@@ -706,6 +708,10 @@ fn completed_run_builds_calibration_specific_evidence_without_a_fake_workload() 
     assert!(record.samples.is_empty());
     assert!(record.thermal_summary.is_none());
     assert_eq!(record.calibration, [session.evidence().unwrap().clone()]);
+    assert_eq!(
+        record.state_transitions[0].timestamp,
+        fixture.state_transitions[0].timestamp
+    );
     record.validate().unwrap();
 }
 
