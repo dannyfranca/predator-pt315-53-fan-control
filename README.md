@@ -308,6 +308,7 @@ kernel. The package's operator entrypoints, authority inputs, and state location
 - `/usr/bin/pt31553-fan-observer` (foreground human-presence and ambient-temperature companion);
 - `/etc/pt31553-fan-control/config.toml` (editable configuration);
 - `/usr/lib/pt31553-fan-control/compatibility.toml` (static declaration);
+- `/usr/lib/pt31553-fan-control/qualification-harness` (reviewed privileged hardware harness);
 - `/var/lib/pt31553-fan-control/` and `/var/lib/pt31553-fan-control/evidence/`
   (empty protected state directories at install); and
 - `pt31553-fand.service` and `pt31553-fan-sleep-guard.service` (installed disabled).
@@ -1461,11 +1462,11 @@ the exact candidate identity and environmental limits before stage 2. Start
 each following stage only after the preceding evidence is complete, protected,
 and accepted. At every handoff, repeat the Auto boundary above.
 
-> **PACKAGING BLOCK:** this source revision exposes the complete qualification
-> coordinator but does not package its reviewed hardware harness. Do not run live
-> qualification with an improvised harness. Command contracts are in
-> [`qualification/preflight-baseline-harness.md`](qualification/preflight-baseline-harness.md)
-> and the linked lifecycle/endurance protocol documents.
+The package installs the reviewed, digest-pinned hardware harness at
+`/usr/lib/pt31553-fan-control/qualification-harness`. Machine-specific protected
+manifests remain operator-provisioned. Command contracts are in
+[`qualification/preflight-baseline-harness.md`](qualification/preflight-baseline-harness.md)
+and the linked lifecycle/endurance protocol documents.
 
 The installed qualification and post-qualification CLI contracts are:
 
@@ -1495,9 +1496,9 @@ evidence session directory. Although it performs no fan write, it requires UID
 0 to read protected inputs and publish protected evidence. After approval, the
 executable form is
 `sudo /usr/bin/pt31553-fan-qualify preflight --manifest FILE --harness FILE`. End by repeating
-the read-only preflight form of the Auto boundary. Until the reviewed harness is
-packaged, do not replace it with ad-hoc shell scripts or direct sysfs writes,
-or treat source tests as hardware evidence.
+the read-only preflight form of the Auto boundary. Use only the packaged harness;
+do not replace it with ad-hoc shell scripts or direct sysfs writes, or treat
+source tests as hardware evidence.
 
 ### 3. Record Firmware Auto baselines
 
@@ -1628,16 +1629,14 @@ the machine.
 The final run is 60 minutes total with two fixed load/idle cycles and one
 AC/battery/AC transition: AC load 15 minutes, AC idle 10, battery load 10,
 battery idle 5, AC load 10, then AC idle 10. Run it only after a fresh Auto
-boundary. The controller package intentionally does not install a
-machine-specific harness or either manifest. A reviewer must provision the
-digest-pinned harness and root-owned manifests at the exact paths below from
-the documented protocol; until then this stage is blocked. The executable
-itself is present in the current package:
+boundary. The controller package installs the reviewed harness but intentionally
+does not install either machine-specific manifest. A reviewer must provision
+the root-owned manifests at the exact paths below from the documented protocol:
 
 ```sh
 sudo /usr/bin/pt31553-fan-qualify supervised-endurance \
   --manifest /etc/pt31553-fan-control/endurance-plan.json \
-  --harness /usr/lib/pt31553-fan-control/endurance-harness \
+  --harness /usr/lib/pt31553-fan-control/qualification-harness \
   --observer-approval I-AM-PHYSICALLY-OBSERVING \
   --evidence-output \
     /var/lib/pt31553-fan-control/evidence/supervised-endurance.json \
@@ -1843,8 +1842,8 @@ requalification.
 > Do not execute them manually, synthesize `AbbreviatedRecheckResults`, or reuse
 > the old record. Until a later package supplies those reviewed entrypoints, a
 > same-code rebuild stays disabled and must use the full qualification path.
-> The full path uses the current qualification executable, but remains blocked
-> until its reviewed external harness and manifests are provisioned. No
+> The full path uses the current qualification executable and packaged harness,
+> but remains blocked until its machine-specific manifests are provisioned. No
 > successor is authorized until one exact path completes.
 
 Keep the successor disabled throughout either requalification path. A future
@@ -1936,8 +1935,8 @@ kernel_cert_sha256='REPLACE_WITH_KERNEL_CERT_SHA256'
 archive_parent=/var/lib/pt31553-fan-control/rollback
 last_qualified=$archive_parent/pt31553-last-qualified-7.1.8-1
 previous_qualified=
-controller_package=/absolute/path/to/pt31553-fan-control-0.1.0-13-x86_64.pkg.tar.zst
-controller_package_signature=/absolute/path/to/pt31553-fan-control-0.1.0-13-x86_64.pkg.tar.zst.sig
+controller_package=/absolute/path/to/pt31553-fan-control-0.1.0-14-x86_64.pkg.tar.zst
+controller_package_signature=/absolute/path/to/pt31553-fan-control-0.1.0-14-x86_64.pkg.tar.zst.sig
 controller_package_sha256='REPLACE_WITH_CONTROLLER_PACKAGE_SHA256'
 qualification_record=/var/lib/pt31553-fan-control/qualification.json
 endurance_evidence=/var/lib/pt31553-fan-control/evidence/supervised-endurance.json

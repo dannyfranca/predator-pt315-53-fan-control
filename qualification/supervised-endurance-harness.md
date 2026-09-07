@@ -24,7 +24,7 @@ Invocation:
 ```text
 fan-control-qualify supervised-endurance \
   --manifest /etc/pt31553-fan-control/endurance-plan.json \
-  --harness /usr/lib/pt31553-fan-control/endurance-harness \
+  --harness /usr/lib/pt31553-fan-control/qualification-harness \
   --observer-approval I-AM-PHYSICALLY-OBSERVING \
   --evidence-output /var/lib/pt31553-fan-control/evidence/endurance.json
 ```

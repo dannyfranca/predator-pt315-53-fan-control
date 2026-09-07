@@ -10,8 +10,8 @@ use fan_control_core::{
     QUALIFICATION_CGROUP_PREFIX, parse_compatibility_v1, parse_config_v1, validate_config_v1,
 };
 
-const SOURCE_COMMIT: &str = "6df66e2ecb2ecf45cd8b4eb3955762d03f26563c";
-const SOURCE_SHA256: &str = "1616992a0374664455f230e7d1d496b59339b38e2eb744dbc4d366f8754f85ce";
+const SOURCE_COMMIT: &str = "fb100b5de498ab09f91c2afda4b703e8a63cef51";
+const SOURCE_SHA256: &str = "2cf39ed57f2e24ed3e4969ceb619e2085b4b2b8df709c875ece55d325bbd659e";
 const README: &str = include_str!("../../../README.md");
 const SKILL: &str = include_str!("../../../skills/predator-fan-control/SKILL.md");
 const OPERATIONS: &str =
@@ -71,6 +71,7 @@ fn stage_package_fixture() -> (PathBuf, PathBuf) {
         "fan-control-restore",
         "fan-control-qualify",
         "fan-control-observer",
+        "fan-control-harness",
     ] {
         let path = source_root.join("target/release").join(binary);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -511,6 +512,10 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
         ("usr/bin/pt31553-fan-restore", "fan-control-restore"),
         ("usr/bin/pt31553-fan-qualify", "fan-control-qualify"),
         ("usr/bin/pt31553-fan-observer", "fan-control-observer"),
+        (
+            "usr/lib/pt31553-fan-control/qualification-harness",
+            "fan-control-harness",
+        ),
     ] {
         assert_eq!(mode(pkgdir.join(binary)), 0o755);
         assert_eq!(
@@ -687,6 +692,7 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
             "usr/bin/pt31553-fan-restore",
             "usr/bin/pt31553-fand",
             "usr/lib/pt31553-fan-control/compatibility.toml",
+            "usr/lib/pt31553-fan-control/qualification-harness",
             "usr/lib/pt31553-fan-control/workloads/VERSION",
             "usr/lib/pt31553-fan-control/workloads/combined",
             "usr/lib/pt31553-fan-control/workloads/common",
@@ -783,6 +789,10 @@ fn operator_documentation_matches_the_packaged_surface() {
         (
             "usr/lib/pt31553-fan-control/compatibility.toml",
             "/usr/lib/pt31553-fan-control/compatibility.toml",
+        ),
+        (
+            "usr/lib/pt31553-fan-control/qualification-harness",
+            "/usr/lib/pt31553-fan-control/qualification-harness",
         ),
         (
             "var/lib/pt31553-fan-control",

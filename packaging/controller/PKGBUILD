@@ -2,7 +2,7 @@
 
 pkgname=pt31553-fan-control
 pkgver=0.1.0
-pkgrel=13
+pkgrel=14
 pkgdesc='Fail-closed PT315-53 fan controller and qualification suite'
 arch=('x86_64')
 url='https://github.com/dannyfranca/predator-pt315-53-fan-control'
@@ -11,12 +11,12 @@ depends=('bash' 'coreutils' 'gcc-libs' 'glibc' 'glmark2' 'kmod' 'nvidia-utils' '
 makedepends=('cargo')
 options=('!debug' '!lto')
 backup=('etc/pt31553-fan-control/config.toml')
-_commit='6df66e2ecb2ecf45cd8b4eb3955762d03f26563c'
+_commit='fb100b5de498ab09f91c2afda4b703e8a63cef51'
 source=(
   "$pkgname-$pkgver.tar.gz::$url/archive/$_commit.tar.gz"
 )
 sha256sums=(
-  '1616992a0374664455f230e7d1d496b59339b38e2eb744dbc4d366f8754f85ce'
+  '2cf39ed57f2e24ed3e4969ceb619e2085b4b2b8df709c875ece55d325bbd659e'
 )
 
 prepare() {
@@ -89,6 +89,8 @@ package() {
     "$pkgdir/usr/bin/pt31553-fan-qualify"
   install -Dm755 "$source_root/target/release/fan-control-observer" \
     "$pkgdir/usr/bin/pt31553-fan-observer"
+  install -Dm755 "$source_root/target/release/fan-control-harness" \
+    "$pkgdir/usr/lib/pt31553-fan-control/qualification-harness"
 
   install -Dm644 "$source_root/systemd/pt31553-fand.service" \
     "$pkgdir/usr/lib/systemd/system/pt31553-fand.service"

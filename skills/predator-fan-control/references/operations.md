@@ -39,6 +39,7 @@ The package installs these operator entrypoints and creates these state location
 - `/usr/bin/pt31553-fan-observer` (foreground human-presence and measured-ambient companion);
 - `/etc/pt31553-fan-control/config.toml`;
 - `/usr/lib/pt31553-fan-control/compatibility.toml`;
+- `/usr/lib/pt31553-fan-control/qualification-harness`;
 - `/var/lib/pt31553-fan-control/` and
   `/var/lib/pt31553-fan-control/evidence/`; a successful
   supervised-endurance run later creates the authority record at
@@ -63,10 +64,10 @@ disabled/inactive.
 
 ## Qualify under supervision
 
-The package includes the qualification executable and fixed workloads, but no
-machine-specific harness or manifests. A reviewed digest-pinned harness and
-root-owned manifests must be provisioned from the repository protocols. Never
-improvise them. Run stages only in README order:
+The package includes the qualification executable, reviewed harness, and fixed
+workloads, but no machine-specific manifests. Provision root-owned manifests
+from the repository protocols. Never improvise the harness. Run stages only in
+README order:
 
 1. `sudo /usr/bin/pt31553-fan-qualify preflight --manifest FILE --harness FILE`;
 2. `sudo /usr/bin/pt31553-fan-qualify firmware-auto-baselines --manifest FILE --harness FILE`;
