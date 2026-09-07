@@ -57,10 +57,19 @@ pub struct SystemNvidiaQualificationSample {
     pub thermal_throttling: bool,
 }
 
+/// One complete qualification telemetry read whose NVIDIA fields came from one query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SystemQualificationTelemetrySample {
+    pub physical: SystemQualificationSample,
+    pub nvidia: SystemNvidiaQualificationSample,
+}
+
 /// Samples one explicitly selected NVIDIA device with the production identity parser and timeout.
 pub fn sample_system_nvidia(selector: &NvidiaGpuSelector) -> Result<NvmlGpuSample, NvmlError> {
     NvidiaSmi {
         selector: selector.clone(),
+        qualification_mode: false,
+        qualification_sample: None,
     }
     .sample_by_identity_with_timeout(selector, Duration::from_secs(1))
 }
@@ -68,6 +77,13 @@ pub fn sample_system_nvidia(selector: &NvidiaGpuSelector) -> Result<NvmlGpuSampl
 /// Samples qualification-only NVIDIA utilization and thermal state for one explicit device.
 pub fn sample_system_nvidia_qualification(
     selector: &NvidiaGpuSelector,
+) -> Result<SystemNvidiaQualificationSample, StartupError> {
+    sample_system_nvidia_qualification_with_timeout(selector, Duration::from_secs(1))
+}
+
+fn sample_system_nvidia_qualification_with_timeout(
+    selector: &NvidiaGpuSelector,
+    timeout: Duration,
 ) -> Result<SystemNvidiaQualificationSample, StartupError> {
     let id = format!("--id={}", selector.value());
     let output = run_nvidia_smi_command(
@@ -77,7 +93,7 @@ pub fn sample_system_nvidia_qualification(
             "--query-gpu=uuid,pci.bus_id,temperature.gpu,utilization.gpu,clocks_event_reasons.sw_thermal_slowdown",
             "--format=csv,noheader,nounits",
         ],
-        Duration::from_secs(1),
+        timeout,
     )
     .map_err(StartupError::Device)?;
     parse_nvidia_qualification_output(&output, selector).map_err(StartupError::Device)
@@ -100,6 +116,30 @@ pub fn capture_system_qualification_sample(
     };
     let mut clock = SystemOwnershipPlatform::new();
     capture_qualification_sample_with(&mut sources, &mut clock)
+}
+
+/// Captures CPU, GPU, power, utilization, and throttle evidence with one NVIDIA process.
+pub fn capture_system_qualification_telemetry_sample(
+    selector: &NvidiaGpuSelector,
+) -> Result<SystemQualificationTelemetrySample, StartupError> {
+    let mut platform = SystemOwnershipPlatform::new();
+    let coretemp = discover_coretemp(&mut platform, Path::new(HWMON_ROOT))
+        .map_err(|error| StartupError::Device(error.to_string()))?;
+    let nvidia = NvidiaSmi::for_qualification(selector);
+    let power = BoundExternalPower::discover(&mut platform, Path::new(POWER_SUPPLY_ROOT))?;
+    let mut sources = SystemSampleSources {
+        platform,
+        coretemp,
+        nvidia,
+        power,
+    };
+    let mut clock = SystemOwnershipPlatform::new();
+    let physical = capture_qualification_sample_with(&mut sources, &mut clock)?;
+    let nvidia =
+        sources.nvidia.qualification_sample.take().ok_or_else(|| {
+            StartupError::Sampling("NVIDIA qualification sample is absent".into())
+        })?;
+    Ok(SystemQualificationTelemetrySample { physical, nvidia })
 }
 
 fn capture_qualification_sample_with(
@@ -974,9 +1014,19 @@ impl BoundExternalPower {
 #[derive(Debug)]
 struct NvidiaSmi {
     selector: NvidiaGpuSelector,
+    qualification_mode: bool,
+    qualification_sample: Option<SystemNvidiaQualificationSample>,
 }
 
 impl NvidiaSmi {
+    fn for_qualification(selector: &NvidiaGpuSelector) -> Self {
+        Self {
+            selector: selector.clone(),
+            qualification_mode: true,
+            qualification_sample: None,
+        }
+    }
+
     fn discover() -> Result<Self, StartupError> {
         let output = run_nvidia_smi(&[
             "--query-gpu=uuid,pci.bus_id,temperature.gpu",
@@ -1014,7 +1064,11 @@ impl NvidiaSmi {
         let sample = parse_nvidia_smi_row(rows[0])?;
         let selector = NvidiaGpuSelector::uuid(sample.uuid())
             .map_err(|error| StartupError::Device(error.to_string()))?;
-        Ok(Self { selector })
+        Ok(Self {
+            selector,
+            qualification_mode: false,
+            qualification_sample: None,
+        })
     }
 
     fn rediscover_with_timeout(
@@ -1040,6 +1094,15 @@ impl NvidiaSmi {
         selector: &NvidiaGpuSelector,
         timeout: Duration,
     ) -> Result<NvmlGpuSample, NvmlError> {
+        if self.qualification_mode {
+            let sample = sample_system_nvidia_qualification_with_timeout(selector, timeout)
+                .map_err(|error| {
+                    NvmlError::new(NvmlErrorKind::LibraryFailure, error.to_string())
+                })?;
+            let gpu = sample.gpu.clone();
+            self.qualification_sample = Some(sample);
+            return Ok(gpu);
+        }
         let id = format!("--id={}", selector.value());
         let output = run_nvidia_smi_command(
             Path::new("nvidia-smi"),
@@ -1094,6 +1157,8 @@ impl NvidiaSmi {
         }
         Ok(Self {
             selector: expected.clone(),
+            qualification_mode: false,
+            qualification_sample: None,
         })
     }
 }

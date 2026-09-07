@@ -11,11 +11,14 @@ use std::{
 
 use fan_control_core::{
     EvidenceProfile, EvidenceTimestamp, ExternalPower, NvidiaGpuSelector, NvmlErrorKind,
-    QUALIFICATION_CGROUP_PREFIX, SUPERVISED_ENDURANCE_WORKLOAD_ID, WorkloadEvidence,
+    QUALIFICATION_CGROUP_PREFIX, SUPERVISED_ENDURANCE_WORKLOAD_ID, TelemetrySampleEvidence,
+    WorkloadEvidence,
 };
 use fan_control_daemon::{capture_system_qualification_sample, sample_system_nvidia};
 use fan_control_observer::{DEFAULT_SOCKET_PATH, ObserverConfirmation, query_protected_observer};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+mod telemetry;
 
 const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 
@@ -44,6 +47,7 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
         "capture-baseline-starting-conditions" => {
             capture_baseline_starting_conditions(read_request()?, deadline)
         }
+        "capture-baseline-observation" => capture_baseline_observation(read_request()?, deadline),
         "confirm-endurance-observer" => confirm_endurance_observer(read_request()?, deadline),
         "start-baseline-workload" => {
             start_workload(read_request()?, deadline, StartResponse::Plain)
@@ -119,6 +123,8 @@ struct BaselineStartingResponse {
     cpu_millicelsius: i32,
     gpu_millicelsius: i32,
     power_profile: EvidenceProfile,
+    cpu_time_snapshot: telemetry::CpuTimeSnapshot,
+    cpu_throttle_snapshot: telemetry::CpuThrottleSnapshot,
 }
 
 fn capture_baseline_starting_conditions(
@@ -129,6 +135,7 @@ fn capture_baseline_starting_conditions(
     require_observer(deadline)?;
     let sample = capture_system_qualification_sample(&selector)?;
     let observer = require_observer(deadline)?;
+    let (cpu_time_snapshot, cpu_throttle_snapshot) = telemetry::starting_snapshots()?;
     let response = BaselineStartingResponse {
         captured_at: evidence_timestamp()?,
         nvidia_gpu_uuid: selector.value().to_owned(),
@@ -136,9 +143,33 @@ fn capture_baseline_starting_conditions(
         cpu_millicelsius: sample.cpu_millicelsius,
         gpu_millicelsius: sample.gpu_millicelsius,
         power_profile: evidence_profile(sample.external_power)?,
+        cpu_time_snapshot,
+        cpu_throttle_snapshot,
     };
     require_before_deadline(deadline)?;
     write_response(&response)
+}
+
+#[derive(Serialize)]
+struct BaselineObservationResponse {
+    nvidia_gpu_uuid: String,
+    sample: TelemetrySampleEvidence,
+    cpu_time_snapshot: telemetry::CpuTimeSnapshot,
+    cpu_throttle_snapshot: telemetry::CpuThrottleSnapshot,
+}
+
+fn capture_baseline_observation(
+    request: telemetry::TelemetryRequest,
+    deadline: u64,
+) -> Result<(), Box<dyn Error>> {
+    let capture = telemetry::capture(request, deadline)?;
+    require_before_deadline(deadline)?;
+    write_response(&BaselineObservationResponse {
+        nvidia_gpu_uuid: capture.nvidia_gpu_uuid,
+        sample: capture.sample,
+        cpu_time_snapshot: capture.cpu_time_snapshot,
+        cpu_throttle_snapshot: capture.cpu_throttle_snapshot,
+    })
 }
 
 #[derive(Deserialize)]

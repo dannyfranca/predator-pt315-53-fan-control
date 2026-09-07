@@ -55,11 +55,15 @@ protected executable must support:
 - `sample-nvidia`: request `{"uuid":"..."}`; return `uuid`, `pci_bus_id`, and
   `temperature_celsius`, or `error_kind` plus `error`. `reset-required` is a blocking result.
 - `capture-baseline-starting-conditions`: request the manifest's exact `nvidia_gpu_uuid`; return
-  that same `nvidia_gpu_uuid`, `captured_at`, ambient/CPU/GPU temperatures, and `power_profile`.
+  that same `nvidia_gpu_uuid`, `captured_at`, ambient/CPU/GPU temperatures, `power_profile`, an
+  aggregate `/proc/stat` CPU-time snapshot, and the complete CPU thermal-throttle counter snapshot.
 - `start-baseline-workload`: start only the exact requested packaged workload and return its
   `EvidenceTimestamp`.
 - `capture-baseline-observation`: request the manifest's exact `nvidia_gpu_uuid`; return that same
-  identity with `sample`, `system_stable`, `kernel_faults`, and `nvidia_faults`.
+  identity with a complete `sample`, the current CPU-time snapshot, and the current complete CPU
+  thermal-throttle counter snapshot. Each request includes the preceding CPU-time snapshot and the
+  stage-start throttle snapshot. The root coordinator, not the sandbox, merges kernel and NVIDIA
+  fault observations from `/dev/kmsg` into `system_stable`, `kernel_faults`, and `nvidia_faults`.
 - `stop-baseline-workload`: confirm the workload is absent; return any JSON value.
 - `contain-baseline-workload`: independently kill/verify the fixed workload after a failed or timed
   out stop; return any JSON value only after it is absent.

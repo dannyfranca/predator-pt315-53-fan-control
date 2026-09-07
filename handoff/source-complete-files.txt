@@ -124,12 +124,14 @@ crates/fan-control-daemon/tests/sleep_guard.rs
 crates/fan-control-daemon/tests/startup.rs
 crates/fan-control-harness/Cargo.toml
 crates/fan-control-harness/src/main.rs
+crates/fan-control-harness/src/telemetry.rs
 crates/fan-control-observer/Cargo.toml
 crates/fan-control-observer/src/lib.rs
 crates/fan-control-observer/src/main.rs
 crates/fan-control-qualify/Cargo.toml
 crates/fan-control-qualify/src/lib.rs
 crates/fan-control-qualify/src/main.rs
+crates/fan-control-qualify/src/system_health.rs
 crates/fan-control-qualify/src/system_preflight.rs
 crates/fan-control-qualify/tests/promotion.rs
 crates/fan-control-qualify/tests/qualification_stages.rs

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     error::Error,
     ffi::{CString, OsString},
@@ -51,8 +52,10 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 use fan_control_core::PlatformErrorKind;
 
+mod system_health;
 mod system_preflight;
 
+use system_health::SystemHealthMonitor;
 use system_preflight::SystemPreflightEnvironment;
 
 static NEXT_HARNESS_CGROUP_ID: AtomicU64 = AtomicU64::new(0);
@@ -136,6 +139,8 @@ struct HarnessBaselineStartingConditions {
     cpu_millicelsius: i32,
     gpu_millicelsius: i32,
     power_profile: EvidenceProfile,
+    cpu_time_snapshot: HarnessCpuTimeSnapshot,
+    cpu_throttle_snapshot: HarnessCpuThrottleSnapshot,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,9 +148,21 @@ struct HarnessBaselineStartingConditions {
 struct HarnessBaselineObservation {
     nvidia_gpu_uuid: String,
     sample: TelemetrySampleEvidence,
-    system_stable: bool,
-    kernel_faults: Vec<String>,
-    nvidia_faults: Vec<String>,
+    cpu_time_snapshot: HarnessCpuTimeSnapshot,
+    cpu_throttle_snapshot: HarnessCpuThrottleSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarnessCpuTimeSnapshot {
+    idle: u64,
+    total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarnessCpuThrottleSnapshot {
+    counters: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2156,6 +2173,9 @@ struct HarnessEnvironment {
     nvidia_gpu_uuid: Option<String>,
     privilege: HarnessPrivilege,
     shutdown: Option<ShutdownRequest>,
+    previous_cpu_time: Option<HarnessCpuTimeSnapshot>,
+    starting_cpu_throttles: Option<HarnessCpuThrottleSnapshot>,
+    system_health: Option<SystemHealthMonitor>,
 }
 
 #[derive(Clone, Copy)]
@@ -2175,6 +2195,9 @@ impl HarnessEnvironment {
             nvidia_gpu_uuid: None,
             privilege: HarnessPrivilege::ReadOnlySandbox,
             shutdown: None,
+            previous_cpu_time: None,
+            starting_cpu_throttles: None,
+            system_health: None,
         })
     }
 
@@ -2187,6 +2210,69 @@ impl HarnessEnvironment {
 
     fn select_nvidia_gpu(&mut self, uuid: String) {
         self.nvidia_gpu_uuid = Some(uuid);
+    }
+
+    fn start_observation_window(
+        &mut self,
+        cpu_time: HarnessCpuTimeSnapshot,
+        cpu_throttles: HarnessCpuThrottleSnapshot,
+    ) -> Result<(), String> {
+        if cpu_throttles.counters.is_empty() {
+            return Err("qualification harness returned no CPU throttle counters".into());
+        }
+        self.system_health = Some(SystemHealthMonitor::start()?);
+        self.previous_cpu_time = Some(cpu_time);
+        self.starting_cpu_throttles = Some(cpu_throttles);
+        Ok(())
+    }
+
+    fn telemetry_request(&self) -> Result<Value, String> {
+        Ok(json!({
+            "nvidia_gpu_uuid": self.selected_nvidia_gpu()?,
+            "previous_cpu_time": self.previous_cpu_time
+                .ok_or("qualification CPU utilization window is not initialized")?,
+            "starting_cpu_throttles": self.starting_cpu_throttles
+                .as_ref()
+                .ok_or("qualification CPU throttle window is not initialized")?,
+        }))
+    }
+
+    fn finish_telemetry_capture(
+        &mut self,
+        cpu_time: HarnessCpuTimeSnapshot,
+        cpu_throttles: &HarnessCpuThrottleSnapshot,
+        deadline: u64,
+    ) -> Result<system_health::SystemHealthObservation, String> {
+        let previous = self
+            .previous_cpu_time
+            .ok_or("qualification CPU utilization window is not initialized")?;
+        if cpu_time.total <= previous.total || cpu_time.idle < previous.idle {
+            return Err("qualification CPU time counters did not advance monotonically".into());
+        }
+        let starting = self
+            .starting_cpu_throttles
+            .as_ref()
+            .ok_or("qualification CPU throttle window is not initialized")?;
+        if starting.counters.keys().ne(cpu_throttles.counters.keys())
+            || starting.counters.iter().any(|(path, value)| {
+                cpu_throttles
+                    .counters
+                    .get(path)
+                    .is_none_or(|now| now < value)
+            })
+        {
+            return Err("qualification CPU throttle counters changed identity or regressed".into());
+        }
+        let observation = self
+            .system_health
+            .as_mut()
+            .ok_or("root system-health observation is not initialized")?
+            .observe()?;
+        if self.now_millis() > deadline {
+            return Err("root system-health observation exceeded the sample deadline".into());
+        }
+        self.previous_cpu_time = Some(cpu_time);
+        Ok(observation)
     }
 
     fn cleanup_containment(&mut self) -> std::io::Result<()> {
@@ -2782,7 +2868,7 @@ impl FirmwareAutoBaselineEnvironment for HarnessEnvironment {
     fn capture_starting_conditions(
         &mut self,
     ) -> Result<CapturedBaselineStartingConditions, String> {
-        let nvidia_gpu_uuid = self.selected_nvidia_gpu()?;
+        let nvidia_gpu_uuid = self.selected_nvidia_gpu()?.to_owned();
         let response: HarnessBaselineStartingConditions = self.invoke(
             "capture-baseline-starting-conditions",
             json!({ "nvidia_gpu_uuid": nvidia_gpu_uuid }),
@@ -2791,6 +2877,7 @@ impl FirmwareAutoBaselineEnvironment for HarnessEnvironment {
         if response.nvidia_gpu_uuid != nvidia_gpu_uuid {
             return Err("baseline starting conditions belong to a different NVIDIA GPU".into());
         }
+        self.start_observation_window(response.cpu_time_snapshot, response.cpu_throttle_snapshot)?;
         Ok(CapturedBaselineStartingConditions {
             conditions: BaselineStartingConditions {
                 ambient_millicelsius: response.ambient_millicelsius,
@@ -2826,20 +2913,26 @@ impl FirmwareAutoBaselineEnvironment for HarnessEnvironment {
         &mut self,
         deadline_monotonic_millis: u64,
     ) -> Result<BaselineObservation, String> {
-        let nvidia_gpu_uuid = self.selected_nvidia_gpu()?;
+        let nvidia_gpu_uuid = self.selected_nvidia_gpu()?.to_owned();
+        let request = self.telemetry_request()?;
         let response: HarnessBaselineObservation = self.invoke(
             "capture-baseline-observation",
-            json!({ "nvidia_gpu_uuid": nvidia_gpu_uuid }),
+            request,
             deadline_monotonic_millis,
         )?;
         if response.nvidia_gpu_uuid != nvidia_gpu_uuid {
             return Err("baseline observation belongs to a different NVIDIA GPU".into());
         }
+        let health = self.finish_telemetry_capture(
+            response.cpu_time_snapshot,
+            &response.cpu_throttle_snapshot,
+            deadline_monotonic_millis,
+        )?;
         Ok(BaselineObservation {
             sample: response.sample,
-            system_stable: response.system_stable,
-            kernel_faults: response.kernel_faults,
-            nvidia_faults: response.nvidia_faults,
+            system_stable: health.system_stable,
+            kernel_faults: health.kernel_faults,
+            nvidia_faults: health.nvidia_faults,
         })
     }
 
@@ -3602,7 +3695,7 @@ esac"#,
         let script = TestHarness::new(
             r#"request=$(cat)
 case "$request" in *GPU-selected*) ;; *) exit 9 ;; esac
-printf '%s' '{"captured_at":{"monotonic_millis":1,"wall_unix_millis":1},"nvidia_gpu_uuid":"GPU-other","ambient_millicelsius":24000,"cpu_millicelsius":42000,"gpu_millicelsius":39000,"power_profile":"ac"}'"#,
+printf '%s' '{"captured_at":{"monotonic_millis":1,"wall_unix_millis":1},"nvidia_gpu_uuid":"GPU-other","ambient_millicelsius":24000,"cpu_millicelsius":42000,"gpu_millicelsius":39000,"power_profile":"ac","cpu_time_snapshot":{"idle":10,"total":20},"cpu_throttle_snapshot":{"counters":{"cpu0/core_throttle_count":1}}}'"#,
         );
         let mut harness = HarnessEnvironment::new(script.path.clone()).unwrap();
         harness.select_nvidia_gpu("GPU-selected".into());
