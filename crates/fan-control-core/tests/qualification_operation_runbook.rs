@@ -92,11 +92,12 @@ fn qualification_ladder_and_abort_boundary_are_explicit_and_ordered() {
     assert!(runbook.contains("An abort performs steps 1 through 4"));
     assert!(runbook.contains("A successful handoff advances only after"));
     assert!(normalized.contains("If both fans cannot be confirmed in Auto immediately, shut down"));
-    assert!(runbook.contains("PACKAGING BLOCK"));
-    assert!(runbook.contains("this source revision exposes the complete qualification"));
-    assert!(runbook.contains("coordinator but does not package its reviewed hardware harness"));
-    assert!(runbook.contains("reviewed hardware"));
-    assert!(runbook.contains("qualification with an improvised harness"));
+    assert!(runbook.contains("The package installs the reviewed, digest-pinned hardware harness"));
+    assert!(
+        normalized.contains("Machine-specific protected manifests remain operator-provisioned")
+    );
+    assert!(runbook.contains("reviewed candidate"));
+    assert!(runbook.contains("do not improvise a harness"));
     assert!(runbook.contains("do not replace it with ad-hoc shell scripts"));
     assert!(runbook.contains("direct sysfs writes"));
     for subcommand in [

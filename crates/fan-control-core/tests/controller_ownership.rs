@@ -167,6 +167,56 @@ fn ownership_releases_only_after_restoration_writes_and_confirmed_readbacks() {
 }
 
 #[test]
+fn already_safe_controller_can_be_admitted_and_released_without_fan_writes() {
+    let (mut platform, device) = fixture("2\n", "2\n");
+    let marker = platform.operations().len();
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+
+    ownership
+        .confirm_firmware_auto_without_writes(&device)
+        .unwrap();
+    ownership.release().unwrap();
+
+    assert!(
+        platform.operations()[marker..]
+            .iter()
+            .all(|operation| !matches!(operation, PlatformOperation::Write { .. }))
+    );
+}
+
+#[test]
+fn read_only_admission_rejects_custom_mode_and_retains_ownership() {
+    let (mut daemon, device) = fixture("2\n", "1\n");
+    let mut recovery = FakePlatform::with_runtime_lock_backend(daemon.runtime_lock_backend());
+    let marker = daemon.operations().len();
+    let mut ownership = acquire_controller_ownership(&mut daemon).unwrap();
+
+    let error = ownership
+        .confirm_firmware_auto_without_writes(&device)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        fan_control_core::FirmwareAutoConfirmationError::UnexpectedMode {
+            fan: fan_control_core::Fan::Gpu,
+            ..
+        }
+    ));
+    assert!(
+        ownership.platform().operations()[marker..]
+            .iter()
+            .all(|operation| !matches!(operation, PlatformOperation::Write { .. }))
+    );
+    assert!(ownership.release().is_err());
+    assert!(matches!(
+        acquire_controller_ownership(&mut recovery),
+        Err(ControllerOwnershipError::RuntimeLock(
+            RuntimeLockError::AlreadyHeld
+        ))
+    ));
+}
+
+#[test]
 fn failed_restoration_retains_ownership_for_retry() {
     let (mut daemon, device) = fixture("1\n", "1\n");
     let mut recovery = FakePlatform::with_runtime_lock_backend(daemon.runtime_lock_backend());

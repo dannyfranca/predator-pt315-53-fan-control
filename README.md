@@ -1619,7 +1619,10 @@ sudo /usr/bin/pt31553-fan-qualify live-lifecycle \
 
 Create a root-owned, non-group/world-writable plan manifest containing the
 accepted preflight, seven baseline, twelve matched-run, two calibration, and
-live-lifecycle evidence paths plus the lowercase SHA-256 of the exact reviewed harness. The
+live-lifecycle evidence paths, the exact root-owned candidate protected-policy path, plus the
+lowercase SHA-256 of the exact reviewed harness. The policy bytes are executed by the persistent
+production controller with the measured calibrations during this run; they are not merely hashed
+as metadata. The
 root-owned executable endurance harness must
 implement only the protocol in
 [`qualification/supervised-endurance-harness.md`](qualification/supervised-endurance-harness.md).

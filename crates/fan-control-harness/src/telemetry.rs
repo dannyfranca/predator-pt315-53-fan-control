@@ -207,6 +207,10 @@ fn temperature_millicelsius(value: TemperatureCelsius) -> Result<i32, &'static s
     Ok(value as i32)
 }
 
+pub(crate) fn read_cpu_time_now() -> Result<CpuTimeSnapshot, Box<dyn Error>> {
+    read_cpu_time(Path::new(PROC_STAT))
+}
+
 fn read_cpu_time(path: &Path) -> Result<CpuTimeSnapshot, Box<dyn Error>> {
     parse_cpu_time(&fs::read_to_string(path)?)
 }
@@ -236,7 +240,7 @@ fn parse_cpu_time(source: &str) -> Result<CpuTimeSnapshot, Box<dyn Error>> {
     Ok(CpuTimeSnapshot { idle, total })
 }
 
-fn utilization_between(
+pub(crate) fn utilization_between(
     previous: CpuTimeSnapshot,
     current: CpuTimeSnapshot,
 ) -> Result<u16, Box<dyn Error>> {

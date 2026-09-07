@@ -9,20 +9,25 @@ use std::{
 
 use fan_control_core::{
     CalibrationLevelObservation, CalibrationReadbackSample, CalibrationStep,
-    CompletedFanCalibrationRun, ConservativeFanCalibration, ControllerOwnership, EvidenceFan,
-    EvidenceTimestamp, Fan, FanCalibrationEvidence, FanCommandEvidence, FanControlField,
-    FanEndpointIdentitiesEvidence, FanReadbackEvidence, FanReadbackField, FanReadbackPhase,
-    HealthyControl, MatchedWorkloadFanRestoration, MatchedWorkloadObservation, NvidiaGpuSelector,
-    ObservationOutcome, QualificationArmedFanControl, QualificationEnvelopeIdentityV1,
-    RestorationOutcome, ShutdownRequest, SystemOwnershipPlatform, TerminationSignalHandlers,
-    ValidatedConfig, acquire_controller_ownership,
-    arm_both_fans_for_qualification_at_maximum_until, begin_qualification_control,
-    build_fan_calibration_record, calibration_level_is_settled,
+    CompletedFanCalibrationRun, ConservativeFanCalibration, ControllerOwnership,
+    EmergencyContainmentReport, EmergencyFanStatus, EvidenceExternalPower, EvidenceFan,
+    EvidenceProfile, EvidenceTimestamp, Fan, FanCalibrationEvidence, FanCommandEvidence,
+    FanControlField, FanEndpointIdentitiesEvidence, FanReadbackEvidence, FanReadbackField,
+    FanReadbackPhase, HealthyControl, MatchedWorkloadFanRestoration, MatchedWorkloadObservation,
+    NvidiaGpuSelector, ObservationOutcome, QualificationArmedFanControl,
+    QualificationEnvelopeIdentityV1, RestorationOutcome, SUPERVISED_ENDURANCE_SEGMENTS,
+    ShutdownRequest, SupervisedEnduranceFanContainment, SupervisedEnduranceLoad,
+    SupervisedEnduranceProcessStopConfirmation, SupervisedEnduranceSegmentConfirmation,
+    SystemOwnershipPlatform, TerminationSignalHandlers, ValidatedConfig,
+    acquire_controller_ownership, arm_both_fans_for_qualification_at_maximum_until,
+    begin_qualification_control, build_fan_calibration_record, calibration_level_is_settled,
     command_qualification_calibration_fan_before, observe_qualification_calibration_fan_before,
     observe_qualification_control_before, prepare_qualification_control_policy,
     qualification_control_monotonic_now, run_healthy_control_cycle,
 };
-use fan_control_daemon::{HWMON_ROOT, SystemSampleSources};
+use fan_control_daemon::{
+    HWMON_ROOT, SystemSampleSources, capture_system_qualification_telemetry_sample,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
@@ -80,6 +85,15 @@ struct BeginMatchedRequest {
     nvidia_gpu_uuid: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BeginSegmentRequest {
+    id: String,
+    power_profile: EvidenceProfile,
+    load: SupervisedEnduranceLoad,
+    duration_millis: u64,
+}
+
 #[derive(Debug, Serialize)]
 struct ConfirmationResponse {
     observer_present: bool,
@@ -114,9 +128,12 @@ struct CalibrationSession {
 struct MatchedSession {
     control: Option<HealthyControl>,
     config: ValidatedConfig,
+    selector: NvidiaGpuSelector,
     sources: SystemSampleSources,
     restoration: Option<RestorationEvidence>,
-    workload_started: bool,
+    maximum_containment: Option<EmergencyContainmentReport>,
+    workload_pid: Option<u32>,
+    service_stopped: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -171,7 +188,7 @@ pub(crate) fn serve() -> Result<(), Box<dyn Error>> {
     let identities = FanEndpointIdentitiesEvidence::from_device(&device)
         .ok_or("fan endpoint identities are incomplete")?;
     let execution = (|| {
-        restore_or_contain(&mut ownership, &device)?;
+        ownership.confirm_firmware_auto_without_writes(&device)?;
         let clock = MonotonicClockBridge::capture(&mut ownership)?;
         run_request_loop(&mut ownership, &device, &identities, clock, &shutdown)
     })();
@@ -333,8 +350,237 @@ fn dispatch(
             device,
             identities,
         ),
+        "confirm-endurance-observer" => confirm_endurance_observer(request.deadline),
+        "enter-custom-control" => enter_matched_custom_control(
+            decode(request.request)?,
+            request.deadline,
+            session,
+            ownership,
+            device,
+            shutdown,
+        ),
+        "begin-segment" => {
+            begin_endurance_segment(decode(request.request)?, request.deadline, session)
+        }
+        "start-workload" => {
+            start_endurance_workload(decode(request.request)?, request.deadline, session)
+        }
+        "capture-observation" => capture_endurance_observation(
+            decode(request.request)?,
+            request.deadline,
+            session,
+            ownership,
+            identities,
+            clock,
+        ),
+        "stop-workload" => stop_endurance_workload(request.deadline, session, false),
+        "contain-workload" | "force-contain-workload" => {
+            stop_endurance_workload(request.deadline, session, true)
+        }
+        "stop-service" | "contain-service" | "force-contain-service" => {
+            stop_endurance_service(request.deadline, session)
+        }
+        "restore-fan" => restore_matched_fan(
+            decode(request.request)?,
+            session,
+            ownership,
+            device,
+            identities,
+        ),
+        "contain-fan-maximum" => contain_endurance_fan(
+            decode(request.request)?,
+            request.deadline,
+            session,
+            ownership,
+            device,
+            identities,
+        ),
         operation => Err(format!("unsupported qualification server operation: {operation}").into()),
     }
+}
+
+fn confirm_endurance_observer(deadline: u64) -> Result<Value, Box<dyn Error>> {
+    let confirmation = require_observer(deadline)?;
+    encode(serde_json::json!({
+        "observer_present": confirmation.observer_present,
+        "confirmed": confirmation.confirmed,
+        "observed_at": EvidenceTimestamp {
+            monotonic_millis: confirmation.observed_at.monotonic_millis,
+            wall_unix_millis: confirmation.observed_at.wall_unix_millis,
+        },
+    }))
+}
+
+fn begin_endurance_segment(
+    request: BeginSegmentRequest,
+    deadline: u64,
+    session: &mut CalibrationSession,
+) -> Result<Value, Box<dyn Error>> {
+    validate_endurance_segment(&request)?;
+    require_observer(deadline)?;
+    let matched = active_matched_session(session)?;
+    if matched.service_stopped {
+        return Err("supervised endurance controller is stopped".into());
+    }
+    let previous_cpu_time = crate::telemetry::read_cpu_time_now()?;
+    if let Some(pid) = matched.workload_pid {
+        crate::signal_endurance_workload(pid, request.load, deadline)?;
+    }
+    let now = require_absolute_deadline(deadline)?;
+    const SETTLE_MILLIS: u64 = 200;
+    if deadline.saturating_sub(now) <= SETTLE_MILLIS {
+        return Err("supervised endurance segment has no settling window".into());
+    }
+    thread::sleep(Duration::from_millis(SETTLE_MILLIS));
+    let telemetry = capture_system_qualification_telemetry_sample(&matched.selector)?;
+    let current_cpu_time = crate::telemetry::read_cpu_time_now()?;
+    let cpu_utilization_basis_points =
+        crate::telemetry::utilization_between(previous_cpu_time, current_cpu_time)?;
+    let (external_power, selected_profile) = match telemetry.physical.external_power {
+        fan_control_core::ExternalPower::Connected => {
+            (EvidenceExternalPower::Ac, EvidenceProfile::Ac)
+        }
+        fan_control_core::ExternalPower::Disconnected => {
+            (EvidenceExternalPower::Battery, EvidenceProfile::Battery)
+        }
+        fan_control_core::ExternalPower::Unknown => {
+            return Err("external power state is unknown".into());
+        }
+    };
+    require_absolute_deadline(deadline)?;
+    encode(SupervisedEnduranceSegmentConfirmation {
+        observed_at: evidence_timestamp()?,
+        load: request.load,
+        external_power,
+        selected_profile,
+        cpu_utilization_basis_points,
+        gpu_utilization_basis_points: telemetry.nvidia.utilization_basis_points,
+    })
+}
+
+fn validate_endurance_segment(request: &BeginSegmentRequest) -> Result<(), Box<dyn Error>> {
+    let expected = SUPERVISED_ENDURANCE_SEGMENTS
+        .iter()
+        .find(|segment| segment.id == request.id)
+        .ok_or("unknown supervised endurance segment")?;
+    if expected.power_profile != request.power_profile
+        || expected.load != request.load
+        || expected.duration_millis != request.duration_millis
+    {
+        return Err("supervised endurance segment differs from the fixed schedule".into());
+    }
+    Ok(())
+}
+
+fn start_endurance_workload(
+    request: crate::StartWorkloadRequest,
+    deadline: u64,
+    session: &mut CalibrationSession,
+) -> Result<Value, Box<dyn Error>> {
+    let matched = active_matched_session(session)?;
+    if matched.service_stopped {
+        return Err("supervised endurance controller is stopped".into());
+    }
+    if matched.workload_pid.is_some() {
+        return Err("supervised endurance workload is already running".into());
+    }
+    let started = crate::start_workload_process(request, deadline, true)?;
+    matched.workload_pid = Some(started.pid);
+    encode(started.observed_at)
+}
+
+fn capture_endurance_observation(
+    request: crate::telemetry::TelemetryRequest,
+    deadline: u64,
+    session: &mut CalibrationSession,
+    ownership: &mut ControllerOwnership<'_, SystemOwnershipPlatform>,
+    identities: &FanEndpointIdentitiesEvidence,
+    clock: MonotonicClockBridge,
+) -> Result<Value, Box<dyn Error>> {
+    capture_matched_observation(request, deadline, session, ownership, identities, clock)
+}
+
+fn stop_endurance_workload(
+    deadline: u64,
+    session: &mut CalibrationSession,
+    force: bool,
+) -> Result<Value, Box<dyn Error>> {
+    let matched = session
+        .matched
+        .as_mut()
+        .ok_or("supervised endurance control has not started")?;
+    let observed_at = crate::stop_workload_process(
+        deadline,
+        if force {
+            crate::StopMode::Kill
+        } else {
+            crate::StopMode::Graceful
+        },
+    )?;
+    matched.workload_pid = None;
+    encode(SupervisedEnduranceProcessStopConfirmation {
+        observed_at,
+        process_identity: "/usr/lib/pt31553-fan-control/workloads/mixed".into(),
+        running: false,
+    })
+}
+
+fn stop_endurance_service(
+    deadline: u64,
+    session: &mut CalibrationSession,
+) -> Result<Value, Box<dyn Error>> {
+    require_absolute_deadline(deadline)?;
+    let matched = session
+        .matched
+        .as_mut()
+        .ok_or("supervised endurance control has not started")?;
+    if matched.workload_pid.is_some() {
+        return Err("cannot stop supervised endurance control before workload containment".into());
+    }
+    matched.service_stopped = true;
+    encode(SupervisedEnduranceProcessStopConfirmation {
+        observed_at: evidence_timestamp()?,
+        process_identity: "pt31553-fan-control.service".into(),
+        running: false,
+    })
+}
+
+fn contain_endurance_fan(
+    request: CalibrationRequest,
+    deadline: u64,
+    session: &mut CalibrationSession,
+    ownership: &mut ControllerOwnership<'_, SystemOwnershipPlatform>,
+    device: &fan_control_core::AcerHwmonDevice,
+    identities: &FanEndpointIdentitiesEvidence,
+) -> Result<Value, Box<dyn Error>> {
+    require_absolute_deadline(deadline)?;
+    let matched = session
+        .matched
+        .as_mut()
+        .ok_or("supervised endurance control has not started")?;
+    if matched.maximum_containment.is_none() {
+        matched.control.take();
+        matched.maximum_containment = Some(ownership.contain_custom_fans_at_maximum(device));
+    }
+    require_absolute_deadline(deadline)?;
+    let report = matched.maximum_containment.as_ref().expect("created above");
+    let (status, enable_identity, pwm_identity) = match request.fan {
+        EvidenceFan::Cpu => (report.cpu(), &identities.cpu_enable, &identities.cpu_pwm),
+        EvidenceFan::Gpu => (report.gpu(), &identities.gpu_enable, &identities.gpu_pwm),
+    };
+    let confirmed = matches!(status, EmergencyFanStatus::MaximumConfirmed);
+    encode(SupervisedEnduranceFanContainment {
+        enable_readback: confirmed.then_some(1),
+        pwm_write_succeeded: confirmed,
+        pwm_readback: confirmed.then_some(u32::from(u8::MAX)),
+        enable_endpoint_identity: enable_identity.clone(),
+        pwm_endpoint_identity: pwm_identity.clone(),
+        outcome: if confirmed {
+            RestorationOutcome::MaximumContainmentConfirmed
+        } else {
+            RestorationOutcome::ContainmentFailed
+        },
+    })
 }
 
 fn enter_matched_custom_control(
@@ -363,9 +609,12 @@ fn enter_matched_custom_control(
     session.matched = Some(MatchedSession {
         control: Some(control),
         config,
+        selector,
         sources,
         restoration: None,
-        workload_started: false,
+        maximum_containment: None,
+        workload_pid: None,
+        service_stopped: false,
     });
     require_observer(deadline)?;
     require_absolute_deadline(deadline)?;
@@ -381,14 +630,14 @@ fn start_matched_workload(
     session: &mut CalibrationSession,
 ) -> Result<Value, Box<dyn Error>> {
     let matched = active_matched_session(session)?;
-    if matched.workload_started {
+    if matched.workload_pid.is_some() {
         return Err("matched workload is already running".into());
     }
-    let started_at = crate::start_workload_process(request, deadline, true)?;
-    matched.workload_started = true;
+    let started = crate::start_workload_process(request, deadline, true)?;
+    matched.workload_pid = Some(started.pid);
     encode(serde_json::json!({
         "observer_present": true,
-        "started_at": started_at,
+        "started_at": started.observed_at,
     }))
 }
 
@@ -403,8 +652,11 @@ fn capture_matched_observation(
     require_observer(deadline)?;
     let local_deadline = clock.local_deadline(ownership, deadline)?;
     let matched = active_matched_session(session)?;
-    if !matched.workload_started {
+    if matched.workload_pid.is_none() {
         return Err("matched workload is not running".into());
+    }
+    if matched.service_stopped {
+        return Err("matched control service is stopped".into());
     }
     let control = matched
         .control
@@ -498,9 +750,9 @@ fn stop_matched_workload(
     session: &mut CalibrationSession,
 ) -> Result<Value, Box<dyn Error>> {
     let matched = active_matched_session(session)?;
-    if matched.workload_started {
+    if matched.workload_pid.is_some() {
         crate::stop_workload_process(deadline, crate::StopMode::Graceful)?;
-        matched.workload_started = false;
+        matched.workload_pid = None;
     }
     encode(ConfirmationResponse {
         observer_present: require_observer(deadline).is_ok(),
@@ -859,10 +1111,10 @@ fn restore_active_session(
                 Err(error) => failures.push(error.to_string()),
             }
         }
-        if matched.workload_started {
+        if matched.workload_pid.is_some() {
             let deadline = monotonic_millis()?.saturating_add(2_000);
             match crate::stop_workload_process(deadline, crate::StopMode::Kill) {
-                Ok(_) => matched.workload_started = false,
+                Ok(_) => matched.workload_pid = None,
                 Err(error) => failures.push(format!("workload containment failed: {error}")),
             }
         }
@@ -1083,5 +1335,23 @@ mod tests {
             selected_rpm: Some(3_000),
         });
         assert_eq!(sample.monotonic_millis, 100_250);
+    }
+
+    #[test]
+    fn endurance_segment_request_must_match_the_fixed_schedule_exactly() {
+        let segment = SUPERVISED_ENDURANCE_SEGMENTS[0];
+        let mut request = BeginSegmentRequest {
+            id: segment.id.into(),
+            power_profile: segment.power_profile,
+            load: segment.load,
+            duration_millis: segment.duration_millis,
+        };
+        validate_endurance_segment(&request).unwrap();
+
+        request.duration_millis -= 1;
+        assert!(validate_endurance_segment(&request).is_err());
+        request.duration_millis = segment.duration_millis;
+        request.id = "unrecognized".into();
+        assert!(validate_endurance_segment(&request).is_err());
     }
 }

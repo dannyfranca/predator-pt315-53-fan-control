@@ -144,8 +144,9 @@ pub use nvidia_gpu::{
 pub use output::{ExternalPower, FanOutputs, calculate_fan_outputs};
 pub use ownership::{
     ArmingReadySample, COMPETING_FAN_CONTROL_SERVICES, ControllerOwnership,
-    ControllerOwnershipError, ControllerReleaseError, OwnershipSampleReadiness, RUNTIME_LOCK_PATH,
-    SystemFirmwareAutoRecovery, acquire_controller_ownership,
+    ControllerOwnershipError, ControllerReleaseError, FirmwareAutoConfirmationError,
+    OwnershipSampleReadiness, RUNTIME_LOCK_PATH, SystemFirmwareAutoRecovery,
+    acquire_controller_ownership,
 };
 #[cfg(feature = "acceptance-fixture")]
 pub use platform::FakePlatformControl;

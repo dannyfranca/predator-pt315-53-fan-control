@@ -68,6 +68,7 @@ static TEST_HARNESS_INVOKE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 #[serde(deny_unknown_fields)]
 struct EndurancePlanManifest {
     qualification_harness_sha256: String,
+    protected_policy: PathBuf,
     preflight: PathBuf,
     baselines: Vec<PathBuf>,
     matched_workload_runs: Vec<PathBuf>,
@@ -320,6 +321,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let cpu_calibration = read_evidence(&manifest.cpu_calibration)?;
     let gpu_calibration = read_evidence(&manifest.gpu_calibration)?;
     let live_lifecycle = read_evidence(&manifest.live_lifecycle)?;
+    let protected_policy_source = read_protected_file(&manifest.protected_policy)?;
     let calibration_prerequisite_paths = std::iter::once(manifest.preflight.as_path())
         .chain(manifest.baselines.iter().map(PathBuf::as_path))
         .collect::<Vec<_>>();
@@ -398,6 +400,25 @@ fn run() -> Result<(), Box<dyn Error>> {
     let shutdown = ShutdownRequest::new();
     let _signal_handlers = TerminationSignalHandlers::install(shutdown.clone())?;
     let mut environment = HarnessEnvironment::new_control(arguments.harness, shutdown.clone())?;
+    let nvidia_gpu_uuid = preflight
+        .nvidia_gpu_uuid
+        .clone()
+        .ok_or("preflight evidence has no NVIDIA GPU identity")?;
+    environment.select_nvidia_gpu(nvidia_gpu_uuid);
+    environment.configure_qualification_control(
+        protected_policy_source,
+        preflight.qualification_envelope.clone(),
+        cpu_calibration
+            .calibration
+            .first()
+            .cloned()
+            .ok_or("CPU calibration record has no measured calibration")?,
+        gpu_calibration
+            .calibration
+            .first()
+            .cloned()
+            .ok_or("GPU calibration record has no measured calibration")?,
+    )?;
     confirm_endurance_fan_endpoints(&mut environment, &live_lifecycle)?;
     let report = run_supervised_endurance(&mut environment, &plan)?;
     if shutdown.is_requested() {
@@ -2823,6 +2844,19 @@ fn uses_persistent_control_session(operation: &str) -> bool {
             | "capture-matched-observation"
             | "stop-matched-workload"
             | "restore-matched-fan"
+            | "confirm-endurance-observer"
+            | "enter-custom-control"
+            | "begin-segment"
+            | "start-workload"
+            | "capture-observation"
+            | "stop-workload"
+            | "contain-workload"
+            | "force-contain-workload"
+            | "stop-service"
+            | "contain-service"
+            | "force-contain-service"
+            | "restore-fan"
+            | "contain-fan-maximum"
     )
 }
 
@@ -3420,7 +3454,11 @@ impl SupervisedEnduranceEnvironment for HarnessEnvironment {
     }
 
     fn enter_custom_control(&mut self, deadline: u64) -> Result<(), String> {
-        self.invoke::<Value>("enter-custom-control", json!({}), deadline)
+        let request = self
+            .qualification_control_request
+            .clone()
+            .ok_or("qualification control policy was not configured")?;
+        self.invoke::<Value>("enter-custom-control", request, deadline)
             .map(|_| ())
     }
 
@@ -3454,7 +3492,22 @@ impl SupervisedEnduranceEnvironment for HarnessEnvironment {
     }
 
     fn capture_observation(&mut self, deadline: u64) -> Result<MatchedWorkloadObservation, String> {
-        self.invoke("capture-observation", json!({}), deadline)
+        let request = self.telemetry_request()?;
+        let response: HarnessMatchedObservation =
+            self.invoke("capture-observation", request, deadline)?;
+        if !response.observer_present {
+            return Err("observer withdrew approval".into());
+        }
+        let health = self.finish_telemetry_capture(
+            response.cpu_time_snapshot,
+            &response.cpu_throttle_snapshot,
+            deadline,
+        )?;
+        let mut observation = response.observation;
+        observation.system_stable = health.system_stable;
+        observation.kernel_faults = health.kernel_faults;
+        observation.nvidia_faults = health.nvidia_faults;
+        Ok(observation)
     }
 
     fn stop_workload(
@@ -3669,6 +3722,25 @@ mod tests {
         legacy["qualification_record"] =
             "/var/lib/pt31553-fan-control/candidate-qualification.json".into();
         assert!(serde_json::from_value::<QualificationStagesManifest>(legacy).is_err());
+    }
+
+    #[test]
+    fn endurance_manifest_requires_the_exact_protected_policy_input() {
+        let manifest = serde_json::json!({
+            "qualification_harness_sha256": "a".repeat(64),
+            "protected_policy": "/var/lib/pt31553-fan-control/candidate-policy.toml",
+            "preflight": "/evidence/preflight.json",
+            "baselines": ["/evidence/baseline.json"],
+            "matched_workload_runs": ["/evidence/matched.json"],
+            "cpu_calibration": "/evidence/cpu-calibration.json",
+            "gpu_calibration": "/evidence/gpu-calibration.json",
+            "live_lifecycle": "/evidence/live-lifecycle.json"
+        });
+
+        serde_json::from_value::<EndurancePlanManifest>(manifest.clone()).unwrap();
+        let mut missing = manifest;
+        missing.as_object_mut().unwrap().remove("protected_policy");
+        assert!(serde_json::from_value::<EndurancePlanManifest>(missing).is_err());
     }
 
     #[test]
@@ -3916,13 +3988,25 @@ printf '{"deadline":%s}' "$2""#,
             process::id()
         ));
         let script = TestHarness::new(&format!(
-            r#"printf '%s\n' "$1" >> '{marker}'
-case "$1" in
-  stop-workload) printf '%s' '{{"observed_at":{{"monotonic_millis":1,"wall_unix_millis":1}},"process_identity":"/usr/lib/pt31553-fan-control/workloads/mixed","running":false}}' ;;
-  stop-service) printf '%s' '{{"observed_at":{{"monotonic_millis":2,"wall_unix_millis":2}},"process_identity":"pt31553-fan-control.service","running":false}}' ;;
-  restore-fan) printf '%s' '{{"auto_write_succeeded":true,"enable_readback":2,"endpoint_identity":"device-0-inode-1","outcome":"firmware-auto-confirmed"}}' ;;
-  *) exit 9 ;;
-esac"#,
+            r#"test "$1" = serve || exit 9
+while IFS= read -r request; do
+  case "$request" in
+    *'"operation":"stop-workload"'*)
+      printf '%s\n' stop-workload >> '{marker}'
+      response='{{"observed_at":{{"monotonic_millis":1,"wall_unix_millis":1}},"process_identity":"/usr/lib/pt31553-fan-control/workloads/mixed","running":false}}'
+      ;;
+    *'"operation":"stop-service"'*)
+      printf '%s\n' stop-service >> '{marker}'
+      response='{{"observed_at":{{"monotonic_millis":2,"wall_unix_millis":2}},"process_identity":"pt31553-fan-control.service","running":false}}'
+      ;;
+    *'"operation":"restore-fan"'*)
+      printf '%s\n' restore-fan >> '{marker}'
+      response='{{"auto_write_succeeded":true,"enable_readback":2,"endpoint_identity":"device-0-inode-1","outcome":"firmware-auto-confirmed"}}'
+      ;;
+    *) exit 9 ;;
+  esac
+  printf '{{"ok":true,"response":%s,"error":null}}\n' "$response"
+done"#,
             marker = marker.display()
         ));
         let shutdown = ShutdownRequest::new();

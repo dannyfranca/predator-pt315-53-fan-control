@@ -1,6 +1,7 @@
 use std::{
     env,
     error::Error,
+    fs,
     io::{self, Read},
     os::unix::{fs::MetadataExt, fs::PermissionsExt, process::CommandExt},
     path::Path,
@@ -13,8 +14,8 @@ use fan_control_core::{
     CapturedMatchedWorkloadStartingConditions, Clock, EvidenceFan, EvidenceProfile,
     EvidenceTimestamp, ExternalPower, MatchedWorkloadStartingConditions, NvidiaGpuSelector,
     NvmlErrorKind, QUALIFICATION_CGROUP_PREFIX, SUPERVISED_ENDURANCE_WORKLOAD_ID,
-    SystemOwnershipPlatform, TelemetrySampleEvidence, WorkloadEvidence, discover_acer_hwmon,
-    observe_fan_firmware_auto_before,
+    SupervisedEnduranceLoad, SystemOwnershipPlatform, TelemetrySampleEvidence, WorkloadEvidence,
+    discover_acer_hwmon, observe_fan_firmware_auto_before,
 };
 use fan_control_daemon::{HWMON_ROOT, capture_system_qualification_sample, sample_system_nvidia};
 use fan_control_observer::{DEFAULT_SOCKET_PATH, ObserverConfirmation, query_protected_observer};
@@ -336,25 +337,30 @@ fn start_workload(
     deadline: u64,
     response: StartResponse,
 ) -> Result<(), Box<dyn Error>> {
-    let confirmation_at = start_workload_process(
+    let started = start_workload_process(
         request,
         deadline,
         matches!(response, StartResponse::Observed),
     )?;
     match response {
-        StartResponse::Plain => write_response(&confirmation_at),
+        StartResponse::Plain => write_response(&started.observed_at),
         StartResponse::Observed => write_response(&ObservedWorkloadStart {
             observer_present: true,
-            started_at: confirmation_at,
+            started_at: started.observed_at,
         }),
     }
+}
+
+pub(crate) struct StartedWorkload {
+    pub(crate) observed_at: EvidenceTimestamp,
+    pub(crate) pid: u32,
 }
 
 pub(crate) fn start_workload_process(
     request: StartWorkloadRequest,
     deadline: u64,
     observer_required: bool,
-) -> Result<EvidenceTimestamp, Box<dyn Error>> {
+) -> Result<StartedWorkload, Box<dyn Error>> {
     let executable = canonical_workload_executable(&request.workload)?;
     require_protected_workload(executable)?;
     if current_cgroup_processes()?
@@ -382,7 +388,47 @@ pub(crate) fn start_workload_process(
             return Err(error);
         }
     };
-    Ok(confirmation_at)
+    Ok(StartedWorkload {
+        observed_at: confirmation_at,
+        pid: child.id(),
+    })
+}
+
+pub(crate) fn signal_endurance_workload(
+    pid: u32,
+    load: SupervisedEnduranceLoad,
+    deadline: u64,
+) -> Result<(), Box<dyn Error>> {
+    require_before_deadline(deadline)?;
+    if !current_cgroup_processes()?.contains(&pid) {
+        return Err("supervised endurance workload is absent from its private cgroup".into());
+    }
+    let cmdline = fs::read(format!("/proc/{pid}/cmdline"))?;
+    if !is_canonical_mixed_workload_cmdline(&cmdline) {
+        return Err("private-cgroup process is not the canonical mixed workload".into());
+    }
+    let signal = match load {
+        SupervisedEnduranceLoad::Load => libc::SIGUSR1,
+        SupervisedEnduranceLoad::Idle => libc::SIGUSR2,
+    };
+    let pid = i32::try_from(pid).map_err(|_| "workload PID cannot be represented")?;
+    // SAFETY: the PID is the retained canonical workload child and was just revalidated inside
+    // this harness's private cgroup.
+    if unsafe { libc::kill(pid, signal) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    require_before_deadline(deadline)?;
+    Ok(())
+}
+
+fn is_canonical_mixed_workload_cmdline(cmdline: &[u8]) -> bool {
+    cmdline
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .eq([
+            b"/usr/lib/pt31553-fan-control/workloads/mixed".as_slice(),
+            b"--fixed".as_slice(),
+        ])
 }
 
 fn canonical_workload_executable(workload: &WorkloadEvidence) -> Result<&Path, Box<dyn Error>> {
@@ -815,6 +861,20 @@ mod tests {
             "0::/pt31553-fan-qualify-123-4\n0::/pt31553-fan-qualify-123-5\n",
         ] {
             assert!(qualification_cgroup_relative_path(membership).is_err());
+        }
+    }
+
+    #[test]
+    fn endurance_signals_only_target_the_exact_mixed_workload_command() {
+        assert!(is_canonical_mixed_workload_cmdline(
+            b"/usr/lib/pt31553-fan-control/workloads/mixed\0--fixed\0"
+        ));
+        for command in [
+            b"/usr/lib/pt31553-fan-control/workloads/mixed\0".as_slice(),
+            b"/usr/lib/pt31553-fan-control/workloads/mixed\0--fixed\0extra\0".as_slice(),
+            b"/tmp/mixed\0--fixed\0".as_slice(),
+        ] {
+            assert!(!is_canonical_mixed_workload_cmdline(command));
         }
     }
 }

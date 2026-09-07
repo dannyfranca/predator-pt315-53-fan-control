@@ -10,6 +10,7 @@ The plan manifest is a root-owned JSON object with absolute paths:
 ```json
 {
   "qualification_harness_sha256": "lowercase SHA-256 of the reviewed harness executable",
+  "protected_policy": "/var/lib/pt31553-fan-control/candidate-policy.toml",
   "preflight": "/var/lib/pt31553-fan-control/evidence/preflight.json",
   "baselines": ["seven evidence paths"],
   "matched_workload_runs": ["twelve evidence paths"],
@@ -29,9 +30,12 @@ fan-control-qualify supervised-endurance \
   --evidence-output /var/lib/pt31553-fan-control/evidence/endurance.json
 ```
 
-For each operation the runner executes `HARNESS OPERATION ABSOLUTE_MONOTONIC_DEADLINE`, writes one
-JSON request to stdin, and expects one JSON response on stdout. It kills the harness at the
-deadline. Supported operations are:
+The runner executes each read-only endpoint confirmation as
+`HARNESS OPERATION ABSOLUTE_MONOTONIC_DEADLINE`. Before Custom control, it starts one
+`HARNESS serve` process that retains exclusive controller ownership and the exact active policy
+state through cleanup. Requests and responses are newline-delimited JSON; every request carries
+an operation, absolute monotonic deadline, and request body. The runner kills and contains the
+session at a missed deadline. Supported operations are:
 
 - `capture-starting-conditions` (request/return the exact NVIDIA UUID, the serialized
   `CapturedMatchedWorkloadStartingConditions` as `observation`, an aggregate CPU-time snapshot,
@@ -74,8 +78,11 @@ operation reports only its Firmware Auto attempt. If either Auto confirmation fa
 invokes `contain-fan-maximum` for both fans and accepts containment only from the independent strict
 mode, PWM, and endpoint readbacks described above.
 Before the first Custom write, the coordinator freshly confirms both lifecycle-bound physical
-fan endpoints remain in Firmware Auto. The evidence binds every prerequisite source byte, including
-the lifecycle record. Endurance evidence is staged first and is not authorization. A termination
+fan endpoints remain in Firmware Auto. The persistent controller independently repeats that
+confirmation using identity-bound reads without writing. It then runs the exact protected policy
+from the manifest with the prerequisite-bound measured CPU/GPU calibrations; a substitute policy,
+GPU identity, envelope, or calibration is rejected. The evidence binds every prerequisite source
+byte, including the lifecycle record. Endurance evidence is staged first and is not authorization. A termination
 signal and the final qualification-record commit race on one atomic state: a signal that wins
 removes the staged evidence and publishes no authorization; a completed commit cannot be
 retroactively withdrawn. Only a complete passing report can create the qualification commit marker

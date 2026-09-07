@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     AcerHwmonDevice, AcerHwmonDiscoveryError, BoundedIdentityBoundFileAccess, Clock,
-    CompleteSampleSet, EmergencyContainmentReport, FileIdentity, FirmwareAutoRestorationError,
+    CompleteSampleSet, EmergencyContainmentReport, Fan, FileIdentity, FirmwareAutoRestorationError,
     FreshSampleGate, IdentityBoundFileAccess, PlatformError, PlatformErrorKind, RuntimeLockAccess,
     RuntimeLockError, SampleReadiness, SampleSetError, SampleSources, ServiceAccess,
     restoration::{
@@ -43,6 +43,40 @@ impl ArmingReadySample {
 pub enum OwnershipSampleReadiness {
     AwaitingSecondSample,
     Ready(ArmingReadySample),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FirmwareAutoConfirmationError {
+    DifferentController,
+    Read { fan: Fan, source: PlatformError },
+    UnexpectedMode { fan: Fan, observed: String },
+}
+
+impl fmt::Display for FirmwareAutoConfirmationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DifferentController => {
+                formatter.write_str("cannot confirm Firmware Auto for a different fan controller")
+            }
+            Self::Read { fan, source } => {
+                write!(formatter, "cannot read {} fan mode: {source}", fan.name())
+            }
+            Self::UnexpectedMode { fan, observed } => write!(
+                formatter,
+                "{} fan is not in Firmware Auto mode (observed {observed:?})",
+                fan.name()
+            ),
+        }
+    }
+}
+
+impl Error for FirmwareAutoConfirmationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Read { source, .. } => Some(source),
+            Self::DifferentController | Self::UnexpectedMode { .. } => None,
+        }
+    }
 }
 
 /// Result of one system recovery cycle after every fan has reached a safe state.
@@ -188,6 +222,56 @@ where
             .sampling_epoch
             .checked_add(1)
             .expect("controller sampling epoch space exhausted");
+    }
+
+    /// Admits an already-safe device without writing either fan endpoint.
+    ///
+    /// This is the read-only boundary used by supervised qualification after the coordinator has
+    /// confirmed Firmware Auto. Exclusive ownership and identity-bound reads close the gap before
+    /// the first custom-control transition.
+    pub fn confirm_firmware_auto_without_writes(
+        &mut self,
+        device: &AcerHwmonDevice,
+    ) -> Result<(), FirmwareAutoConfirmationError>
+    where
+        P: BoundedIdentityBoundFileAccess + Clock,
+    {
+        self.restoration_confirmed = false;
+        self.reset_sampling_epoch();
+        if self
+            .controlled_device
+            .is_some_and(|identity| identity != device.backing_identity())
+        {
+            return Err(FirmwareAutoConfirmationError::DifferentController);
+        }
+        let deadline = self
+            .platform
+            .monotonic_now()
+            .saturating_add(crate::NORMAL_SAMPLE_CADENCE);
+        for (fan, endpoint) in [
+            (Fan::Cpu, device.cpu().enable()),
+            (Fan::Gpu, device.gpu().enable()),
+        ] {
+            let observed = self
+                .platform
+                .read_bound_before(
+                    device.root(),
+                    device.backing_identity(),
+                    child_name(endpoint),
+                    endpoint_identity(device, endpoint),
+                    deadline,
+                )
+                .map_err(|source| FirmwareAutoConfirmationError::Read { fan, source })?;
+            if observed.trim() != FIRMWARE_AUTO {
+                return Err(FirmwareAutoConfirmationError::UnexpectedMode {
+                    fan,
+                    observed: observed.trim().to_owned(),
+                });
+            }
+        }
+        self.controlled_device = Some(device.backing_identity());
+        self.restoration_confirmed = true;
+        Ok(())
     }
 
     pub(crate) fn refresh_firmware_auto_confirmation(&mut self, device: &AcerHwmonDevice) -> bool
