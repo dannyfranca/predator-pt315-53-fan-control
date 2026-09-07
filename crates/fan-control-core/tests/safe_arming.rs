@@ -15,14 +15,17 @@ use fan_control_core::{
     SampleSources, ServiceAccess, ShutdownRequest, TemperatureCelsius, ValidatedConfig,
     acquire_controller_ownership, admit_policy_authority,
     arm_both_fans_for_qualification_at_maximum_until, arm_both_fans_safely,
-    arm_both_fans_safely_until, command_qualification_calibration_fan_before, discover_acer_hwmon,
-    observe_qualification_calibration_fan_before,
+    arm_both_fans_safely_until, begin_qualification_control,
+    command_qualification_calibration_fan_before, discover_acer_hwmon,
+    observe_qualification_calibration_fan_before, observe_qualification_control_before,
+    prepare_qualification_control_policy, run_healthy_control_cycle,
 };
 
 mod support;
 use support::{
-    PROTECTED_POLICY, diagnostic_field, matching_endurance_evidence,
-    matching_observation_for_policy, matching_record, protected_config, record_diagnostics,
+    PROTECTED_POLICY, completed_calibration_evidence, diagnostic_field,
+    matching_endurance_evidence, matching_observation_for_policy, matching_record,
+    protected_config, qualification_envelope, record_diagnostics,
 };
 
 const HWMON_ROOT: &str = "/sys/class/hwmon";
@@ -118,6 +121,39 @@ fn qualification_handover_reaches_maximum_without_minting_policy_authority() {
 
     ownership.restore_firmware_auto(&device).unwrap();
     assert!(!armed.is_current_for(&ownership));
+    ownership.release().unwrap();
+}
+
+#[test]
+fn qualification_handover_runs_and_observes_the_production_control_cycle() {
+    let (mut platform, device) = fixture("5000\n", "6200\n");
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+    let policy = prepare_qualification_control_policy(
+        PROTECTED_POLICY,
+        &qualification_envelope(PROTECTED_POLICY),
+        completed_calibration_evidence(Fan::Cpu),
+        completed_calibration_evidence(Fan::Gpu),
+    )
+    .unwrap();
+    let armed = arm_both_fans_for_qualification_at_maximum_until(
+        &mut ownership,
+        &device,
+        &ShutdownRequest::new(),
+    )
+    .unwrap();
+    let mut control = begin_qualification_control(armed, policy, ShutdownRequest::new());
+
+    let cycle = run_healthy_control_cycle(&mut ownership, &mut control, &mut HealthySources)
+        .expect("the qualification path must use the ordinary production cycle");
+    let observation =
+        observe_qualification_control_before(&mut ownership, &control, Duration::from_secs(10))
+            .unwrap();
+
+    assert_eq!(observation.cpu_pwm, cycle.outputs().cpu_pwm().value());
+    assert_eq!(observation.gpu_pwm, cycle.outputs().gpu_pwm().value());
+    assert_eq!(observation.cpu_rpm, 5_000);
+    assert_eq!(observation.gpu_rpm, 6_200);
+    ownership.restore_firmware_auto(&device).unwrap();
     ownership.release().unwrap();
 }
 

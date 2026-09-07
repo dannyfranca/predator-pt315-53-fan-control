@@ -315,7 +315,7 @@ fn confirm_endurance_observer(_: EmptyRequest, deadline: u64) -> Result<(), Box<
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StartWorkloadRequest {
+pub(crate) struct StartWorkloadRequest {
     workload: WorkloadEvidence,
 }
 
@@ -336,6 +336,25 @@ fn start_workload(
     deadline: u64,
     response: StartResponse,
 ) -> Result<(), Box<dyn Error>> {
+    let confirmation_at = start_workload_process(
+        request,
+        deadline,
+        matches!(response, StartResponse::Observed),
+    )?;
+    match response {
+        StartResponse::Plain => write_response(&confirmation_at),
+        StartResponse::Observed => write_response(&ObservedWorkloadStart {
+            observer_present: true,
+            started_at: confirmation_at,
+        }),
+    }
+}
+
+pub(crate) fn start_workload_process(
+    request: StartWorkloadRequest,
+    deadline: u64,
+    observer_required: bool,
+) -> Result<EvidenceTimestamp, Box<dyn Error>> {
     let executable = canonical_workload_executable(&request.workload)?;
     require_protected_workload(executable)?;
     if current_cgroup_processes()?
@@ -344,7 +363,7 @@ fn start_workload(
     {
         return Err("qualification cgroup already contains a workload".into());
     }
-    if matches!(response, StartResponse::Observed) {
+    if observer_required {
         require_observer(deadline)?;
     }
     let mut child = Command::new(executable)
@@ -363,13 +382,7 @@ fn start_workload(
             return Err(error);
         }
     };
-    match response {
-        StartResponse::Plain => write_response(&confirmation_at),
-        StartResponse::Observed => write_response(&ObservedWorkloadStart {
-            observer_present: true,
-            started_at: confirmation_at,
-        }),
-    }
+    Ok(confirmation_at)
 }
 
 fn canonical_workload_executable(workload: &WorkloadEvidence) -> Result<&Path, Box<dyn Error>> {
@@ -448,7 +461,7 @@ fn require_running_child(
 }
 
 #[derive(Clone, Copy)]
-enum StopMode {
+pub(crate) enum StopMode {
     Graceful,
     Kill,
 }
@@ -478,6 +491,26 @@ fn stop_workload(
     mode: StopMode,
     response: StopResponse,
 ) -> Result<(), Box<dyn Error>> {
+    let observed_at = stop_workload_process(deadline, mode)?;
+    match response {
+        StopResponse::Plain => write_response(&serde_json::json!({ "confirmed": true })),
+        StopResponse::Observed => write_response(&StopConfirmation {
+            confirmed: true,
+            observer_present: query_observer(deadline)
+                .is_ok_and(|confirmation| confirmation.observer_present),
+        }),
+        StopResponse::Endurance => write_response(&EnduranceStopConfirmation {
+            observed_at,
+            process_identity: "/usr/lib/pt31553-fan-control/workloads/mixed",
+            running: false,
+        }),
+    }
+}
+
+pub(crate) fn stop_workload_process(
+    deadline: u64,
+    mode: StopMode,
+) -> Result<EvidenceTimestamp, Box<dyn Error>> {
     let signal = match mode {
         StopMode::Graceful => libc::SIGTERM,
         StopMode::Kill => libc::SIGKILL,
@@ -504,20 +537,7 @@ fn stop_workload(
         require_before_deadline(deadline)?;
         thread::sleep(Duration::from_millis(10));
     }
-    let observed_at = evidence_timestamp()?;
-    match response {
-        StopResponse::Plain => write_response(&serde_json::json!({ "confirmed": true })),
-        StopResponse::Observed => write_response(&StopConfirmation {
-            confirmed: true,
-            observer_present: query_observer(deadline)
-                .is_ok_and(|confirmation| confirmation.observer_present),
-        }),
-        StopResponse::Endurance => write_response(&EnduranceStopConfirmation {
-            observed_at,
-            process_identity: "/usr/lib/pt31553-fan-control/workloads/mixed",
-            running: false,
-        }),
-    }
+    evidence_timestamp()
 }
 
 fn kill_other_cgroup_processes_once() -> Result<(), Box<dyn Error>> {

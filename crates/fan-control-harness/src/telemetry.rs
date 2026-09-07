@@ -1,10 +1,14 @@
 use std::{collections::BTreeMap, error::Error, fs, path::Path};
 
 use fan_control_core::{
-    EvidenceExternalPower, EvidenceProfile, ExternalPower, NvidiaGpuSelector, SampleFreshness,
-    TelemetrySampleEvidence, TemperatureCelsius, parse_config_v1, validate_config_v1,
+    CompleteSampleSet, EvidenceExternalPower, EvidenceProfile, EvidenceTimestamp, ExternalPower,
+    NvidiaGpuSelector, SampleFreshness, TelemetrySampleEvidence, TemperatureCelsius,
+    ValidatedConfig, parse_config_v1, validate_config_v1,
 };
-use fan_control_daemon::{EDITABLE_CONFIG_PATH, capture_system_qualification_telemetry_sample};
+use fan_control_daemon::{
+    EDITABLE_CONFIG_PATH, SystemNvidiaQualificationSample,
+    capture_system_qualification_telemetry_sample,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{evidence_timestamp, require_before_deadline};
@@ -110,6 +114,79 @@ pub(crate) fn capture(
     })
 }
 
+/// Builds telemetry around the exact sample consumed by a production control cycle instead of
+/// performing a second temperature/power read that could describe a different decision.
+pub(crate) fn capture_control_cycle(
+    request: TelemetryRequest,
+    physical: CompleteSampleSet,
+    nvidia: SystemNvidiaQualificationSample,
+    config: &ValidatedConfig,
+    timestamp: EvidenceTimestamp,
+    deadline: u64,
+) -> Result<TelemetryCapture, Box<dyn Error>> {
+    require_before_deadline(deadline)?;
+    let selector = NvidiaGpuSelector::uuid(&request.nvidia_gpu_uuid)?;
+    if nvidia.gpu.uuid() != selector.value() {
+        return Err("qualification telemetry belongs to a different NVIDIA GPU".into());
+    }
+    let cpu_millicelsius = temperature_millicelsius(physical.cpu_temperature())?;
+    let gpu_millicelsius = temperature_millicelsius(physical.gpu_temperature())?;
+    let nvidia_gpu_millicelsius = (nvidia.gpu.temperature_celsius() * 1_000.0).round();
+    if !nvidia_gpu_millicelsius.is_finite()
+        || nvidia_gpu_millicelsius != f64::from(gpu_millicelsius)
+    {
+        return Err(
+            "control and extended NVIDIA samples do not describe the same GPU reading".into(),
+        );
+    }
+    let cpu_time_snapshot = read_cpu_time(Path::new(PROC_STAT))?;
+    let cpu_utilization_basis_points =
+        utilization_between(request.previous_cpu_time, cpu_time_snapshot)?;
+    let cpu_throttle_snapshot = read_cpu_throttles(Path::new(CPU_ROOT))?;
+    let cpu_thermal_throttling =
+        throttling_since(&request.starting_cpu_throttles, &cpu_throttle_snapshot)?;
+    let (external_power, selected_profile, profile) = match physical.external_power() {
+        ExternalPower::Connected => (
+            EvidenceExternalPower::Ac,
+            EvidenceProfile::Ac,
+            config.profiles().ac(),
+        ),
+        ExternalPower::Disconnected => (
+            EvidenceExternalPower::Battery,
+            EvidenceProfile::Battery,
+            config.profiles().battery(),
+        ),
+        ExternalPower::Unknown => return Err("external power state is unknown".into()),
+    };
+    let cpu_source_demand_basis_points =
+        demand_basis_points(profile.cpu_curve().evaluate(physical.cpu_temperature()));
+    let gpu_source_demand_basis_points =
+        demand_basis_points(profile.gpu_curve().evaluate(physical.gpu_temperature()));
+    let commanded_demand_basis_points =
+        cpu_source_demand_basis_points.max(gpu_source_demand_basis_points);
+    require_before_deadline(deadline)?;
+    Ok(TelemetryCapture {
+        nvidia_gpu_uuid: selector.value().to_owned(),
+        sample: TelemetrySampleEvidence {
+            timestamp,
+            cpu_millicelsius: Some(cpu_millicelsius),
+            gpu_millicelsius: Some(gpu_millicelsius),
+            freshness: SampleFreshness::Fresh,
+            external_power: Some(external_power),
+            selected_profile: Some(selected_profile),
+            cpu_source_demand_basis_points: Some(cpu_source_demand_basis_points),
+            gpu_source_demand_basis_points: Some(gpu_source_demand_basis_points),
+            cpu_utilization_basis_points: Some(cpu_utilization_basis_points),
+            gpu_utilization_basis_points: Some(nvidia.utilization_basis_points),
+            commanded_demand_basis_points: Some(commanded_demand_basis_points),
+            cpu_thermal_throttling: Some(cpu_thermal_throttling),
+            gpu_thermal_throttling: Some(nvidia.thermal_throttling),
+        },
+        cpu_time_snapshot,
+        cpu_throttle_snapshot,
+    })
+}
+
 pub(crate) fn starting_snapshots() -> Result<(CpuTimeSnapshot, CpuThrottleSnapshot), Box<dyn Error>>
 {
     Ok((
@@ -120,6 +197,14 @@ pub(crate) fn starting_snapshots() -> Result<(CpuTimeSnapshot, CpuThrottleSnapsh
 
 fn demand_basis_points(demand: fan_control_core::DemandPercent) -> u16 {
     (demand.value() * 100.0).round() as u16
+}
+
+fn temperature_millicelsius(value: TemperatureCelsius) -> Result<i32, &'static str> {
+    let value = (value.value() * 1_000.0).round();
+    if !value.is_finite() || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
+        return Err("temperature cannot be represented as millicelsius");
+    }
+    Ok(value as i32)
 }
 
 fn read_cpu_time(path: &Path) -> Result<CpuTimeSnapshot, Box<dyn Error>> {

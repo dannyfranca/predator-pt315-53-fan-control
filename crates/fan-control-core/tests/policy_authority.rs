@@ -7,19 +7,65 @@ use fan_control_core::{
     CompatibilityAdmissionError, CompatibilityObservation, FakePlatform, FilePermissions,
     PolicyAuthorityAdmissionError, PolicyAuthorityError, QUALIFICATION_RECORD_PATH,
     SUPERVISED_ENDURANCE_EVIDENCE_PATH, TachometerCalibrationError, acquire_controller_ownership,
-    admit_policy_authority, discover_acer_hwmon, validate_qualification_evidence_v3,
+    admit_policy_authority, discover_acer_hwmon, prepare_qualification_control_policy,
+    validate_qualification_evidence_v3,
 };
 
 mod support;
 use support::{
-    PROTECTED_POLICY, SOURCE_COMMIT, compatibility_declaration, matching_endurance_evidence,
-    matching_observation, matching_observation_for_policy, matching_record, protected_config,
-    sha256,
+    PROTECTED_POLICY, SOURCE_COMMIT, compatibility_declaration, completed_calibration_evidence,
+    matching_endurance_evidence, matching_observation, matching_observation_for_policy,
+    matching_record, protected_config, qualification_envelope, sha256,
 };
 
 const OTHER_SOURCE_COMMIT: &str = "fedcba9876543210fedcba9876543210fedcba98";
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
+
+#[test]
+fn qualification_control_accepts_only_the_exact_policy_and_measured_calibrations() {
+    let policy = prepare_qualification_control_policy(
+        PROTECTED_POLICY,
+        &qualification_envelope(PROTECTED_POLICY),
+        completed_calibration_evidence(fan_control_core::Fan::Cpu),
+        completed_calibration_evidence(fan_control_core::Fan::Gpu),
+    )
+    .unwrap();
+
+    assert_eq!(
+        policy.protected_config(),
+        &protected_config(PROTECTED_POLICY)
+    );
+}
+
+#[test]
+fn qualification_control_rejects_envelope_or_calibration_drift() {
+    let mut wrong_envelope = qualification_envelope(PROTECTED_POLICY);
+    wrong_envelope.policy_version = "2.0.0".into();
+    assert!(
+        prepare_qualification_control_policy(
+            PROTECTED_POLICY,
+            &wrong_envelope,
+            completed_calibration_evidence(fan_control_core::Fan::Cpu),
+            completed_calibration_evidence(fan_control_core::Fan::Gpu),
+        )
+        .unwrap_err()
+        .contains("does not match")
+    );
+
+    let mut unsafe_cpu = completed_calibration_evidence(fan_control_core::Fan::Cpu);
+    unsafe_cpu.floor_basis_points = 4_000;
+    assert!(
+        prepare_qualification_control_policy(
+            PROTECTED_POLICY,
+            &qualification_envelope(PROTECTED_POLICY),
+            unsafe_cpu,
+            completed_calibration_evidence(fan_control_core::Fan::Gpu),
+        )
+        .unwrap_err()
+        .contains("calibration rejected")
+    );
+}
 
 #[test]
 fn retained_record_validation_rejects_incomplete_or_rebound_authorization() {

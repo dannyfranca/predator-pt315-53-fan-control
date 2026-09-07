@@ -509,6 +509,28 @@ impl SystemSampleSources {
         })
     }
 
+    /// Discovers the production sensor set while retaining the extended NVIDIA fields needed by
+    /// supervised qualification evidence. Fan control still uses the ordinary `SampleSources`
+    /// interface and therefore exercises the production sampling path.
+    pub fn discover_for_qualification(selector: &NvidiaGpuSelector) -> Result<Self, StartupError> {
+        let mut platform = SystemOwnershipPlatform::new();
+        let coretemp = discover_coretemp(&mut platform, Path::new(HWMON_ROOT))
+            .map_err(|error| StartupError::Device(error.to_string()))?;
+        let nvidia = NvidiaSmi::for_qualification(selector);
+        let power = BoundExternalPower::discover(&mut platform, Path::new(POWER_SUPPLY_ROOT))?;
+        Ok(Self {
+            platform,
+            coretemp,
+            nvidia,
+            power,
+        })
+    }
+
+    /// Takes the utilization/throttling sample captured by the most recent GPU source read.
+    pub fn take_qualification_nvidia_sample(&mut self) -> Option<SystemNvidiaQualificationSample> {
+        self.nvidia.qualification_sample.take()
+    }
+
     fn platform_mut(&mut self) -> &mut SystemOwnershipPlatform {
         &mut self.platform
     }

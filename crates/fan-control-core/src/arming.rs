@@ -44,6 +44,8 @@ pub struct QualificationArmedFanControl {
     pub(crate) ownership_id: u64,
     pub(crate) custom_epoch: u64,
     pub(crate) device: AcerHwmonDevice,
+    cpu_custom_confirmed_at: Duration,
+    gpu_custom_confirmed_at: Duration,
     cpu_rpm: u32,
     gpu_rpm: u32,
 }
@@ -62,6 +64,24 @@ impl QualificationArmedFanControl {
 
     pub const fn gpu_rpm(&self) -> u32 {
         self.gpu_rpm
+    }
+
+    pub(crate) fn into_control_armed(
+        self,
+        config: ValidatedConfig,
+        calibration: QualifiedTachometerCalibrations,
+    ) -> ArmedFanControl {
+        ArmedFanControl {
+            ownership_id: self.ownership_id,
+            custom_epoch: self.custom_epoch,
+            config,
+            device: self.device,
+            calibration,
+            cpu_custom_confirmed_at: self.cpu_custom_confirmed_at,
+            gpu_custom_confirmed_at: self.gpu_custom_confirmed_at,
+            cpu_rpm: self.cpu_rpm,
+            gpu_rpm: self.gpu_rpm,
+        }
     }
 }
 
@@ -468,6 +488,8 @@ where
             ownership_id,
             custom_epoch,
             device: device.clone(),
+            cpu_custom_confirmed_at: handover.cpu_custom_confirmed_at,
+            gpu_custom_confirmed_at: handover.gpu_custom_confirmed_at,
             cpu_rpm: handover.cpu_rpm,
             gpu_rpm: handover.gpu_rpm,
         }),

@@ -194,6 +194,15 @@ struct HarnessObserved<T> {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct HarnessMatchedObservation {
+    observer_present: bool,
+    observation: MatchedWorkloadObservation,
+    cpu_time_snapshot: HarnessCpuTimeSnapshot,
+    cpu_throttle_snapshot: HarnessCpuThrottleSnapshot,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HarnessConfirmation {
     observer_present: bool,
     confirmed: bool,
@@ -986,6 +995,23 @@ fn matched_workload_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>>
     let _signal_handlers = TerminationSignalHandlers::install(shutdown.clone())?;
     let mut harness = HarnessEnvironment::new_control(arguments.stage.harness, shutdown.clone())?;
     harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
+    let protected_policy_source = read_protected_file(&manifest.protected_policy)?;
+    let cpu_measured = cpu_calibration
+        .calibration
+        .first()
+        .cloned()
+        .ok_or("CPU calibration record has no measured calibration")?;
+    let gpu_measured = gpu_calibration
+        .calibration
+        .first()
+        .cloned()
+        .ok_or("GPU calibration record has no measured calibration")?;
+    harness.configure_qualification_control(
+        protected_policy_source,
+        manifest.qualification_envelope.clone(),
+        cpu_measured,
+        gpu_measured,
+    )?;
     let workload_id = required_baselines()[spec.baseline_index].workload_id;
     println!(
         "START matched stage {:02}/12: {} run {}; observer approved",
@@ -2197,6 +2223,7 @@ struct HarnessEnvironment {
     starting_cpu_throttles: Option<HarnessCpuThrottleSnapshot>,
     system_health: Option<SystemHealthMonitor>,
     control_session: RefCell<Option<ControlHarnessSession>>,
+    qualification_control_request: Option<Value>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2220,6 +2247,7 @@ impl HarnessEnvironment {
             starting_cpu_throttles: None,
             system_health: None,
             control_session: RefCell::new(None),
+            qualification_control_request: None,
         })
     }
 
@@ -2232,6 +2260,23 @@ impl HarnessEnvironment {
 
     fn select_nvidia_gpu(&mut self, uuid: String) {
         self.nvidia_gpu_uuid = Some(uuid);
+    }
+
+    fn configure_qualification_control(
+        &mut self,
+        protected_policy_source: String,
+        qualification_envelope: QualificationEnvelopeIdentityV1,
+        cpu_calibration: FanCalibrationEvidence,
+        gpu_calibration: FanCalibrationEvidence,
+    ) -> Result<(), String> {
+        self.qualification_control_request = Some(json!({
+            "protected_policy_source": protected_policy_source,
+            "qualification_envelope": qualification_envelope,
+            "cpu_calibration": cpu_calibration,
+            "gpu_calibration": gpu_calibration,
+            "nvidia_gpu_uuid": self.selected_nvidia_gpu()?,
+        }));
+        Ok(())
     }
 
     fn start_observation_window(
@@ -2773,6 +2818,11 @@ fn uses_persistent_control_session(operation: &str) -> bool {
             | "observe-calibration-hold"
             | "restore-fan-calibration"
             | "finalize-fan-calibration"
+            | "enter-matched-custom-control"
+            | "start-matched-workload"
+            | "capture-matched-observation"
+            | "stop-matched-workload"
+            | "restore-matched-fan"
     )
 }
 
@@ -3046,9 +3096,13 @@ impl MatchedWorkloadEnvironment for HarnessEnvironment {
     }
 
     fn enter_custom_control(&mut self, deadline_monotonic_millis: u64) -> Result<(), String> {
+        let request = self
+            .qualification_control_request
+            .clone()
+            .ok_or("qualification control policy was not configured")?;
         let response: HarnessConfirmation = self.invoke(
             "enter-matched-custom-control",
-            json!({}),
+            request,
             deadline_monotonic_millis,
         )?;
         if !response.observer_present {
@@ -3088,15 +3142,25 @@ impl MatchedWorkloadEnvironment for HarnessEnvironment {
         &mut self,
         deadline_monotonic_millis: u64,
     ) -> Result<MatchedWorkloadObservation, String> {
-        let response: HarnessObserved<MatchedWorkloadObservation> = self.invoke(
+        let request = self.telemetry_request()?;
+        let response: HarnessMatchedObservation = self.invoke(
             "capture-matched-observation",
-            json!({ "nvidia_gpu_uuid": self.selected_nvidia_gpu()? }),
+            request,
             deadline_monotonic_millis,
         )?;
         if !response.observer_present {
             return Err("observer withdrew approval".into());
         }
-        Ok(response.observation)
+        let health = self.finish_telemetry_capture(
+            response.cpu_time_snapshot,
+            &response.cpu_throttle_snapshot,
+            deadline_monotonic_millis,
+        )?;
+        let mut observation = response.observation;
+        observation.system_stable = health.system_stable;
+        observation.kernel_faults = health.kernel_faults;
+        observation.nvidia_faults = health.nvidia_faults;
+        Ok(observation)
     }
 
     fn stop_workload(&mut self, deadline_monotonic_millis: u64) -> Result<(), String> {

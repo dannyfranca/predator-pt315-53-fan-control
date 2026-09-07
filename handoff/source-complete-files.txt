@@ -48,6 +48,7 @@ crates/fan-control-core/src/policy.rs
 crates/fan-control-core/src/preflight.rs
 crates/fan-control-core/src/promotion.rs
 crates/fan-control-core/src/qualification.rs
+crates/fan-control-core/src/qualification_control.rs
 crates/fan-control-core/src/requalification.rs
 crates/fan-control-core/src/restoration.rs
 crates/fan-control-core/src/sampling.rs
@@ -124,6 +125,7 @@ crates/fan-control-daemon/tests/sleep_guard.rs
 crates/fan-control-daemon/tests/startup.rs
 crates/fan-control-harness/Cargo.toml
 crates/fan-control-harness/src/main.rs
+crates/fan-control-harness/src/server.rs
 crates/fan-control-harness/src/telemetry.rs
 crates/fan-control-observer/Cargo.toml
 crates/fan-control-observer/src/lib.rs
@@ -133,6 +135,7 @@ crates/fan-control-qualify/src/lib.rs
 crates/fan-control-qualify/src/main.rs
 crates/fan-control-qualify/src/system_health.rs
 crates/fan-control-qualify/src/system_preflight.rs
+crates/fan-control-qualify/tests/calibration_support.rs
 crates/fan-control-qualify/tests/promotion.rs
 crates/fan-control-qualify/tests/qualification_stages.rs
 crates/fan-control-qualify/tests/startup.rs

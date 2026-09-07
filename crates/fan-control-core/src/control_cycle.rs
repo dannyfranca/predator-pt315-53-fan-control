@@ -71,6 +71,10 @@ impl HealthyControl {
         self.last_outputs
     }
 
+    pub(crate) const fn device(&self) -> &AcerHwmonDevice {
+        &self.device
+    }
+
     pub(crate) fn into_recovery_parts(self) -> (ValidatedConfig, AcerHwmonDevice) {
         (self.config, self.device)
     }
@@ -87,6 +91,7 @@ struct ControlDemandHistory {
 pub struct CompletedControlCycle {
     sample: CompleteSampleSet,
     outputs: FanOutputs,
+    commanded_at: Duration,
 }
 
 impl CompletedControlCycle {
@@ -96,6 +101,11 @@ impl CompletedControlCycle {
 
     pub const fn outputs(self) -> FanOutputs {
         self.outputs
+    }
+
+    /// Time at which this cycle selected the output it subsequently verified and applied.
+    pub const fn commanded_at(self) -> Duration {
+        self.commanded_at
     }
 }
 
@@ -303,6 +313,7 @@ where
         .checked_add(crate::NORMAL_SAMPLE_CADENCE)
         .ok_or(HealthyControlCycleError::DeadlineOverflow)?;
     let (next_history, outputs) = next_outputs(&control.config, control.demand_history, sample)?;
+    let commanded_at = ownership.platform_mut().monotonic_now();
     let rpm_commands = control.last_outputs;
 
     verify_device_before(ownership.platform_mut(), &device, deadline)?;
@@ -381,7 +392,11 @@ where
             rpm: gpu_rpm,
         },
     });
-    Ok(CompletedControlCycle { sample, outputs })
+    Ok(CompletedControlCycle {
+        sample,
+        outputs,
+        commanded_at,
+    })
 }
 
 fn next_outputs(

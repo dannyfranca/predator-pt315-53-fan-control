@@ -10,15 +10,19 @@ use std::{
 use fan_control_core::{
     CalibrationLevelObservation, CalibrationReadbackSample, CalibrationStep,
     CompletedFanCalibrationRun, ConservativeFanCalibration, ControllerOwnership, EvidenceFan,
-    EvidenceTimestamp, Fan, FanCalibrationEvidence, FanEndpointIdentitiesEvidence,
-    MatchedWorkloadFanRestoration, QualificationArmedFanControl, QualificationEnvelopeIdentityV1,
+    EvidenceTimestamp, Fan, FanCalibrationEvidence, FanCommandEvidence, FanControlField,
+    FanEndpointIdentitiesEvidence, FanReadbackEvidence, FanReadbackField, FanReadbackPhase,
+    HealthyControl, MatchedWorkloadFanRestoration, MatchedWorkloadObservation, NvidiaGpuSelector,
+    ObservationOutcome, QualificationArmedFanControl, QualificationEnvelopeIdentityV1,
     RestorationOutcome, ShutdownRequest, SystemOwnershipPlatform, TerminationSignalHandlers,
-    acquire_controller_ownership, arm_both_fans_for_qualification_at_maximum_until,
+    ValidatedConfig, acquire_controller_ownership,
+    arm_both_fans_for_qualification_at_maximum_until, begin_qualification_control,
     build_fan_calibration_record, calibration_level_is_settled,
     command_qualification_calibration_fan_before, observe_qualification_calibration_fan_before,
-    qualification_control_monotonic_now,
+    observe_qualification_control_before, prepare_qualification_control_policy,
+    qualification_control_monotonic_now, run_healthy_control_cycle,
 };
-use fan_control_daemon::HWMON_ROOT;
+use fan_control_daemon::{HWMON_ROOT, SystemSampleSources};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
@@ -66,6 +70,16 @@ struct FinalizeCalibrationRequest {
     qualification_envelope: QualificationEnvelopeIdentityV1,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BeginMatchedRequest {
+    protected_policy_source: String,
+    qualification_envelope: QualificationEnvelopeIdentityV1,
+    cpu_calibration: FanCalibrationEvidence,
+    gpu_calibration: FanCalibrationEvidence,
+    nvidia_gpu_uuid: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ConfirmationResponse {
     observer_present: bool,
@@ -85,7 +99,7 @@ struct RestorationEvidence {
     fans: [MatchedWorkloadFanRestoration; 2],
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct CalibrationSession {
     fan: Option<EvidenceFan>,
     started_at: Option<EvidenceTimestamp>,
@@ -94,6 +108,15 @@ struct CalibrationSession {
     protocol: Option<ConservativeFanCalibration>,
     restoration: Option<RestorationEvidence>,
     finalized: bool,
+    matched: Option<MatchedSession>,
+}
+
+struct MatchedSession {
+    control: Option<HealthyControl>,
+    config: ValidatedConfig,
+    sources: SystemSampleSources,
+    restoration: Option<RestorationEvidence>,
+    workload_started: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -283,7 +306,279 @@ fn dispatch(
         "finalize-fan-calibration" => {
             finalize_calibration(decode(request.request)?, session, identities)
         }
+        "enter-matched-custom-control" => enter_matched_custom_control(
+            decode(request.request)?,
+            request.deadline,
+            session,
+            ownership,
+            device,
+            shutdown,
+        ),
+        "start-matched-workload" => {
+            start_matched_workload(decode(request.request)?, request.deadline, session)
+        }
+        "capture-matched-observation" => capture_matched_observation(
+            decode(request.request)?,
+            request.deadline,
+            session,
+            ownership,
+            identities,
+            clock,
+        ),
+        "stop-matched-workload" => stop_matched_workload(request.deadline, session),
+        "restore-matched-fan" => restore_matched_fan(
+            decode(request.request)?,
+            session,
+            ownership,
+            device,
+            identities,
+        ),
         operation => Err(format!("unsupported qualification server operation: {operation}").into()),
+    }
+}
+
+fn enter_matched_custom_control(
+    request: BeginMatchedRequest,
+    deadline: u64,
+    session: &mut CalibrationSession,
+    ownership: &mut ControllerOwnership<'_, SystemOwnershipPlatform>,
+    device: &fan_control_core::AcerHwmonDevice,
+    shutdown: &ShutdownRequest,
+) -> Result<Value, Box<dyn Error>> {
+    if session.fan.is_some() || session.matched.is_some() {
+        return Err("qualification server already has an active control stage".into());
+    }
+    let policy = prepare_qualification_control_policy(
+        &request.protected_policy_source,
+        &request.qualification_envelope,
+        request.cpu_calibration,
+        request.gpu_calibration,
+    )?;
+    let selector = NvidiaGpuSelector::uuid(request.nvidia_gpu_uuid)?;
+    let sources = SystemSampleSources::discover_for_qualification(&selector)?;
+    let config = policy.protected_config().clone();
+    require_observer(deadline)?;
+    let armed = arm_both_fans_for_qualification_at_maximum_until(ownership, device, shutdown)?;
+    let control = begin_qualification_control(armed, policy, shutdown.clone());
+    session.matched = Some(MatchedSession {
+        control: Some(control),
+        config,
+        sources,
+        restoration: None,
+        workload_started: false,
+    });
+    require_observer(deadline)?;
+    require_absolute_deadline(deadline)?;
+    encode(ConfirmationResponse {
+        observer_present: true,
+        confirmed: true,
+    })
+}
+
+fn start_matched_workload(
+    request: crate::StartWorkloadRequest,
+    deadline: u64,
+    session: &mut CalibrationSession,
+) -> Result<Value, Box<dyn Error>> {
+    let matched = active_matched_session(session)?;
+    if matched.workload_started {
+        return Err("matched workload is already running".into());
+    }
+    let started_at = crate::start_workload_process(request, deadline, true)?;
+    matched.workload_started = true;
+    encode(serde_json::json!({
+        "observer_present": true,
+        "started_at": started_at,
+    }))
+}
+
+fn capture_matched_observation(
+    request: crate::telemetry::TelemetryRequest,
+    deadline: u64,
+    session: &mut CalibrationSession,
+    ownership: &mut ControllerOwnership<'_, SystemOwnershipPlatform>,
+    identities: &FanEndpointIdentitiesEvidence,
+    clock: MonotonicClockBridge,
+) -> Result<Value, Box<dyn Error>> {
+    require_observer(deadline)?;
+    let local_deadline = clock.local_deadline(ownership, deadline)?;
+    let matched = active_matched_session(session)?;
+    if !matched.workload_started {
+        return Err("matched workload is not running".into());
+    }
+    let control = matched
+        .control
+        .as_mut()
+        .ok_or("matched control is not active")?;
+    let completed = run_healthy_control_cycle(ownership, control, &mut matched.sources)?;
+    let nvidia = matched
+        .sources
+        .take_qualification_nvidia_sample()
+        .ok_or("production control cycle did not retain extended NVIDIA telemetry")?;
+    let mut sample_timestamp = evidence_timestamp()?;
+    sample_timestamp.monotonic_millis =
+        clock.absolutize_millis(duration_millis(completed.sample().completed_at()));
+    let capture = crate::telemetry::capture_control_cycle(
+        request,
+        completed.sample(),
+        nvidia,
+        &matched.config,
+        sample_timestamp,
+        deadline,
+    )?;
+    let observed = observe_qualification_control_before(ownership, control, local_deadline)?;
+    let command_timestamp = timestamp_at(clock, duration_millis(completed.commanded_at()))?;
+    let readback_timestamp = timestamp_at(clock, observed.observed_at_monotonic_millis)?;
+    require_observer(deadline)?;
+    let observation = MatchedWorkloadObservation {
+        sample: capture.sample,
+        commands: vec![
+            fan_command(command_timestamp, EvidenceFan::Cpu, observed.cpu_pwm),
+            fan_command(command_timestamp, EvidenceFan::Gpu, observed.gpu_pwm),
+        ],
+        readbacks: vec![
+            fan_readback(
+                readback_timestamp,
+                EvidenceFan::Cpu,
+                FanReadbackField::Enable,
+                1,
+                &identities.cpu_enable,
+            ),
+            fan_readback(
+                readback_timestamp,
+                EvidenceFan::Cpu,
+                FanReadbackField::Pwm,
+                u32::from(observed.cpu_pwm),
+                &identities.cpu_pwm,
+            ),
+            fan_readback(
+                readback_timestamp,
+                EvidenceFan::Cpu,
+                FanReadbackField::Rpm,
+                observed.cpu_rpm,
+                &identities.cpu_tachometer,
+            ),
+            fan_readback(
+                readback_timestamp,
+                EvidenceFan::Gpu,
+                FanReadbackField::Enable,
+                1,
+                &identities.gpu_enable,
+            ),
+            fan_readback(
+                readback_timestamp,
+                EvidenceFan::Gpu,
+                FanReadbackField::Pwm,
+                u32::from(observed.gpu_pwm),
+                &identities.gpu_pwm,
+            ),
+            fan_readback(
+                readback_timestamp,
+                EvidenceFan::Gpu,
+                FanReadbackField::Rpm,
+                observed.gpu_rpm,
+                &identities.gpu_tachometer,
+            ),
+        ],
+        controller_fault: None,
+        system_stable: true,
+        kernel_faults: Vec::new(),
+        nvidia_faults: Vec::new(),
+    };
+    encode(serde_json::json!({
+        "observer_present": true,
+        "observation": observation,
+        "cpu_time_snapshot": capture.cpu_time_snapshot,
+        "cpu_throttle_snapshot": capture.cpu_throttle_snapshot,
+    }))
+}
+
+fn stop_matched_workload(
+    deadline: u64,
+    session: &mut CalibrationSession,
+) -> Result<Value, Box<dyn Error>> {
+    let matched = active_matched_session(session)?;
+    if matched.workload_started {
+        crate::stop_workload_process(deadline, crate::StopMode::Graceful)?;
+        matched.workload_started = false;
+    }
+    encode(ConfirmationResponse {
+        observer_present: require_observer(deadline).is_ok(),
+        confirmed: true,
+    })
+}
+
+fn restore_matched_fan(
+    request: CalibrationRequest,
+    session: &mut CalibrationSession,
+    ownership: &mut ControllerOwnership<'_, SystemOwnershipPlatform>,
+    device: &fan_control_core::AcerHwmonDevice,
+    identities: &FanEndpointIdentitiesEvidence,
+) -> Result<Value, Box<dyn Error>> {
+    let matched = session
+        .matched
+        .as_mut()
+        .ok_or("matched control has not started")?;
+    if matched.restoration.is_none() {
+        matched.control.take();
+        matched.restoration = Some(restore_with_evidence(ownership, device, identities)?);
+    }
+    let index = match request.fan {
+        EvidenceFan::Cpu => 0,
+        EvidenceFan::Gpu => 1,
+    };
+    encode(matched.restoration.as_ref().expect("created above").fans[index].clone())
+}
+
+fn active_matched_session(
+    session: &mut CalibrationSession,
+) -> Result<&mut MatchedSession, Box<dyn Error>> {
+    let matched = session
+        .matched
+        .as_mut()
+        .ok_or("matched control has not started")?;
+    if matched.control.is_none() || matched.restoration.is_some() {
+        return Err("matched control is not active".into());
+    }
+    Ok(matched)
+}
+
+fn timestamp_at(
+    clock: MonotonicClockBridge,
+    local_monotonic_millis: u64,
+) -> Result<EvidenceTimestamp, Box<dyn Error>> {
+    let mut timestamp = evidence_timestamp()?;
+    timestamp.monotonic_millis = clock.absolutize_millis(local_monotonic_millis);
+    Ok(timestamp)
+}
+
+fn fan_command(timestamp: EvidenceTimestamp, fan: EvidenceFan, pwm: u8) -> FanCommandEvidence {
+    FanCommandEvidence {
+        timestamp,
+        fan,
+        field: FanControlField::Pwm,
+        value: u32::from(pwm),
+    }
+}
+
+fn fan_readback(
+    timestamp: EvidenceTimestamp,
+    fan: EvidenceFan,
+    field: FanReadbackField,
+    value: u32,
+    endpoint_identity: &str,
+) -> FanReadbackEvidence {
+    FanReadbackEvidence {
+        timestamp,
+        source_timestamp: None,
+        fresh: None,
+        boot_id: None,
+        fan,
+        field,
+        value: Some(value),
+        endpoint_identity: endpoint_identity.to_owned(),
+        outcome: ObservationOutcome::Confirmed,
+        phase: Some(FanReadbackPhase::Sample),
     }
 }
 
@@ -556,8 +851,30 @@ fn restore_active_session(
     device: &fan_control_core::AcerHwmonDevice,
     identities: &FanEndpointIdentitiesEvidence,
 ) -> Result<(), Box<dyn Error>> {
+    let mut failures = Vec::new();
+    if let Some(matched) = session.matched.as_mut() {
+        if matched.control.take().is_some() && matched.restoration.is_none() {
+            match restore_with_evidence(ownership, device, identities) {
+                Ok(restoration) => matched.restoration = Some(restoration),
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        if matched.workload_started {
+            let deadline = monotonic_millis()?.saturating_add(2_000);
+            match crate::stop_workload_process(deadline, crate::StopMode::Kill) {
+                Ok(_) => matched.workload_started = false,
+                Err(error) => failures.push(format!("workload containment failed: {error}")),
+            }
+        }
+    }
     if session.armed.take().is_some() && session.restoration.is_none() {
-        session.restoration = Some(restore_with_evidence(ownership, device, identities)?);
+        match restore_with_evidence(ownership, device, identities) {
+            Ok(restoration) => session.restoration = Some(restoration),
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+    if !failures.is_empty() {
+        return Err(failures.join("; ").into());
     }
     Ok(())
 }

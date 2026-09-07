@@ -2,8 +2,11 @@ use std::{error::Error, fmt, time::Duration};
 
 use crate::{
     AcerHwmonDevice, BoundedIdentityBoundFileAccess, CalibrationReadbackSample, Clock,
-    ControllerOwnership, EmergencyContainmentReport, Fan, FirmwareAutoRestorationError,
-    QualificationArmedFanControl, RuntimeLockAccess, ownership::FirmwareAutoSafingOutcome,
+    ControllerOwnership, EmergencyContainmentReport, Fan, FanCalibrationEvidence,
+    FirmwareAutoRestorationError, HealthyControl, QualificationArmedFanControl,
+    QualificationEnvelopeIdentityV1, QualificationTachometerCalibrationsV1, RuntimeLockAccess,
+    ShutdownRequest, ValidatedConfig, authority::requalification_policy_snapshot,
+    ownership::FirmwareAutoSafingOutcome,
 };
 
 const CUSTOM_CONTROL: &str = "1";
@@ -13,6 +16,130 @@ const MAXIMUM_PWM: &str = "255";
 pub struct QualificationCommandedCalibrationSample {
     pub commanded_at_monotonic_millis: u64,
     pub sample: CalibrationReadbackSample,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QualificationControlObservation {
+    pub observed_at_monotonic_millis: u64,
+    pub cpu_pwm: u8,
+    pub gpu_pwm: u8,
+    pub cpu_rpm: u32,
+    pub gpu_rpm: u32,
+}
+
+/// Digest-bound production policy and measured tachometer data admitted only for a supervised
+/// qualification session. This cannot satisfy normal runtime authority admission.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualificationControlPolicy {
+    config: ValidatedConfig,
+    calibration: crate::tachometer::QualifiedTachometerCalibrations,
+}
+
+impl QualificationControlPolicy {
+    /// Returns the exact protected configuration that will drive this temporary controller.
+    pub const fn protected_config(&self) -> &ValidatedConfig {
+        &self.config
+    }
+}
+
+/// Validates the exact protected policy identity and measured calibrations before any Custom
+/// write. The returned capability can only be combined with a live qualification handover.
+pub fn prepare_qualification_control_policy(
+    protected_policy_source: &str,
+    expected: &QualificationEnvelopeIdentityV1,
+    cpu: FanCalibrationEvidence,
+    gpu: FanCalibrationEvidence,
+) -> Result<QualificationControlPolicy, String> {
+    let snapshot = requalification_policy_snapshot(protected_policy_source)
+        .map_err(|error| format!("protected qualification policy rejected: {error}"))?;
+    if expected.qualification_record_schema_version != 1
+        || snapshot.qualification_id != expected.qualification_id
+        || snapshot.policy_version != expected.policy_version
+        || snapshot.compatibility != expected.compatibility
+        || snapshot.protected_policy_sha256 != expected.protected_policy_sha256
+    {
+        return Err(
+            "protected qualification policy does not match the qualification envelope".into(),
+        );
+    }
+    let calibration = QualificationTachometerCalibrationsV1 { cpu, gpu }
+        .qualify(&snapshot.protected)
+        .map_err(|error| format!("measured qualification calibration rejected: {error}"))?;
+    Ok(QualificationControlPolicy {
+        config: snapshot.protected,
+        calibration,
+    })
+}
+
+/// Converts the deliberately provisional handover into the ordinary production control state.
+/// No persistent authority is created; restoring Firmware Auto invalidates the state.
+pub fn begin_qualification_control(
+    armed: QualificationArmedFanControl,
+    policy: QualificationControlPolicy,
+    shutdown: ShutdownRequest,
+) -> HealthyControl {
+    HealthyControl::from_armed(
+        armed.into_control_armed(policy.config, policy.calibration),
+        shutdown,
+    )
+}
+
+/// Captures an identity-bound trace of the output selected by the production control cycle.
+/// Any stale receipt, changed endpoint, mode/PWM mismatch, or malformed tachometer immediately
+/// restores Firmware Auto (or escalates to maximum containment) before returning an error.
+pub fn observe_qualification_control_before<P>(
+    ownership: &mut ControllerOwnership<'_, P>,
+    control: &HealthyControl,
+    deadline: Duration,
+) -> Result<QualificationControlObservation, QualificationControlError>
+where
+    P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
+{
+    let device = control.device().clone();
+    let result = (|| -> Result<QualificationControlObservation, String> {
+        if !control.is_current_for(ownership) {
+            return Err("qualification control receipt is not current".into());
+        }
+        if ownership.platform_mut().monotonic_now() >= deadline {
+            return Err("qualification control observation deadline expired".into());
+        }
+        if !device
+            .abi_is_current_before(ownership.platform_mut(), deadline)
+            .map_err(|error| format!("fan ABI revalidation failed: {error}"))?
+        {
+            return Err("fan device or endpoint identity changed".into());
+        }
+        let outputs = control.last_outputs();
+        let cpu_enable = read_u8(ownership, &device, device.cpu().enable(), deadline)?;
+        let cpu_pwm = read_u8(ownership, &device, device.cpu().pwm(), deadline)?;
+        let cpu_rpm = read_rpm(ownership, &device, device.cpu().tachometer(), deadline)?
+            .ok_or("CPU tachometer reported zero RPM")?;
+        let gpu_enable = read_u8(ownership, &device, device.gpu().enable(), deadline)?;
+        let gpu_pwm = read_u8(ownership, &device, device.gpu().pwm(), deadline)?;
+        let gpu_rpm = read_rpm(ownership, &device, device.gpu().tachometer(), deadline)?
+            .ok_or("GPU tachometer reported zero RPM")?;
+        if cpu_enable != 1
+            || gpu_enable != 1
+            || cpu_pwm != outputs.cpu_pwm().value()
+            || gpu_pwm != outputs.gpu_pwm().value()
+        {
+            return Err(format!(
+                "qualification control readback mismatch: CPU mode/PWM={cpu_enable}/{cpu_pwm}, GPU mode/PWM={gpu_enable}/{gpu_pwm}"
+            ));
+        }
+        let observed_at = ownership.platform_mut().monotonic_now();
+        if observed_at >= deadline {
+            return Err("qualification control observation exceeded its deadline".into());
+        }
+        Ok(QualificationControlObservation {
+            observed_at_monotonic_millis: duration_millis(observed_at),
+            cpu_pwm,
+            gpu_pwm,
+            cpu_rpm,
+            gpu_rpm,
+        })
+    })();
+    result.map_err(|reason| safe_after_failure(ownership, &device, reason))
 }
 
 /// Returns the controller clock used by qualification I/O deadlines and observations.
