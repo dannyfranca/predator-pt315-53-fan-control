@@ -124,6 +124,7 @@ crates/fan-control-daemon/tests/service_supervision.rs
 crates/fan-control-daemon/tests/sleep_guard.rs
 crates/fan-control-daemon/tests/startup.rs
 crates/fan-control-harness/Cargo.toml
+crates/fan-control-harness/src/lifecycle.rs
 crates/fan-control-harness/src/main.rs
 crates/fan-control-harness/src/server.rs
 crates/fan-control-harness/src/telemetry.rs
