@@ -441,7 +441,7 @@ fn protected_policy_example_is_parseable_and_explicitly_non_authoritative() {
         "/../../policy/qualified-envelope.example.toml"
     ));
     let example: toml::Value = toml::from_str(source).unwrap();
-    assert_eq!(example["schema_version"].as_integer(), Some(2));
+    assert_eq!(example["schema_version"].as_integer(), Some(3));
     assert!(source.contains("FORMAT EXAMPLE ONLY"));
     assert!(source.contains("cannot authorize Custom control"));
     assert!(source.contains(&"0".repeat(64)));

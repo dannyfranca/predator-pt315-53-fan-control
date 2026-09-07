@@ -28,7 +28,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
-use crate::{QualificationRecordV2, SupervisedEnduranceAuthorizationV1};
+use crate::{QualificationRecordV3, SupervisedEnduranceAuthorizationV1};
 
 pub const SUPERVISED_ENDURANCE_DURATION_MILLIS: u64 = 60 * 60 * 1_000;
 pub const SUPERVISED_ENDURANCE_SAMPLE_COUNT: usize = 1_800;
@@ -2448,12 +2448,30 @@ mod tests {
     #[test]
     fn qualification_record_deserialization_requires_the_authority_schema() {
         let identity = legacy_record().qualification_envelope;
-        let record = QualificationRecordV2 {
-            schema_version: 2,
+        let record = QualificationRecordV3 {
+            schema_version: 3,
             qualification_id: identity.qualification_id,
             policy_version: identity.policy_version,
             protected_policy_sha256: identity.protected_policy_sha256,
             compatibility: identity.compatibility,
+            tachometer_calibrations: crate::QualificationTachometerCalibrationsV1 {
+                cpu: crate::FanCalibrationEvidence {
+                    fan: EvidenceFan::Cpu,
+                    floor_basis_points: 5_000,
+                    slowest_response_millis: None,
+                    protocol_checkpoint: None,
+                    response_deadline_millis: 4_000,
+                    anchors: vec![],
+                },
+                gpu: crate::FanCalibrationEvidence {
+                    fan: EvidenceFan::Gpu,
+                    floor_basis_points: 5_000,
+                    slowest_response_millis: None,
+                    protocol_checkpoint: None,
+                    response_deadline_millis: 4_000,
+                    anchors: vec![],
+                },
+            },
             supervised_endurance: SupervisedEnduranceAuthorizationV1 {
                 schema_version: 1,
                 evidence_sha256: "a".repeat(64),
@@ -2472,10 +2490,10 @@ mod tests {
             },
         };
         let source = serde_json::to_string(&record).expect("qualification record serializes");
-        assert!(serde_json::from_str::<QualificationRecordV2>(&source).is_ok());
+        assert!(serde_json::from_str::<QualificationRecordV3>(&source).is_ok());
         assert!(
-            serde_json::from_str::<QualificationRecordV2>(&source.replacen(
-                "\"schema_version\":2",
+            serde_json::from_str::<QualificationRecordV3>(&source.replacen(
+                "\"schema_version\":3",
                 "\"schema_version\":1",
                 1
             ))

@@ -48,7 +48,7 @@ pub use arming::{
 pub use authority::{
     AdmittedPolicyAuthority, PolicyAuthorityAdmissionError, PolicyAuthorityError,
     QUALIFICATION_RECORD_PATH, SUPERVISED_ENDURANCE_EVIDENCE_PATH, admit_policy_authority,
-    validate_qualification_evidence_v2,
+    validate_qualification_evidence_v3,
 };
 pub use baseline::{
     BaselineCleanupAttestation, BaselineObservation, BaselineStartingConditions,
@@ -172,8 +172,8 @@ pub use promotion::{
     validate_promotion_manifest_v1,
 };
 pub use qualification::{
-    QualificationAuthorizationError, QualificationRecordV2, SupervisedEnduranceAuthorizationV1,
-    write_qualification_record_after_endurance,
+    QualificationAuthorizationError, QualificationRecordV3, QualificationTachometerCalibrationsV1,
+    SupervisedEnduranceAuthorizationV1, write_qualification_record_after_endurance,
     write_qualification_record_after_endurance_with_guard,
 };
 pub use requalification::{

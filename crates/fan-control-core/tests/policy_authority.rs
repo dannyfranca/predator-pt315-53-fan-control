@@ -7,7 +7,7 @@ use fan_control_core::{
     CompatibilityAdmissionError, CompatibilityObservation, FakePlatform, FilePermissions,
     PolicyAuthorityAdmissionError, PolicyAuthorityError, QUALIFICATION_RECORD_PATH,
     SUPERVISED_ENDURANCE_EVIDENCE_PATH, TachometerCalibrationError, acquire_controller_ownership,
-    admit_policy_authority, discover_acer_hwmon, validate_qualification_evidence_v2,
+    admit_policy_authority, discover_acer_hwmon, validate_qualification_evidence_v3,
 };
 
 mod support;
@@ -26,10 +26,10 @@ fn retained_record_validation_rejects_incomplete_or_rebound_authorization() {
     let record = matching_record(PROTECTED_POLICY);
     let evidence = matching_endurance_evidence(PROTECTED_POLICY);
     let path = Path::new(SUPERVISED_ENDURANCE_EVIDENCE_PATH);
-    validate_qualification_evidence_v2(&record, &evidence, path).unwrap();
+    validate_qualification_evidence_v3(&record, &evidence, path).unwrap();
 
     for invalid in [
-        record.replacen("\"schema_version\":2", "\"schema_version\":3", 1),
+        record.replacen("\"schema_version\":3", "\"schema_version\":2", 1),
         record.replacen(
             "\"stage\":\"supervised-endurance\"",
             "\"stage\":\"other\"",
@@ -39,12 +39,12 @@ fn retained_record_validation_rejects_incomplete_or_rebound_authorization() {
         record.replacen(&sha256(PROTECTED_POLICY), &"0".repeat(64), 1),
     ] {
         assert!(
-            validate_qualification_evidence_v2(&invalid, &evidence, path).is_err(),
+            validate_qualification_evidence_v3(&invalid, &evidence, path).is_err(),
             "invalid retained authorization was accepted: {invalid}"
         );
     }
     assert!(
-        validate_qualification_evidence_v2(&record, &evidence, Path::new("/other/evidence.json"))
+        validate_qualification_evidence_v3(&record, &evidence, Path::new("/other/evidence.json"))
             .is_err()
     );
 
@@ -80,7 +80,7 @@ fn retained_record_validation_rejects_incomplete_or_rebound_authorization() {
         let altered = serde_json::to_string(&altered).unwrap();
         let rebound_record = record_bound_to_evidence(&record, &altered, bind_completed_at);
         assert!(
-            validate_qualification_evidence_v2(&rebound_record, &altered, path).is_err(),
+            validate_qualification_evidence_v3(&rebound_record, &altered, path).is_err(),
             "altered evidence field was accepted after digest rebinding: {field}"
         );
     }
@@ -106,7 +106,7 @@ fn retained_record_validation_rejects_non_utf8_evidence_paths() {
     ));
 
     assert!(matches!(
-        validate_qualification_evidence_v2(&record, &evidence, path),
+        validate_qualification_evidence_v3(&record, &evidence, path),
         Err(PolicyAuthorityError::InvalidIdentity {
             artifact: "supervised endurance evidence",
             field: "evidence_path",
@@ -149,76 +149,51 @@ fn exact_policy_record_and_live_envelope_are_admitted_together() {
 
 #[test]
 fn unsafe_or_incomplete_tachometer_calibration_never_becomes_authority() {
-    for (policy, expected_fan) in [
-        (
-            PROTECTED_POLICY.replacen("floor_basis_points = 3000", "floor_basis_points = 2999", 1),
-            fan_control_core::Fan::Cpu,
-        ),
-        (
-            PROTECTED_POLICY.replacen(
-                "[calibration.gpu]\nfloor_basis_points = 2500\nresponse_deadline_millis = 4000",
-                "[calibration.gpu]\nfloor_basis_points = 2500\nresponse_deadline_millis = 0",
-                1,
-            ),
-            fan_control_core::Fan::Gpu,
-        ),
-        (
-            PROTECTED_POLICY.replacen(
-                "[calibration.gpu]\nfloor_basis_points = 2500\nresponse_deadline_millis = 4000",
-                "[calibration.gpu]\nfloor_basis_points = 2500\nresponse_deadline_millis = 30001",
-                1,
-            ),
-            fan_control_core::Fan::Gpu,
-        ),
-        (
-            PROTECTED_POLICY.replacen(
-                "{ duty_basis_points = 10000, median_rpm = 3500 }",
-                "{ duty_basis_points = 3000, median_rpm = 3500 }",
-                1,
-            ),
-            fan_control_core::Fan::Cpu,
-        ),
-        (
-            PROTECTED_POLICY.replacen("median_rpm = 3500", "median_rpm = 2000", 1),
-            fan_control_core::Fan::Cpu,
-        ),
-        (
-            PROTECTED_POLICY.replacen("median_rpm = 2500", "median_rpm = 99", 1),
-            fan_control_core::Fan::Cpu,
-        ),
-        (
-            PROTECTED_POLICY.replacen("median_rpm = 3500", "median_rpm = 20001", 1),
-            fan_control_core::Fan::Cpu,
-        ),
-    ] {
-        let record = matching_record(&policy);
-        let observation = matching_observation_for_policy(&policy);
-        let (result, _) = admit(&policy, &record, &[observation]);
+    let record = matching_record(PROTECTED_POLICY).replacen(
+        "\"floor_basis_points\":5000",
+        "\"floor_basis_points\":4000",
+        1,
+    );
+    let observation = matching_observation_for_policy(PROTECTED_POLICY);
+    let (result, _) = admit(PROTECTED_POLICY, &record, &[observation]);
+    assert!(matches!(
+        result.unwrap_err().reason(),
+        PolicyAuthorityError::InvalidTachometerCalibration(
+            TachometerCalibrationError::InvalidMeasuredEvidence { fan }
+        ) if *fan == fan_control_core::Fan::Cpu
+    ));
 
-        let error = result.unwrap_err();
-        assert!(
-            matches!(
-                error.reason(),
-                PolicyAuthorityError::InvalidTachometerCalibration(
-                    TachometerCalibrationError::FloorMismatch { fan, .. }
-                        | TachometerCalibrationError::ZeroResponseDeadline { fan }
-                        | TachometerCalibrationError::ResponseDeadlineTooLong { fan, .. }
-                        | TachometerCalibrationError::AnchorRangeMismatch { fan }
-                        | TachometerCalibrationError::AnchorsNotStrictlyIncreasing { fan }
-                        | TachometerCalibrationError::RpmZeroOrDecreasing { fan }
-                        | TachometerCalibrationError::RpmOutOfRange { fan, .. }
-                ) if *fan == expected_fan
-            ),
-            "expected {expected_fan:?}, got {:?}",
-            error.reason()
-        );
-    }
+    let policy = PROTECTED_POLICY.replacen(
+        "[protected.fans.cpu]\nminimum_duty_percent = 50",
+        "[protected.fans.cpu]\nminimum_duty_percent = 40",
+        1,
+    );
+    let observation = matching_observation_for_policy(&policy);
+    let (result, _) = admit(&policy, &matching_record(&policy), &[observation]);
+    assert!(matches!(
+        result.unwrap_err().reason(),
+        PolicyAuthorityError::InvalidTachometerCalibration(
+            TachometerCalibrationError::ProtectedFloorBelowCalibrated { fan, .. }
+        ) if *fan == fan_control_core::Fan::Cpu
+    ));
+}
+
+#[test]
+fn protected_policy_may_choose_a_floor_above_the_measured_safe_floor() {
+    let policy = PROTECTED_POLICY
+        .replace("minimum_duty_percent = 50", "minimum_duty_percent = 60")
+        .replace("demand_percent = 50", "demand_percent = 60");
+    let observation = matching_observation_for_policy(&policy);
+
+    let (result, _) = admit(&policy, &matching_record(&policy), &[observation]);
+
+    result.expect("a more conservative protected floor remains inside measured calibration");
 }
 
 #[test]
 fn both_formats_reject_unsupported_missing_unknown_and_malformed_fields() {
     for policy in [
-        PROTECTED_POLICY.replacen("schema_version = 2", "schema_version = 3", 1),
+        PROTECTED_POLICY.replacen("schema_version = 3", "schema_version = 4", 1),
         PROTECTED_POLICY.replacen("qualification_id = \"pt31553-v1\"\n", "", 1),
         PROTECTED_POLICY.replacen(
             "policy_version = \"1.0.0\"",
@@ -235,7 +210,7 @@ fn both_formats_reject_unsupported_missing_unknown_and_malformed_fields() {
 
     let record = matching_record(PROTECTED_POLICY);
     for candidate in [
-        record.replacen("\"schema_version\":2", "\"schema_version\":1", 1),
+        record.replacen("\"schema_version\":3", "\"schema_version\":2", 1),
         record.replacen("\"qualification_id\":\"pt31553-v1\",", "", 1),
         record.replacen("{", "{\"unexpected\":true,", 1),
         record.replacen(
@@ -256,7 +231,7 @@ fn legacy_or_unbound_records_never_admit_authority() {
     let record = matching_record(PROTECTED_POLICY);
     let evidence_sha256 = sha256(&matching_endurance_evidence(PROTECTED_POLICY));
     for candidate in [
-        record.replacen("\"schema_version\":2", "\"schema_version\":1", 1),
+        record.replacen("\"schema_version\":3", "\"schema_version\":2", 1),
         record.replacen(
             &format!("\"evidence_sha256\":\"{evidence_sha256}\""),
             "\"evidence_sha256\":\"unbound\"",
@@ -278,22 +253,15 @@ fn legacy_or_unbound_records_never_admit_authority() {
 }
 
 #[test]
-fn pre_calibration_v1_manifest_requires_explicit_requalification() {
-    let calibration_start = PROTECTED_POLICY.find("[calibration.cpu]").unwrap();
-    let protected_start = PROTECTED_POLICY.find("[protected]\n").unwrap();
-    let policy = format!(
-        "{}{}",
-        &PROTECTED_POLICY[..calibration_start],
-        &PROTECTED_POLICY[protected_start..]
-    )
-    .replacen("schema_version = 2", "schema_version = 1", 1);
+fn pre_binding_v2_manifest_requires_explicit_requalification() {
+    let policy = PROTECTED_POLICY.replacen("schema_version = 3", "schema_version = 2", 1);
     let observation = matching_observation_for_policy(PROTECTED_POLICY);
     let (result, platform) = admit(&policy, &matching_record(&policy), &[observation]);
 
     assert!(matches!(
         result.unwrap_err().reason(),
         PolicyAuthorityError::ProtectedPolicyParse(error)
-            if error.to_string().contains("V1 manifests require requalification")
+            if error.to_string().contains("older manifests embed unmeasured tachometer calibration")
     ));
     assert_firmware_auto(&platform);
 }
@@ -417,7 +385,7 @@ fn missing_or_ambiguous_live_observations_never_admit_authority() {
 #[test]
 fn invalid_protected_content_never_becomes_authority() {
     let invalid_policy =
-        PROTECTED_POLICY.replacen("minimum_duty_percent = 30", "minimum_duty_percent = 0", 1);
+        PROTECTED_POLICY.replacen("minimum_duty_percent = 50", "minimum_duty_percent = 0", 1);
     let record = matching_record(&invalid_policy);
     let observation = matching_observation_for_policy(&invalid_policy);
 

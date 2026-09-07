@@ -85,7 +85,7 @@ pub const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 pub const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 pub const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-pub const PROTECTED_POLICY: &str = r#"schema_version = 2
+pub const PROTECTED_POLICY: &str = r#"schema_version = 3
 qualification_id = "pt31553-v1"
 policy_version = "1.0.0"
 
@@ -129,22 +129,6 @@ forbidden_capabilities = [
   "alternate-fan-write-backend",
 ]
 
-[calibration.cpu]
-floor_basis_points = 3000
-response_deadline_millis = 4000
-anchors = [
-  { duty_basis_points = 3000, median_rpm = 2500 },
-  { duty_basis_points = 10000, median_rpm = 3500 },
-]
-
-[calibration.gpu]
-floor_basis_points = 2500
-response_deadline_millis = 4000
-anchors = [
-  { duty_basis_points = 2500, median_rpm = 2500 },
-  { duty_basis_points = 10000, median_rpm = 3500 },
-]
-
 [protected]
 schema_version = 1
 
@@ -154,36 +138,36 @@ lower_demand_hold_seconds = 10
 max_down_ramp_percent_per_second = 1.0
 
 [protected.fans.cpu]
-minimum_duty_percent = 30
+minimum_duty_percent = 50
 
 [protected.fans.gpu]
-minimum_duty_percent = 25
+minimum_duty_percent = 50
 
 [protected.profiles.ac]
 cpu_curve = [
-  { temperature_c = 40, demand_percent = 30 },
+  { temperature_c = 40, demand_percent = 50 },
   { temperature_c = 90, demand_percent = 100 },
 ]
 gpu_curve = [
-  { temperature_c = 35, demand_percent = 30 },
+  { temperature_c = 35, demand_percent = 50 },
   { temperature_c = 82, demand_percent = 100 },
 ]
 
 [protected.profiles.battery]
 cpu_curve = [
-  { temperature_c = 40, demand_percent = 30 },
+  { temperature_c = 40, demand_percent = 50 },
   { temperature_c = 90, demand_percent = 100 },
 ]
 gpu_curve = [
-  { temperature_c = 35, demand_percent = 30 },
+  { temperature_c = 35, demand_percent = 50 },
   { temperature_c = 82, demand_percent = 100 },
 ]
 "#;
 
 pub fn runtime_protected_policy() -> String {
     PROTECTED_POLICY.replacen(
-        "[protected.profiles.battery]\ncpu_curve = [\n  { temperature_c = 40, demand_percent = 30 },\n  { temperature_c = 90, demand_percent = 100 },\n]\ngpu_curve = [\n  { temperature_c = 35, demand_percent = 30 },\n  { temperature_c = 82, demand_percent = 100 },\n]\n",
-        "[protected.profiles.battery]\ncpu_curve = [\n  { temperature_c = 40, demand_percent = 30 },\n  { temperature_c = 70, demand_percent = 50 },\n  { temperature_c = 90, demand_percent = 100 },\n]\ngpu_curve = [\n  { temperature_c = 35, demand_percent = 30 },\n  { temperature_c = 65, demand_percent = 50 },\n  { temperature_c = 82, demand_percent = 100 },\n]\n",
+        "[protected.profiles.battery]\ncpu_curve = [\n  { temperature_c = 40, demand_percent = 50 },\n  { temperature_c = 90, demand_percent = 100 },\n]\ngpu_curve = [\n  { temperature_c = 35, demand_percent = 50 },\n  { temperature_c = 82, demand_percent = 100 },\n]\n",
+        "[protected.profiles.battery]\ncpu_curve = [\n  { temperature_c = 40, demand_percent = 50 },\n  { temperature_c = 70, demand_percent = 60 },\n  { temperature_c = 90, demand_percent = 100 },\n]\ngpu_curve = [\n  { temperature_c = 35, demand_percent = 50 },\n  { temperature_c = 65, demand_percent = 60 },\n  { temperature_c = 82, demand_percent = 100 },\n]\n",
         1,
     )
 }
@@ -200,7 +184,7 @@ fn fixture_compatibility_declaration(policy: &str) -> Option<CompatibilityDeclar
     let source = policy
         .split_once("[compatibility]\n")?
         .1
-        .split_once("\n[calibration.cpu]\n")?
+        .split_once("\n[protected]\n")?
         .0
         .replace("[compatibility.", "[");
     parse_compatibility_v1(&source).ok()
@@ -245,11 +229,15 @@ pub fn matching_record(policy: &str) -> String {
     let completed_at =
         serde_json::from_str::<serde_json::Value>(&evidence).unwrap()["completed_at"].clone();
     serde_json::to_string(&serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "qualification_id": "pt31553-v1",
         "policy_version": "1.0.0",
         "protected_policy_sha256": sha256(policy),
         "compatibility": compatibility_for_fixture(policy),
+        "tachometer_calibrations": {
+            "cpu": completed_calibration_evidence(Fan::Cpu),
+            "gpu": completed_calibration_evidence(Fan::Gpu)
+        },
         "supervised_endurance": {
             "schema_version": 1,
             "evidence_sha256": evidence_sha256,

@@ -16,6 +16,9 @@ use flate2::read::GzDecoder;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+mod calibration_support;
+use calibration_support::completed_calibration;
+
 const AUTHORIZED_EVIDENCE_PATH: &str =
     "/var/lib/pt31553-fan-control/evidence/supervised-endurance.json";
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -107,7 +110,7 @@ impl Fixture {
         let manifest = root.join("promotion.json");
         let promoted = root.join("promoted.json");
 
-        let policy_bytes = b"schema_version = 2\nqualification_id = \"pt31553-v1\"\n";
+        let policy_bytes = b"schema_version = 3\nqualification_id = \"pt31553-v1\"\n";
         fs::write(&policy, policy_bytes).unwrap();
         let mut compressed = GzDecoder::new(
             &include_bytes!("../../../qualification/supervised-endurance-v2.json.gz")[..],
@@ -136,11 +139,15 @@ impl Fixture {
         let evidence_bytes = fs::read(&evidence).unwrap();
         let envelope = &evidence_value["qualification_envelope"];
         let record = json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "qualification_id": envelope["qualification_id"],
             "policy_version": envelope["policy_version"],
             "protected_policy_sha256": envelope["protected_policy_sha256"],
             "compatibility": envelope["compatibility"],
+            "tachometer_calibrations": {
+                "cpu": completed_calibration(fan_control_core::Fan::Cpu),
+                "gpu": completed_calibration(fan_control_core::Fan::Gpu)
+            },
             "supervised_endurance": {
                 "schema_version": 1,
                 "evidence_sha256": sha(&evidence_bytes),

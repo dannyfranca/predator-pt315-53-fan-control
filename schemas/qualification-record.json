@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/dannyfranca/predator-pt315-53-fan-control/schemas/qualification-record.json",
-  "title": "PT315-53 Qualification Record v2",
+  "title": "PT315-53 Qualification Record v3",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -10,20 +10,77 @@
     "policy_version",
     "protected_policy_sha256",
     "compatibility",
+    "tachometer_calibrations",
     "supervised_endurance"
   ],
   "properties": {
-    "schema_version": { "const": 2 },
+    "schema_version": { "const": 3 },
     "qualification_id": { "type": "string", "minLength": 1 },
     "policy_version": { "type": "string", "minLength": 1 },
     "protected_policy_sha256": { "$ref": "#/$defs/sha256" },
     "compatibility": { "$ref": "#/$defs/compatibility" },
+    "tachometer_calibrations": { "$ref": "#/$defs/tachometer_calibrations" },
     "supervised_endurance": { "$ref": "#/$defs/supervised_endurance" }
   },
   "$defs": {
     "sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
+    },
+    "tachometer_calibrations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "gpu"],
+      "properties": {
+        "cpu": {
+          "allOf": [
+            { "$ref": "#/$defs/calibration" },
+            { "properties": { "fan": { "const": "cpu" } } }
+          ]
+        },
+        "gpu": {
+          "allOf": [
+            { "$ref": "#/$defs/calibration" },
+            { "properties": { "fan": { "const": "gpu" } } }
+          ]
+        }
+      }
+    },
+    "calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fan",
+        "floor_basis_points",
+        "slowest_response_millis",
+        "protocol_checkpoint",
+        "response_deadline_millis",
+        "anchors"
+      ],
+      "properties": {
+        "fan": { "enum": ["cpu", "gpu"] },
+        "floor_basis_points": { "enum": [4000, 5000, 6000, 7000] },
+        "slowest_response_millis": { "type": "integer", "minimum": 1000, "maximum": 10000 },
+        "protocol_checkpoint": {
+          "type": "object",
+          "$comment": "The runtime strictly deserializes and replays this checkpoint before admission."
+        },
+        "response_deadline_millis": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "anchors": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["duty_basis_points", "median_rpm"],
+            "properties": {
+              "duty_basis_points": { "type": "integer", "minimum": 0, "maximum": 10000 },
+              "median_rpm": { "type": "integer", "minimum": 100, "maximum": 20000 }
+            }
+          }
+        }
+      }
     },
     "compatibility": {
       "type": "object",

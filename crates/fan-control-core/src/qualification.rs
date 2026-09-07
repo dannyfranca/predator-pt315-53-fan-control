@@ -4,9 +4,10 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CompatibilityDeclarationV1, EVIDENCE_SCHEMA_VERSION_V2, EvidenceRecordStatus,
-    EvidenceTimestamp, EvidenceWriteError, RunOutcomeStatus, StoppedProcess,
-    SupervisedEndurancePlan, SupervisedEndurancePlanError, SupervisedEnduranceReport,
+    CompatibilityDeclarationV1, EVIDENCE_SCHEMA_VERSION_V2, EvidenceFan, EvidenceRecordStatus,
+    EvidenceTimestamp, EvidenceWriteError, FanCalibrationEvidence, RunOutcomeStatus,
+    StoppedProcess, SupervisedEndurancePlan, SupervisedEndurancePlanError,
+    SupervisedEnduranceReport,
     endurance::{
         endurance_thermal_envelope, supervised_endurance_is_complete,
         validate_endurance_thermal_limits_against_baselines, validate_qualification_plan,
@@ -19,14 +20,32 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct QualificationRecordV2 {
+pub struct QualificationRecordV3 {
     #[serde(deserialize_with = "deserialize_qualification_schema_version")]
     pub(crate) schema_version: u32,
     pub(crate) qualification_id: String,
     pub(crate) policy_version: String,
     pub(crate) protected_policy_sha256: String,
     pub(crate) compatibility: CompatibilityDeclarationV1,
+    pub(crate) tachometer_calibrations: QualificationTachometerCalibrationsV1,
     pub(crate) supervised_endurance: SupervisedEnduranceAuthorizationV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationTachometerCalibrationsV1 {
+    pub(crate) cpu: FanCalibrationEvidence,
+    pub(crate) gpu: FanCalibrationEvidence,
+}
+
+impl QualificationTachometerCalibrationsV1 {
+    pub fn cpu(&self) -> &FanCalibrationEvidence {
+        &self.cpu
+    }
+
+    pub fn gpu(&self) -> &FanCalibrationEvidence {
+        &self.gpu
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,7 +65,7 @@ pub struct SupervisedEnduranceAuthorizationV1 {
     pub(crate) completed_at: EvidenceTimestamp,
 }
 
-impl QualificationRecordV2 {
+impl QualificationRecordV3 {
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -65,6 +84,10 @@ impl QualificationRecordV2 {
 
     pub fn compatibility(&self) -> &CompatibilityDeclarationV1 {
         &self.compatibility
+    }
+
+    pub fn tachometer_calibrations(&self) -> &QualificationTachometerCalibrationsV1 {
+        &self.tachometer_calibrations
     }
 
     pub fn supervised_endurance(&self) -> &SupervisedEnduranceAuthorizationV1 {
@@ -121,7 +144,7 @@ pub fn write_qualification_record_after_endurance(
     evidence_path: &Path,
     plan: &SupervisedEndurancePlan<'_>,
     report: &SupervisedEnduranceReport,
-) -> Result<QualificationRecordV2, QualificationAuthorizationError> {
+) -> Result<QualificationRecordV3, QualificationAuthorizationError> {
     write_qualification_record_after_endurance_with_guard(
         destination,
         evidence_path,
@@ -137,7 +160,7 @@ pub fn write_qualification_record_after_endurance_with_guard(
     plan: &SupervisedEndurancePlan<'_>,
     report: &SupervisedEnduranceReport,
     commit: impl FnOnce() -> bool,
-) -> Result<QualificationRecordV2, QualificationAuthorizationError> {
+) -> Result<QualificationRecordV3, QualificationAuthorizationError> {
     let envelope =
         validate_qualification_plan(plan).map_err(QualificationAuthorizationError::InvalidPlan)?;
     report.record().validate().map_err(|error| {
@@ -183,12 +206,16 @@ pub fn write_qualification_record_after_endurance_with_guard(
         .expect("validated endurance evidence serializes");
     evidence_payload.push(b'\n');
     let evidence_sha256 = format!("{:x}", Sha256::digest(&evidence_payload));
-    let qualification = QualificationRecordV2 {
-        schema_version: 2,
+    let qualification = QualificationRecordV3 {
+        schema_version: 3,
         qualification_id: envelope.qualification_id,
         policy_version: envelope.policy_version,
         protected_policy_sha256: envelope.protected_policy_sha256,
         compatibility: envelope.compatibility,
+        tachometer_calibrations: QualificationTachometerCalibrationsV1 {
+            cpu: calibration_from_record(plan.tachometer_calibrations.cpu, EvidenceFan::Cpu),
+            gpu: calibration_from_record(plan.tachometer_calibrations.gpu, EvidenceFan::Gpu),
+        },
         supervised_endurance: SupervisedEnduranceAuthorizationV1 {
             schema_version: 1,
             evidence_sha256,
@@ -237,15 +264,29 @@ pub fn write_qualification_record_after_endurance_with_guard(
     Ok(qualification)
 }
 
+fn calibration_from_record(
+    record: &crate::EvidenceRecord,
+    fan: EvidenceFan,
+) -> FanCalibrationEvidence {
+    record
+        .calibration
+        .iter()
+        .find(|calibration| calibration.fan == fan)
+        .expect("validated qualification plan contains the fan calibration")
+        .clone()
+}
+
 fn deserialize_qualification_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: Deserializer<'de>,
 {
     let version = u32::deserialize(deserializer)?;
-    if version == 2 {
+    if version == 3 {
         Ok(version)
     } else {
-        Err(de::Error::custom("schema_version must be 2"))
+        Err(de::Error::custom(
+            "schema_version must be 3; older records do not bind measured tachometer calibration",
+        ))
     }
 }
 

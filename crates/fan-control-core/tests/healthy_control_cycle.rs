@@ -760,6 +760,16 @@ fn unchanged_outputs_are_verified_but_not_rewritten() {
 #[test]
 fn lower_demand_holds_then_ramps_down_on_fresh_cycle_time() {
     let (mut platform, device) = fixture();
+    platform.insert_file_with_permissions(
+        Path::new(ACER_ROOT).join("fan1_input"),
+        "5000\n",
+        FilePermissions::READ_ONLY,
+    );
+    platform.insert_file_with_permissions(
+        Path::new(ACER_ROOT).join("fan2_input"),
+        "5000\n",
+        FilePermissions::READ_ONLY,
+    );
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (_, armed) = arm(&mut ownership, &device);
     let mut control = healthy_control(armed);
@@ -852,10 +862,20 @@ fn response_windows_use_confirmed_commands_and_each_fans_own_read_time() {
 #[test]
 fn each_fan_faults_independently_after_its_qualified_response_deadline() {
     for (interference, expected_fan, expected_interpolated_rpm) in [
-        (RuntimeInterference::CpuTachometerZero, Fan::Cpu, 2929),
-        (RuntimeInterference::GpuTachometerOutOfBand, Fan::Gpu, 2967),
+        (RuntimeInterference::CpuTachometerZero, Fan::Cpu, 4297),
+        (RuntimeInterference::GpuTachometerOutOfBand, Fan::Gpu, 4297),
     ] {
-        let (platform, device) = fixture();
+        let (mut platform, device) = fixture();
+        platform.insert_file_with_permissions(
+            Path::new(ACER_ROOT).join("fan1_input"),
+            "3500\n",
+            FilePermissions::READ_ONLY,
+        );
+        platform.insert_file_with_permissions(
+            Path::new(ACER_ROOT).join("fan2_input"),
+            "3500\n",
+            FilePermissions::READ_ONLY,
+        );
         let injection = Rc::new(Cell::new(RuntimeInterference::None));
         let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
         let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
@@ -867,24 +887,27 @@ fn each_fan_faults_independently_after_its_qualified_response_deadline() {
             gpu: 55.0,
             power: ExternalPower::Connected,
         };
-        let mut sources = CountingSources::new(vec![frame, frame, frame, frame]);
+        let mut sources = CountingSources::new(vec![frame; 6]);
 
-        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
-        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
-        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
+        for _ in 0..5 {
+            run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
+        }
         let error =
             run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap_err();
 
-        assert!(matches!(
-            error,
-            HealthyControlCycleError::TachometerOutOfBand {
-                fan,
-                expected_rpm,
-                actual_rpm,
-            } if fan == expected_fan
-                && expected_rpm == expected_interpolated_rpm
-                && actual_rpm == if expected_fan == Fan::Cpu { 0 } else { 1000 }
-        ));
+        assert!(
+            matches!(
+                error,
+                HealthyControlCycleError::TachometerOutOfBand {
+                    fan,
+                    expected_rpm,
+                    actual_rpm,
+                } if fan == expected_fan
+                    && expected_rpm == expected_interpolated_rpm
+                    && actual_rpm == if expected_fan == Fan::Cpu { 0 } else { 1000 }
+            ),
+            "{error:?}"
+        );
         assert!(!control.is_current_for(&ownership));
         ownership.restore_firmware_auto(&device).unwrap();
         ownership.release().unwrap();
@@ -893,11 +916,7 @@ fn each_fan_faults_independently_after_its_qualified_response_deadline() {
 
 #[test]
 fn overdue_response_faults_before_a_changed_command_can_replace_it() {
-    let policy = PROTECTED_POLICY.replacen(
-        "response_deadline_millis = 4000",
-        "response_deadline_millis = 1000",
-        1,
-    );
+    let policy = PROTECTED_POLICY.to_string();
     let (mut platform, device) = fixture();
     platform.insert_file_with_permissions(
         QUALIFICATION_RECORD_PATH,
@@ -915,12 +934,17 @@ fn overdue_response_faults_before_a_changed_command_can_replace_it() {
     let (_, armed) = arm_with_policy_authority(&mut ownership, &device, &policy);
     let mut control = healthy_control(armed);
     injection.set(RuntimeInterference::CpuTachometerZero);
+    let initial = Frame {
+        cpu: 60.0,
+        gpu: 55.0,
+        power: ExternalPower::Connected,
+    };
     let mut sources = CountingSources::new(vec![
-        Frame {
-            cpu: 60.0,
-            gpu: 55.0,
-            power: ExternalPower::Connected,
-        },
+        initial,
+        initial,
+        initial,
+        initial,
+        initial,
         Frame {
             cpu: 70.0,
             gpu: 55.0,
@@ -928,7 +952,9 @@ fn overdue_response_faults_before_a_changed_command_can_replace_it() {
         },
     ]);
 
-    run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
+    for _ in 0..5 {
+        run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap();
+    }
     let marker = ownership.platform().operations().len();
     let error = run_healthy_control_cycle(&mut ownership, &mut control, &mut sources).unwrap_err();
 
@@ -1991,7 +2017,17 @@ fn tachometer_faults_restore_auto_and_permanently_latch_runtime_control() {
         (RuntimeInterference::CpuTachometerZero, Fan::Cpu),
         (RuntimeInterference::GpuTachometerOutOfBand, Fan::Gpu),
     ] {
-        let (platform, device) = fixture();
+        let (mut platform, device) = fixture();
+        platform.insert_file_with_permissions(
+            Path::new(ACER_ROOT).join("fan1_input"),
+            "3500\n",
+            FilePermissions::READ_ONLY,
+        );
+        platform.insert_file_with_permissions(
+            Path::new(ACER_ROOT).join("fan2_input"),
+            "3500\n",
+            FilePermissions::READ_ONLY,
+        );
         let injection = Rc::new(Cell::new(RuntimeInterference::None));
         let mut platform = InterferingPlatform::new(platform, Rc::clone(&injection));
         let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
@@ -2001,9 +2037,9 @@ fn tachometer_faults_restore_auto_and_permanently_latch_runtime_control() {
             gpu: 55.0,
             power: ExternalPower::Connected,
         };
-        let (mut control, _) = recovery_control(armed, authority, vec![frame; 4]);
+        let (mut control, _) = recovery_control(armed, authority, vec![frame; 6]);
         injection.set(interference);
-        for _ in 0..3 {
+        for _ in 0..5 {
             assert!(matches!(
                 control.step(&mut ownership).unwrap(),
                 SensorControlStep::Completed(_)
@@ -2016,10 +2052,13 @@ fn tachometer_faults_restore_auto_and_permanently_latch_runtime_control() {
         else {
             panic!("{interference:?} must permanently latch runtime control")
         };
-        assert!(matches!(
-            fault,
-            HealthyControlCycleError::TachometerOutOfBand { fan, .. } if fan == expected_fan
-        ));
+        assert!(
+            matches!(
+                fault,
+                HealthyControlCycleError::TachometerOutOfBand { fan, .. } if fan == expected_fan
+            ),
+            "{fault:?}"
+        );
         assert_eq!(control.state(), SensorControlState::Faulted);
         assert_eq!(
             ownership.platform().inner.file_contents(cpu_enable()),

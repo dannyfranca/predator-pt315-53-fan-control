@@ -762,7 +762,7 @@ fn envelope_violation_is_rejected_before_custom_or_normal_output() {
     let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
     let (authority, _, sample) = admit_and_sample(&mut ownership, &device);
     let weaker_policy =
-        PROTECTED_POLICY.replacen("minimum_duty_percent = 30", "minimum_duty_percent = 20", 1);
+        PROTECTED_POLICY.replacen("minimum_duty_percent = 50", "minimum_duty_percent = 40", 1);
     let candidate = protected_config(&weaker_policy);
     let marker = ownership.platform().operations().len();
 

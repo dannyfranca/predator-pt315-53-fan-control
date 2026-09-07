@@ -7,10 +7,9 @@ use crate::{
     AcerHwmonDevice, BoundedIdentityBoundFileAccess, Clock, CompatibilityAdmissionError,
     CompatibilityDeclarationV1, CompatibilityObservation, ConfigV1, ConfigValidationError,
     ControllerOwnership, EnvelopeValidationError, FirmwareAutoRestorationError,
-    QualificationEnvelopeIdentityV1, QualificationRecordV2, RootOwnedQualificationRecordAccess,
+    QualificationEnvelopeIdentityV1, QualificationRecordV3, RootOwnedQualificationRecordAccess,
     RuntimeLockAccess, TachometerCalibrationError, ValidatedConfig, admit_compatibility,
-    compatibility::validate_declaration,
-    tachometer::{QualifiedTachometerCalibrations, TachometerCalibrationConfig},
+    compatibility::validate_declaration, tachometer::QualifiedTachometerCalibrations,
     validate_against_protected_envelope, validate_config_v1,
 };
 
@@ -20,13 +19,12 @@ pub const SUPERVISED_ENDURANCE_EVIDENCE_PATH: &str =
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProtectedPolicyManifestV2 {
+struct ProtectedPolicyManifestV3 {
     #[serde(deserialize_with = "deserialize_policy_schema_version")]
     schema_version: u32,
     qualification_id: String,
     policy_version: String,
     compatibility: CompatibilityDeclarationV1,
-    calibration: TachometerCalibrationConfig,
     protected: ConfigV1,
 }
 
@@ -232,33 +230,33 @@ impl Error for PolicyAuthorityError {
     }
 }
 
-fn parse_protected_policy_v2(
+fn parse_protected_policy_v3(
     source: &str,
-) -> Result<ProtectedPolicyManifestV2, PolicyAuthorityError> {
+) -> Result<ProtectedPolicyManifestV3, PolicyAuthorityError> {
     let manifest = toml::from_str(source).map_err(PolicyAuthorityError::ProtectedPolicyParse)?;
     validate_manifest_identity(&manifest)?;
     Ok(manifest)
 }
 
-pub(crate) fn parse_qualification_record_v2(
+pub(crate) fn parse_qualification_record_v3(
     source: &str,
-) -> Result<QualificationRecordV2, PolicyAuthorityError> {
+) -> Result<QualificationRecordV3, PolicyAuthorityError> {
     let record =
         serde_json::from_str(source).map_err(PolicyAuthorityError::QualificationRecordParse)?;
     validate_record_identity(&record)?;
     Ok(record)
 }
 
-/// Validates a V2 qualification record and its exact supervised-endurance evidence together.
+/// Validates a V3 qualification record and its exact supervised-endurance evidence together.
 ///
 /// This is the read-only validation path used for retained rollback artifacts. It applies the
 /// same strict parsers and authorization binding checks as runtime policy admission.
-pub fn validate_qualification_evidence_v2(
+pub fn validate_qualification_evidence_v3(
     qualification_record_source: &str,
     evidence_source: &str,
     evidence_path: &Path,
 ) -> Result<(), PolicyAuthorityError> {
-    let record = parse_qualification_record_v2(qualification_record_source)?;
+    let record = parse_qualification_record_v3(qualification_record_source)?;
     let evidence =
         crate::parse_evidence_v2(evidence_source).map_err(PolicyAuthorityError::EvidenceParse)?;
     let authorization = record.supervised_endurance();
@@ -375,7 +373,7 @@ pub(crate) fn validate_qualification_candidate_sources(
     qualification_envelope: &QualificationEnvelopeIdentityV1,
     compatibility_observations: &[CompatibilityObservation],
 ) -> Result<(), PolicyAuthorityError> {
-    let manifest = parse_protected_policy_v2(protected_policy_source)?;
+    let manifest = parse_protected_policy_v3(protected_policy_source)?;
 
     require_equal(
         "qualification_id",
@@ -402,12 +400,7 @@ pub(crate) fn validate_qualification_candidate_sources(
         &qualification_envelope.protected_policy_sha256,
     )?;
 
-    let protected = validate_config_v1(manifest.protected)
-        .map_err(PolicyAuthorityError::InvalidProtectedPolicy)?;
-    manifest
-        .calibration
-        .qualify(&protected)
-        .map_err(PolicyAuthorityError::InvalidTachometerCalibration)?;
+    validate_config_v1(manifest.protected).map_err(PolicyAuthorityError::InvalidProtectedPolicy)?;
     Ok(())
 }
 
@@ -416,8 +409,8 @@ fn validate_policy_authority(
     qualification_record_source: &str,
     compatibility_observations: &[CompatibilityObservation],
 ) -> Result<ValidatedPolicyAuthority, PolicyAuthorityError> {
-    let manifest = parse_protected_policy_v2(protected_policy_source)?;
-    let record = parse_qualification_record_v2(qualification_record_source)?;
+    let manifest = parse_protected_policy_v3(protected_policy_source)?;
+    let record = parse_qualification_record_v3(qualification_record_source)?;
 
     require_equal(
         "qualification_id",
@@ -446,8 +439,8 @@ fn validate_policy_authority(
 
     let protected = validate_config_v1(manifest.protected)
         .map_err(PolicyAuthorityError::InvalidProtectedPolicy)?;
-    let calibration = manifest
-        .calibration
+    let calibration = record
+        .tachometer_calibrations
         .qualify(&protected)
         .map_err(PolicyAuthorityError::InvalidTachometerCalibration)?;
 
@@ -466,7 +459,7 @@ fn validate_policy_authority(
 pub(crate) fn requalification_policy_snapshot(
     protected_policy_source: &str,
 ) -> Result<RequalificationPolicySnapshot, PolicyAuthorityError> {
-    let manifest = parse_protected_policy_v2(protected_policy_source)?;
+    let manifest = parse_protected_policy_v3(protected_policy_source)?;
     let protected = validate_config_v1(manifest.protected)
         .map_err(PolicyAuthorityError::InvalidProtectedPolicy)?;
     Ok(RequalificationPolicySnapshot {
@@ -479,9 +472,9 @@ pub(crate) fn requalification_policy_snapshot(
 }
 
 fn validate_manifest_identity(
-    manifest: &ProtectedPolicyManifestV2,
+    manifest: &ProtectedPolicyManifestV3,
 ) -> Result<(), PolicyAuthorityError> {
-    if manifest.schema_version != 2 {
+    if manifest.schema_version != 3 {
         return Err(PolicyAuthorityError::InvalidIdentity {
             artifact: "protected policy",
             field: "schema_version",
@@ -501,9 +494,9 @@ fn validate_manifest_identity(
 }
 
 pub(crate) fn validate_record_identity(
-    record: &QualificationRecordV2,
+    record: &QualificationRecordV3,
 ) -> Result<(), PolicyAuthorityError> {
-    if record.schema_version != 2 {
+    if record.schema_version != 3 {
         return Err(PolicyAuthorityError::InvalidIdentity {
             artifact: "qualification record",
             field: "schema_version",
@@ -542,7 +535,11 @@ pub(crate) fn validate_record_identity(
             field: "supervised_endurance",
         });
     }
-    validate_compatibility("qualification record", &record.compatibility)
+    validate_compatibility("qualification record", &record.compatibility)?;
+    record
+        .tachometer_calibrations
+        .validate_measured()
+        .map_err(PolicyAuthorityError::InvalidTachometerCalibration)
 }
 
 fn validate_compatibility(
@@ -603,11 +600,11 @@ where
     D: Deserializer<'de>,
 {
     let version = i64::deserialize(deserializer)?;
-    if version == 2 {
-        Ok(2)
+    if version == 3 {
+        Ok(3)
     } else {
         Err(de::Error::custom(
-            "schema_version must be 2; V1 manifests require requalification with tachometer calibration",
+            "schema_version must be 3; older manifests embed unmeasured tachometer calibration",
         ))
     }
 }

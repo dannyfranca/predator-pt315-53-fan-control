@@ -1,6 +1,6 @@
-# FORMAT EXAMPLE ONLY. Placeholder hashes and calibration values are not
+# FORMAT EXAMPLE ONLY. Placeholder hashes and policy values are not
 # qualification evidence and cannot authorize Custom control.
-schema_version = 2
+schema_version = 3
 qualification_id = "example-unqualified-pt31553"
 policy_version = "0.0.0-example"
 
@@ -44,22 +44,6 @@ forbidden_capabilities = [
   "alternate-fan-write-backend",
 ]
 
-[calibration.cpu]
-floor_basis_points = 3000
-response_deadline_millis = 4000
-anchors = [
-  { duty_basis_points = 3000, median_rpm = 2500 },
-  { duty_basis_points = 10000, median_rpm = 3500 },
-]
-
-[calibration.gpu]
-floor_basis_points = 2500
-response_deadline_millis = 4000
-anchors = [
-  { duty_basis_points = 2500, median_rpm = 2500 },
-  { duty_basis_points = 10000, median_rpm = 3500 },
-]
-
 [protected]
 schema_version = 1
 
@@ -69,29 +53,29 @@ lower_demand_hold_seconds = 10
 max_down_ramp_percent_per_second = 1.0
 
 [protected.fans.cpu]
-minimum_duty_percent = 30
+minimum_duty_percent = 50
 
 [protected.fans.gpu]
-minimum_duty_percent = 25
+minimum_duty_percent = 50
 
 [protected.profiles.ac]
 cpu_curve = [
-  { temperature_c = 40, demand_percent = 30 },
+  { temperature_c = 40, demand_percent = 50 },
   { temperature_c = 90, demand_percent = 100 },
 ]
 gpu_curve = [
-  { temperature_c = 35, demand_percent = 30 },
+  { temperature_c = 35, demand_percent = 50 },
   { temperature_c = 82, demand_percent = 100 },
 ]
 
 [protected.profiles.battery]
 cpu_curve = [
-  { temperature_c = 40, demand_percent = 30 },
+  { temperature_c = 40, demand_percent = 50 },
   { temperature_c = 70, demand_percent = 50 },
   { temperature_c = 90, demand_percent = 100 },
 ]
 gpu_curve = [
-  { temperature_c = 35, demand_percent = 30 },
+  { temperature_c = 35, demand_percent = 50 },
   { temperature_c = 65, demand_percent = 50 },
   { temperature_c = 82, demand_percent = 100 },
 ]

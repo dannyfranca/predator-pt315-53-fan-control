@@ -16,7 +16,7 @@ use fan_control_core::{
     LiveLifecycleReport, MatchedWorkloadEnvironment, MatchedWorkloadFanRestoration,
     MatchedWorkloadObservation, MatchedWorkloadPlan, MatchedWorkloadStartingConditions,
     MatchedWorkloadTachometerCalibrations, ObservationOutcome, PreflightCheckEvidence,
-    QualificationAuthorizationError, QualificationEnvelopeIdentityV1, QualificationRecordV2,
+    QualificationAuthorizationError, QualificationEnvelopeIdentityV1, QualificationRecordV3,
     RestorationOutcome, RootOwnedQualificationRecordAccess, RunOutcomeEvidence, RunOutcomeStatus,
     SUPERVISED_ENDURANCE_SAMPLE_COUNT, SUPERVISED_ENDURANCE_SEGMENTS,
     SUPERVISED_ENDURANCE_WORKLOAD_ID, SampleFreshness, StoppedProcess,
@@ -521,9 +521,17 @@ fn passing_endurance_publishes_evidence_before_authorization() {
             &report,
         )
         .expect("root can publish a passing qualification");
-        let persisted: QualificationRecordV2 =
+        let persisted: QualificationRecordV3 =
             serde_json::from_str(&fs::read_to_string(&destination).unwrap()).unwrap();
         assert_eq!(persisted, qualification);
+        assert_eq!(
+            qualification.tachometer_calibrations().cpu(),
+            &plan.tachometer_calibrations.cpu.calibration[0]
+        );
+        assert_eq!(
+            qualification.tachometer_calibrations().gpu(),
+            &plan.tachometer_calibrations.gpu.calibration[0]
+        );
         assert_eq!(
             fs::read_to_string(&evidence_destination).unwrap(),
             serde_json::to_string_pretty(report.record()).unwrap() + "\n"

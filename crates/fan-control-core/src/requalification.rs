@@ -1,6 +1,6 @@
 use crate::{
     CompatibilityDeclarationV1, EnvelopeValidationError, KernelIdentity, ModuleIdentity,
-    QualificationRecordV2, ValidatedConfig,
+    QualificationRecordV3, ValidatedConfig,
     authority::{requalification_policy_snapshot, sha256_hex, validate_record_identity},
     compatibility::validate_declaration,
     validate_against_protected_envelope,
@@ -55,7 +55,7 @@ pub enum AbbreviatedRecheckOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AbbreviatedRecheckResults {
-    baseline_qualification: QualificationRecordV2,
+    baseline_qualification: QualificationRecordV3,
     candidate_compatibility: CompatibilityDeclarationV1,
     protected_policy_sha256: String,
     combined_ac_workload: CombinedAcWorkloadEvidence,
@@ -64,7 +64,7 @@ pub struct AbbreviatedRecheckResults {
 
 impl AbbreviatedRecheckResults {
     pub fn new(
-        baseline_qualification: QualificationRecordV2,
+        baseline_qualification: QualificationRecordV3,
         candidate_compatibility: CompatibilityDeclarationV1,
         protected_policy_source: &str,
         combined_ac_workload: CombinedAcWorkloadEvidence,
@@ -86,7 +86,7 @@ impl AbbreviatedRecheckResults {
 
 #[derive(Debug, Clone, Copy)]
 pub struct QualificationBaseline<'a> {
-    pub qualification: &'a QualificationRecordV2,
+    pub qualification: &'a QualificationRecordV3,
     pub protected_policy_source: &'a str,
 }
 

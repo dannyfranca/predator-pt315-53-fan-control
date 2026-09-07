@@ -154,6 +154,14 @@ non-writable by group/other beneath protected root-owned ancestors. Never edit
 an authority artifact in place; produce a new qualification after any invalidating
 change.
 
+Choose each protected fan floor conservatively before starting qualification.
+The calibration stages measure the lowest safe floor and bind their complete,
+replayable protocol checkpoints into qualification record schema v3. Runtime
+admission rejects a protected floor below that measurement; a higher protected
+floor is allowed. If calibration finds that a selected protected floor is too
+low, create a new protected policy snapshot with a higher floor and restart the
+qualification from preflight. Do not edit the in-progress snapshot.
+
 ### 3. Build and verify from a clean source state
 
 Install the repository's documented toolchain and policy tools first. Build the
@@ -1521,10 +1529,12 @@ response, then calibrate only one physical fan while leaving the other at the
 safety maximum. Maximum output must produce plausible tachometer response
 within 10 seconds. For CPU, then GPU, sweep `100`, `60`, `50`, `40`, and `30`
 percent with the fixed settle and response deadlines. Stop at the first
-unstable level and never test below it. At a first unstable level, the lowest
-stable level is the immediately preceding higher step; if every level passes,
-it is 30%. Set the protected floor one full ten-percentage-point step above that
-stable level and fail qualification if this margin cannot fit at or below 100%.
+unstable level and never test below it. At a first unstable level, the measured
+safe floor is one full ten-percentage-point step above the immediately preceding
+higher stable level; if every level passes, it is 40%. Fail qualification if
+this margin cannot fit at or below 100%, or if the measured safe floor is above
+the protected floor already bound to the qualification envelope. In the latter
+case, raise the floor in a new policy snapshot and restart from preflight.
 Use deduplicated anchors at the floor, the midpoint from the floor to 75%, 75%,
 and 100%, with plausible RPM bands of plus or minus 30%. Set each response
 deadline to the slowest successful response plus two seconds, capped at 10
@@ -1536,7 +1546,9 @@ Complete it again after GPU. A missed deadline, unstable RPM, wrong endpoint,
 readback mismatch, or failed restoration rejects that fan's calibration and
 blocks all later stages. Store the accepted records as
 `cpu-calibration.json` and `gpu-calibration.json` in the protected evidence
-directory.
+directory. Successful finalization copies those exact measured calibrations,
+including their replayable checkpoints, into qualification record schema v3;
+the protected policy never supplies RPM claims.
 
 Executable forms are `sudo /usr/bin/pt31553-fan-qualify fan-calibration --fan cpu --manifest
 FILE --harness FILE --observer-approval I-AM-PHYSICALLY-OBSERVING`, followed only

@@ -1,31 +1,26 @@
 use std::{error::Error, fmt, time::Duration};
 
-use serde::Deserialize;
-
-use crate::{Fan, FanCalibrationEvidence, Pwm, ValidatedConfig};
+use crate::{
+    ConservativeFanCalibration, EvidenceFan, Fan, FanCalibrationEvidence, Pwm,
+    QualificationTachometerCalibrationsV1, ValidatedConfig,
+    calibration::{
+        calibration_response_deadline, canonical_calibration_anchor_duties,
+        is_allowed_calibration_floor,
+    },
+};
 
 const MAXIMUM_DUTY_BASIS_POINTS: u16 = 10_000;
 const MAXIMUM_RESPONSE_DEADLINE_MILLIS: u64 = 30_000;
 pub(crate) const MINIMUM_PLAUSIBLE_RPM: u32 = 100;
 pub(crate) const MAXIMUM_PLAUSIBLE_RPM: u32 = 20_000;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TachometerCalibrationConfig {
-    cpu: FanCalibrationConfig,
-    gpu: FanCalibrationConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct FanCalibrationConfig {
     floor_basis_points: u16,
     response_deadline_millis: u64,
     anchors: Vec<RpmAnchor>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RpmAnchor {
     duty_basis_points: u16,
     median_rpm: u32,
@@ -45,9 +40,12 @@ struct QualifiedFanCalibration {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TachometerCalibrationError {
-    FloorMismatch {
+    InvalidMeasuredEvidence {
         fan: Fan,
-        configured_basis_points: u16,
+    },
+    ProtectedFloorBelowCalibrated {
+        fan: Fan,
+        calibrated_basis_points: u16,
         protected_basis_points: u16,
     },
     ZeroResponseDeadline {
@@ -81,13 +79,18 @@ pub enum TachometerCalibrationError {
 impl fmt::Display for TachometerCalibrationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::FloorMismatch {
+            Self::InvalidMeasuredEvidence { fan } => write!(
+                formatter,
+                "{} measured calibration does not replay as a completed conservative calibration",
+                fan.name()
+            ),
+            Self::ProtectedFloorBelowCalibrated {
                 fan,
-                configured_basis_points,
+                calibrated_basis_points,
                 protected_basis_points,
             } => write!(
                 formatter,
-                "{} calibration floor {configured_basis_points} does not match protected floor {protected_basis_points} basis points",
+                "{} protected floor {protected_basis_points} is below measured safe floor {calibrated_basis_points} basis points",
                 fan.name()
             ),
             Self::ZeroResponseDeadline { fan } => {
@@ -113,7 +116,7 @@ impl fmt::Display for TachometerCalibrationError {
             ),
             Self::AnchorRangeMismatch { fan } => write!(
                 formatter,
-                "{} calibration anchors must span its protected floor through full duty",
+                "{} calibration anchors must span its measured floor through full duty",
                 fan.name()
             ),
             Self::AnchorsNotStrictlyIncreasing { fan } => write!(
@@ -142,24 +145,74 @@ impl fmt::Display for TachometerCalibrationError {
 
 impl Error for TachometerCalibrationError {}
 
-impl TachometerCalibrationConfig {
+impl QualificationTachometerCalibrationsV1 {
+    pub(crate) fn validate_measured(&self) -> Result<(), TachometerCalibrationError> {
+        calibration_config(&self.cpu, EvidenceFan::Cpu)?;
+        calibration_config(&self.gpu, EvidenceFan::Gpu)?;
+        Ok(())
+    }
+
     pub(crate) fn qualify(
-        self,
+        &self,
         protected: &ValidatedConfig,
     ) -> Result<QualifiedTachometerCalibrations, TachometerCalibrationError> {
         Ok(QualifiedTachometerCalibrations {
             cpu: qualify_fan(
                 Fan::Cpu,
-                self.cpu,
+                calibration_config(&self.cpu, EvidenceFan::Cpu)?,
                 percent_to_basis_points(protected.fans().cpu().minimum_duty().value()),
             )?,
             gpu: qualify_fan(
                 Fan::Gpu,
-                self.gpu,
+                calibration_config(&self.gpu, EvidenceFan::Gpu)?,
                 percent_to_basis_points(protected.fans().gpu().minimum_duty().value()),
             )?,
         })
     }
+}
+
+fn calibration_config(
+    evidence: &FanCalibrationEvidence,
+    expected_fan: EvidenceFan,
+) -> Result<FanCalibrationConfig, TachometerCalibrationError> {
+    let fan = match expected_fan {
+        EvidenceFan::Cpu => Fan::Cpu,
+        EvidenceFan::Gpu => Fan::Gpu,
+    };
+    let replay_matches = evidence.fan == expected_fan
+        && is_allowed_calibration_floor(evidence.floor_basis_points)
+        && evidence.slowest_response_millis.is_some_and(|slowest| {
+            (1_000..=crate::MAXIMUM_CALIBRATION_RESPONSE_MILLIS).contains(&slowest)
+                && evidence.response_deadline_millis == calibration_response_deadline(slowest)
+        })
+        && evidence
+            .protocol_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| ConservativeFanCalibration::resume(fan, checkpoint.clone()).ok())
+            .and_then(|session| session.evidence().cloned())
+            .is_some_and(|derived| derived == *evidence)
+        && evidence
+            .anchors
+            .iter()
+            .map(|anchor| anchor.duty_basis_points)
+            .eq(canonical_calibration_anchor_duties(
+                evidence.floor_basis_points,
+            ));
+    if !replay_matches {
+        return Err(TachometerCalibrationError::InvalidMeasuredEvidence { fan });
+    }
+    Ok(FanCalibrationConfig {
+        floor_basis_points: evidence.floor_basis_points,
+        response_deadline_millis: evidence.response_deadline_millis,
+        anchors: evidence
+            .anchors
+            .iter()
+            .map(|anchor| RpmAnchor {
+                duty_basis_points: anchor.duty_basis_points,
+                median_rpm: anchor.median_rpm,
+            })
+            .collect(),
+    })
 }
 
 fn qualify_fan(
@@ -167,10 +220,10 @@ fn qualify_fan(
     calibration: FanCalibrationConfig,
     protected_floor: u16,
 ) -> Result<QualifiedFanCalibration, TachometerCalibrationError> {
-    if calibration.floor_basis_points != protected_floor {
-        return Err(TachometerCalibrationError::FloorMismatch {
+    if calibration.floor_basis_points > protected_floor {
+        return Err(TachometerCalibrationError::ProtectedFloorBelowCalibrated {
             fan,
-            configured_basis_points: calibration.floor_basis_points,
+            calibrated_basis_points: calibration.floor_basis_points,
             protected_basis_points: protected_floor,
         });
     }
@@ -191,7 +244,7 @@ fn qualify_fan(
         .anchors
         .first()
         .map(|anchor| anchor.duty_basis_points)
-        != Some(protected_floor)
+        != Some(calibration.floor_basis_points)
         || calibration
             .anchors
             .last()

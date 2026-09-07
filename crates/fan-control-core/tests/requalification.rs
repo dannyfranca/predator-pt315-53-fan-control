@@ -2,7 +2,7 @@ use fan_control_core::{
     ABBREVIATED_RECHECKS, AbbreviatedRecheck, AbbreviatedRecheckOutcome, AbbreviatedRecheckResults,
     COMBINED_AC_WORKLOAD_DURATION, CombinedAcWorkloadEvidence, CompatibilityDeclarationV1,
     FullRequalificationReason, PhysicalHardwareContinuity, QualificationBaseline,
-    QualificationCandidate, QualificationRecordV2, RequalificationDecision, decide_requalification,
+    QualificationCandidate, QualificationRecordV3, RequalificationDecision, decide_requalification,
     parse_config_v1, validate_config_v1,
 };
 use std::time::Duration;
@@ -35,7 +35,7 @@ fn decision_with_policy_sources(
     physical_hardware: PhysicalHardwareContinuity,
     abbreviated_rechecks: Option<&AbbreviatedRecheckResults>,
 ) -> RequalificationDecision {
-    let qualification: QualificationRecordV2 =
+    let qualification: QualificationRecordV3 =
         serde_json::from_str(&matching_record(PROTECTED_POLICY)).unwrap();
     let candidate_configuration =
         validate_config_v1(parse_config_v1(candidate_config).unwrap()).unwrap();
@@ -104,8 +104,8 @@ fn abbreviated_results(
 #[test]
 fn unchanged_envelope_accepts_conservative_configuration_for_validation_and_rearming() {
     let configuration = protected_configuration().replacen(
-        "minimum_duty_percent = 30",
-        "minimum_duty_percent = 40",
+        "minimum_duty_percent = 50",
+        "minimum_duty_percent = 60",
         1,
     );
 
@@ -122,7 +122,7 @@ fn unchanged_envelope_accepts_conservative_configuration_for_validation_and_rear
 }
 
 #[test]
-fn protected_policy_metadata_or_calibration_drift_requires_full_requalification() {
+fn protected_policy_metadata_drift_requires_full_requalification() {
     let changed_policy = PROTECTED_POLICY.replacen(
         "policy_version = \"1.0.0\"",
         "policy_version = \"1.0.1\"",
@@ -144,7 +144,8 @@ fn protected_policy_metadata_or_calibration_drift_requires_full_requalification(
 
 #[test]
 fn caller_cannot_replace_both_policy_sources_after_qualification() {
-    let changed_policy = PROTECTED_POLICY.replacen("median_rpm = 2500", "median_rpm = 2501", 1);
+    let changed_policy =
+        PROTECTED_POLICY.replacen("hysteresis_celsius = 3", "hysteresis_celsius = 4", 1);
 
     assert_eq!(
         decision_with_policy_sources(
@@ -167,7 +168,7 @@ fn record_hash_cannot_bind_a_manifest_with_a_different_compatibility_identity() 
     let mut record: serde_json::Value =
         serde_json::from_str(&matching_record(&changed_policy)).unwrap();
     record["compatibility"] = serde_json::to_value(baseline_compatibility()).unwrap();
-    let qualification: QualificationRecordV2 = serde_json::from_value(record).unwrap();
+    let qualification: QualificationRecordV3 = serde_json::from_value(record).unwrap();
     let candidate_configuration =
         validate_config_v1(parse_config_v1(&protected_configuration()).unwrap()).unwrap();
 
@@ -194,8 +195,8 @@ fn record_hash_cannot_bind_a_manifest_with_a_different_compatibility_identity() 
 #[test]
 fn quieter_editable_configuration_is_rejected_without_claiming_hardware_drift() {
     let configuration = protected_configuration().replacen(
-        "minimum_duty_percent = 30",
-        "minimum_duty_percent = 29",
+        "minimum_duty_percent = 50",
+        "minimum_duty_percent = 49",
         1,
     );
 
@@ -251,7 +252,7 @@ fn physical_hardware_bios_mapping_driver_and_policy_drift_require_full_requalifi
 
     cases.push((
         baseline_compatibility(),
-        PROTECTED_POLICY.replacen("minimum_duty_percent = 30", "minimum_duty_percent = 29", 1),
+        PROTECTED_POLICY.replacen("minimum_duty_percent = 50", "minimum_duty_percent = 49", 1),
         PhysicalHardwareContinuity::ConfirmedUnchanged,
         FullRequalificationReason::ProtectedPolicyWeakened,
     ));

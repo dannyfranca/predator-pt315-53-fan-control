@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    QualificationRecordV2,
-    authority::{parse_qualification_record_v2, sha256_hex},
-    validate_qualification_evidence_v2,
+    QualificationRecordV3,
+    authority::{parse_qualification_record_v3, sha256_hex},
+    validate_qualification_evidence_v3,
 };
 
 const PACKAGE_PROVENANCE_SCHEMA: &str = include_str!(concat!(
@@ -330,13 +330,13 @@ pub fn sanitize_qualification_evidence_v1(
     evidence_source: &str,
     authorized_evidence_path: &Path,
 ) -> Result<String, PromotionValidationError> {
-    validate_qualification_evidence_v2(
+    validate_qualification_evidence_v3(
         qualification_record_source,
         evidence_source,
         authorized_evidence_path,
     )
     .map_err(PromotionValidationError::Qualification)?;
-    let record = parse_qualification_record_v2(qualification_record_source)
+    let record = parse_qualification_record_v3(qualification_record_source)
         .map_err(PromotionValidationError::Qualification)?;
     let evidence = crate::parse_evidence_v2(evidence_source)
         .map_err(PromotionValidationError::EvidenceParse)?;
@@ -379,13 +379,13 @@ pub fn validate_promotion_manifest_v1(
         controller_signature,
         package_manifest_signature,
     } = inputs;
-    validate_qualification_evidence_v2(
+    validate_qualification_evidence_v3(
         qualification_record_source,
         evidence_source,
         authorized_evidence_path,
     )
     .map_err(PromotionValidationError::Qualification)?;
-    let record = parse_qualification_record_v2(qualification_record_source)
+    let record = parse_qualification_record_v3(qualification_record_source)
         .map_err(PromotionValidationError::Qualification)?;
     let evidence = crate::parse_evidence_v2(evidence_source)
         .map_err(PromotionValidationError::EvidenceParse)?;
@@ -618,7 +618,7 @@ fn validate_package_artifacts(
 
 fn sanitized_summary(
     qualification_record: &[u8],
-    record: &QualificationRecordV2,
+    record: &QualificationRecordV3,
     evidence: &crate::EvidenceRecord,
 ) -> SanitizedQualificationEvidenceV1 {
     let compatibility = record.compatibility();

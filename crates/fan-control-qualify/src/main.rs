@@ -39,7 +39,7 @@ use fan_control_core::{
     parse_evidence_v2, resume_live_lifecycle_qualification, run_firmware_auto_baseline,
     run_live_lifecycle_until_reboot, run_matched_custom_workload, run_read_only_preflight,
     run_supervised_endurance, validate_firmware_auto_baseline_resume,
-    validate_matched_workload_plan, validate_qualification_evidence_v2,
+    validate_matched_workload_plan, validate_qualification_evidence_v3,
     validate_root_owned_output_destination, validate_root_owned_protected_file,
     write_qualification_record_after_endurance_with_guard, write_root_owned_bytes_atomically,
     write_root_owned_evidence_atomically,
@@ -2039,7 +2039,7 @@ fn validate_records(mut values: impl Iterator<Item = OsString>) -> Result<(), Bo
     let authorized_evidence_path = authorized_evidence_path.unwrap_or_else(|| evidence.clone());
     let qualification_source = std::fs::read_to_string(&qualification_record)?;
     let evidence_source = std::fs::read_to_string(&evidence)?;
-    validate_qualification_evidence_v2(
+    validate_qualification_evidence_v3(
         &qualification_source,
         &evidence_source,
         &authorized_evidence_path,

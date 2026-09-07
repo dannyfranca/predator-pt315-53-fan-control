@@ -8,8 +8,10 @@ use std::{
 };
 
 use fan_control_core::{
-    CompatibilityDeclarationV1, CompatibilityObservation, EmergencyFanStatus, EvidenceCompleteness,
-    ExternalPower, FakePlatform, FakePlatformControl, FakeStep, FanWriteBackend, FilePermissions,
+    CalibrationLevelObservation, CalibrationReadbackSample, CalibrationStep,
+    CompatibilityDeclarationV1, CompatibilityObservation, ConservativeFanCalibration,
+    EmergencyFanStatus, EvidenceCompleteness, ExternalPower, FakePlatform, FakePlatformControl,
+    FakeStep, Fan, FanCalibrationEvidence, FanHoldObservation, FanWriteBackend, FilePermissions,
     GracefulShutdownFailure, ObservedFanAbi, ObservedSample, PackageProvenanceV1, PlatformError,
     PlatformErrorKind, PlatformOperation, QUALIFICATION_RECORD_PATH,
     SUPERVISED_ENDURANCE_EVIDENCE_PATH, SampleCapture, SampleSourceError, SampleSources,
@@ -179,7 +181,10 @@ impl StartupDiscoveryEnvironment for FixtureStartupDiscoveryEnvironment<'_> {
     type Sources = RuntimeSources;
 
     fn read_editable_config(&mut self) -> Result<String, crate::StartupError> {
-        Ok(include_str!("../../../config/example.toml").to_owned())
+        Ok(include_str!("../../../config/example.toml")
+            .replace("minimum_duty_percent = 30", "minimum_duty_percent = 50")
+            .replace("minimum_duty_percent = 25", "minimum_duty_percent = 50")
+            .replace("demand_percent = 30", "demand_percent = 50"))
     }
 
     fn load_compatibility_declaration(
@@ -639,8 +644,8 @@ fn compatibility_source(policy: &str) -> String {
         .split_once("[compatibility]\n")
         .expect("fixture policy contains compatibility")
         .1
-        .split_once("\n[calibration.cpu]\n")
-        .expect("fixture policy contains calibration")
+        .split_once("\n[protected]\n")
+        .expect("fixture policy contains protected configuration")
         .0
         .replace("[compatibility.", "[")
 }
@@ -716,11 +721,15 @@ fn matching_record(policy: &str, evidence: &str) -> Result<String, io::Error> {
     let compatibility =
         parse_compatibility_v1(&compatibility_source(policy)).map_err(startup_io_error)?;
     serde_json::to_string(&json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "qualification_id": "pt31553-v1",
         "policy_version": "1.0.0",
         "protected_policy_sha256": sha256(policy),
         "compatibility": compatibility,
+        "tachometer_calibrations": {
+            "cpu": completed_calibration(Fan::Cpu),
+            "gpu": completed_calibration(Fan::Gpu)
+        },
         "supervised_endurance": {
             "schema_version": 1,
             "evidence_sha256": sha256(evidence),
@@ -736,6 +745,89 @@ fn matching_record(policy: &str, evidence: &str) -> Result<String, io::Error> {
         }
     }))
     .map_err(|error| io::Error::other(error.to_string()))
+}
+
+fn completed_calibration(fan: Fan) -> FanCalibrationEvidence {
+    let mut session = ConservativeFanCalibration::start(fan);
+    let mut clock = 1;
+    for rpm in [5_000, 3_800, 3_300, 2_800] {
+        record_stable_calibration_level(&mut session, rpm, 3_000, &mut clock);
+    }
+    let step = session.next_step();
+    let mut unstable = calibration_level_observation(step, 900, 2_000, &mut clock);
+    for (index, sample) in unstable.samples.iter_mut().enumerate() {
+        sample.selected_rpm = Some(if index % 2 == 0 { 900 } else { 1_300 });
+    }
+    session.record_level(unstable).unwrap();
+    for _ in 0..5 {
+        record_stable_calibration_level(&mut session, 5_000, 4_000, &mut clock);
+        record_stable_calibration_level(&mut session, 3_300, 5_000, &mut clock);
+    }
+    let hold_step = session.next_step();
+    let hold_samples = (0..451)
+        .map(|index| CalibrationReadbackSample {
+            monotonic_millis: clock + index * 2_000,
+            selected_enable_readback: 1,
+            selected_pwm_readback: hold_step.pwm_value().unwrap(),
+            other_enable_readback: 1,
+            other_pwm_readback: u8::MAX,
+            selected_rpm: Some(3_300),
+        })
+        .collect();
+    clock += 451 * 2_000;
+    session
+        .record_hold(FanHoldObservation {
+            samples: hold_samples,
+            stall_observed: false,
+            unexplained_rpm_collapse_observed: false,
+        })
+        .unwrap();
+    for (rpm, response) in [
+        (3_300, 3_000),
+        (3_800, 4_000),
+        (4_500, 5_000),
+        (6_200, 6_000),
+    ] {
+        record_stable_calibration_level(&mut session, rpm, response, &mut clock);
+    }
+    session.evidence().unwrap().clone()
+}
+
+fn record_stable_calibration_level(
+    session: &mut ConservativeFanCalibration,
+    rpm: u32,
+    response_millis: u64,
+    clock: &mut u64,
+) {
+    let observation =
+        calibration_level_observation(session.next_step(), rpm, response_millis, clock);
+    session.record_level(observation).unwrap();
+}
+
+fn calibration_level_observation(
+    step: CalibrationStep,
+    rpm: u32,
+    response_millis: u64,
+    clock: &mut u64,
+) -> CalibrationLevelObservation {
+    let started_at = *clock;
+    let intervals = response_millis.div_ceil(2_000).max(3);
+    *clock += response_millis + 1;
+    CalibrationLevelObservation {
+        commanded_at_monotonic_millis: started_at,
+        samples: (0..=intervals)
+            .map(|index| CalibrationReadbackSample {
+                monotonic_millis: started_at + response_millis * index / intervals,
+                selected_enable_readback: 1,
+                selected_pwm_readback: step.pwm_value().unwrap(),
+                other_enable_readback: 1,
+                other_pwm_readback: u8::MAX,
+                selected_rpm: (index + 3 > intervals).then_some(rpm),
+            })
+            .collect(),
+        stall_observed: false,
+        unexplained_rpm_collapse_observed: false,
+    }
 }
 
 fn sha256(value: &str) -> String {

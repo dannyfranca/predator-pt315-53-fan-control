@@ -9,6 +9,9 @@ use std::{
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 
+mod calibration_support;
+use calibration_support::completed_calibration;
+
 const AUTHORIZED_EVIDENCE_PATH: &str =
     "/var/lib/pt31553-fan-control/evidence/supervised-endurance.json";
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -45,11 +48,15 @@ fn matching_sources() -> (String, String) {
     let evidence = serde_json::to_string(&evidence_value).unwrap();
     let envelope = &evidence_value["qualification_envelope"];
     let record = serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "qualification_id": envelope["qualification_id"],
         "policy_version": envelope["policy_version"],
         "protected_policy_sha256": envelope["protected_policy_sha256"],
         "compatibility": envelope["compatibility"],
+        "tachometer_calibrations": {
+            "cpu": completed_calibration(fan_control_core::Fan::Cpu),
+            "gpu": completed_calibration(fan_control_core::Fan::Gpu)
+        },
         "supervised_endurance": {
             "schema_version": 1,
             "evidence_sha256": format!("{:x}", Sha256::digest(evidence.as_bytes())),

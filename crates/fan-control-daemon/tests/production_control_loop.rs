@@ -408,7 +408,7 @@ fn compatibility_source(policy: &str) -> String {
         .split_once("[compatibility]\n")
         .unwrap()
         .1
-        .split_once("\n[calibration.cpu]\n")
+        .split_once("\n[protected]\n")
         .unwrap()
         .0
         .replace("[compatibility.", "[")
