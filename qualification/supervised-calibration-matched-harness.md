@@ -48,8 +48,9 @@ Calibration operations:
 
 Matched-workload operations:
 
-- `capture-matched-starting-conditions`: return `observer_present` and a serialized
-  `CapturedMatchedWorkloadStartingConditions` as `observation`.
+- `capture-matched-starting-conditions`: request the exact NVIDIA UUID; return that identity,
+  `observer_present`, a serialized `CapturedMatchedWorkloadStartingConditions` as `observation`,
+  an aggregate CPU-time snapshot, and the complete CPU thermal-throttle counter snapshot.
 - `enter-matched-custom-control`: enter the already admitted path at maximum and confirm both
   Custom readbacks. Return `observer_present` and `confirmed`.
 - `start-matched-workload`: start only the exact requested packaged `workload`; return

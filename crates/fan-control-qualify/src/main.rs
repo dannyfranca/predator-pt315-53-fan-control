@@ -152,6 +152,25 @@ struct HarnessBaselineObservation {
     cpu_throttle_snapshot: HarnessCpuThrottleSnapshot,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarnessMatchedStartingConditions {
+    observer_present: bool,
+    nvidia_gpu_uuid: String,
+    observation: CapturedMatchedWorkloadStartingConditions,
+    cpu_time_snapshot: HarnessCpuTimeSnapshot,
+    cpu_throttle_snapshot: HarnessCpuThrottleSnapshot,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarnessEnduranceStartingConditions {
+    nvidia_gpu_uuid: String,
+    observation: CapturedMatchedWorkloadStartingConditions,
+    cpu_time_snapshot: HarnessCpuTimeSnapshot,
+    cpu_throttle_snapshot: HarnessCpuThrottleSnapshot,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HarnessCpuTimeSnapshot {
@@ -2760,14 +2779,19 @@ impl MatchedWorkloadEnvironment for HarnessEnvironment {
         &mut self,
         deadline_monotonic_millis: u64,
     ) -> Result<CapturedMatchedWorkloadStartingConditions, String> {
-        let response: HarnessObserved<CapturedMatchedWorkloadStartingConditions> = self.invoke(
+        let nvidia_gpu_uuid = self.selected_nvidia_gpu()?.to_owned();
+        let response: HarnessMatchedStartingConditions = self.invoke(
             "capture-matched-starting-conditions",
-            json!({}),
+            json!({ "nvidia_gpu_uuid": nvidia_gpu_uuid }),
             deadline_monotonic_millis,
         )?;
         if !response.observer_present {
             return Err("observer withdrew approval".into());
         }
+        if response.nvidia_gpu_uuid != nvidia_gpu_uuid {
+            return Err("matched starting conditions belong to a different NVIDIA GPU".into());
+        }
+        self.start_observation_window(response.cpu_time_snapshot, response.cpu_throttle_snapshot)?;
         Ok(response.observation)
     }
 
@@ -3068,7 +3092,17 @@ impl SupervisedEnduranceEnvironment for HarnessEnvironment {
         &mut self,
         deadline: u64,
     ) -> Result<CapturedMatchedWorkloadStartingConditions, String> {
-        self.invoke("capture-starting-conditions", json!({}), deadline)
+        let nvidia_gpu_uuid = self.selected_nvidia_gpu()?.to_owned();
+        let response: HarnessEnduranceStartingConditions = self.invoke(
+            "capture-starting-conditions",
+            json!({ "nvidia_gpu_uuid": nvidia_gpu_uuid }),
+            deadline,
+        )?;
+        if response.nvidia_gpu_uuid != nvidia_gpu_uuid {
+            return Err("endurance starting conditions belong to a different NVIDIA GPU".into());
+        }
+        self.start_observation_window(response.cpu_time_snapshot, response.cpu_throttle_snapshot)?;
+        Ok(response.observation)
     }
 
     fn enter_custom_control(&mut self, deadline: u64) -> Result<(), String> {
@@ -3701,6 +3735,34 @@ printf '%s' '{"captured_at":{"monotonic_millis":1,"wall_unix_millis":1},"nvidia_
         harness.select_nvidia_gpu("GPU-selected".into());
         let error =
             FirmwareAutoBaselineEnvironment::capture_starting_conditions(&mut harness).unwrap_err();
+        assert!(error.contains("different NVIDIA GPU"));
+    }
+
+    #[test]
+    fn custom_stages_reject_starting_conditions_from_a_different_nvidia_gpu() {
+        let matched = TestHarness::new(
+            r#"request=$(cat)
+case "$request" in *GPU-selected*) ;; *) exit 9 ;; esac
+printf '%s' '{"observer_present":true,"nvidia_gpu_uuid":"GPU-other","observation":{"conditions":{"ambient_millicelsius":24000,"cpu_millicelsius":42000,"gpu_millicelsius":39000,"power_profile":"ac"},"captured_at":{"monotonic_millis":1,"wall_unix_millis":1}},"cpu_time_snapshot":{"idle":10,"total":20},"cpu_throttle_snapshot":{"counters":{"cpu0/core_throttle_count":1}}}'"#,
+        );
+        let mut harness = HarnessEnvironment::new(matched.path.clone()).unwrap();
+        harness.select_nvidia_gpu("GPU-selected".into());
+        let deadline = harness.deadline(5_000);
+        let error = MatchedWorkloadEnvironment::capture_starting_conditions(&mut harness, deadline)
+            .unwrap_err();
+        assert!(error.contains("different NVIDIA GPU"));
+
+        let endurance = TestHarness::new(
+            r#"request=$(cat)
+case "$request" in *GPU-selected*) ;; *) exit 9 ;; esac
+printf '%s' '{"nvidia_gpu_uuid":"GPU-other","observation":{"conditions":{"ambient_millicelsius":24000,"cpu_millicelsius":42000,"gpu_millicelsius":39000,"power_profile":"ac"},"captured_at":{"monotonic_millis":1,"wall_unix_millis":1}},"cpu_time_snapshot":{"idle":10,"total":20},"cpu_throttle_snapshot":{"counters":{"cpu0/core_throttle_count":1}}}'"#,
+        );
+        let mut harness = HarnessEnvironment::new(endurance.path.clone()).unwrap();
+        harness.select_nvidia_gpu("GPU-selected".into());
+        let deadline = harness.deadline(5_000);
+        let error =
+            SupervisedEnduranceEnvironment::capture_starting_conditions(&mut harness, deadline)
+                .unwrap_err();
         assert!(error.contains("different NVIDIA GPU"));
     }
 

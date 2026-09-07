@@ -33,7 +33,9 @@ For each operation the runner executes `HARNESS OPERATION ABSOLUTE_MONOTONIC_DEA
 JSON request to stdin, and expects one JSON response on stdout. It kills the harness at the
 deadline. Supported operations are:
 
-- `capture-starting-conditions`
+- `capture-starting-conditions` (request/return the exact NVIDIA UUID, the serialized
+  `CapturedMatchedWorkloadStartingConditions` as `observation`, an aggregate CPU-time snapshot,
+  and the complete CPU thermal-throttle counter snapshot)
 - `confirm-endurance-firmware-auto` (called once per fan before the run; returns a fresh
   `LiveLifecycleFanAutoObservation` for the currently discovered endpoint)
 - `confirm-endurance-observer` (returns `{ "observer_present": true, "confirmed": true,

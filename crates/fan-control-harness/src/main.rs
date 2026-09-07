@@ -10,7 +10,8 @@ use std::{
 };
 
 use fan_control_core::{
-    EvidenceProfile, EvidenceTimestamp, ExternalPower, NvidiaGpuSelector, NvmlErrorKind,
+    CapturedMatchedWorkloadStartingConditions, EvidenceProfile, EvidenceTimestamp, ExternalPower,
+    MatchedWorkloadStartingConditions, NvidiaGpuSelector, NvmlErrorKind,
     QUALIFICATION_CGROUP_PREFIX, SUPERVISED_ENDURANCE_WORKLOAD_ID, TelemetrySampleEvidence,
     WorkloadEvidence,
 };
@@ -48,6 +49,12 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
             capture_baseline_starting_conditions(read_request()?, deadline)
         }
         "capture-baseline-observation" => capture_baseline_observation(read_request()?, deadline),
+        "capture-matched-starting-conditions" => {
+            capture_matched_starting_conditions(read_request()?, deadline)
+        }
+        "capture-starting-conditions" => {
+            capture_endurance_starting_conditions(read_request()?, deadline)
+        }
         "confirm-endurance-observer" => confirm_endurance_observer(read_request()?, deadline),
         "start-baseline-workload" => {
             start_workload(read_request()?, deadline, StartResponse::Plain)
@@ -115,6 +122,40 @@ struct BaselineStartingRequest {
     nvidia_gpu_uuid: String,
 }
 
+struct StartingConditionsCapture {
+    nvidia_gpu_uuid: String,
+    observation: CapturedMatchedWorkloadStartingConditions,
+    cpu_time_snapshot: telemetry::CpuTimeSnapshot,
+    cpu_throttle_snapshot: telemetry::CpuThrottleSnapshot,
+}
+
+fn capture_starting_conditions(
+    nvidia_gpu_uuid: &str,
+    deadline: u64,
+) -> Result<StartingConditionsCapture, Box<dyn Error>> {
+    let selector = NvidiaGpuSelector::uuid(nvidia_gpu_uuid)?;
+    require_observer(deadline)?;
+    let sample = capture_system_qualification_sample(&selector)?;
+    let observer = require_observer(deadline)?;
+    let (cpu_time_snapshot, cpu_throttle_snapshot) = telemetry::starting_snapshots()?;
+    let captured_at = evidence_timestamp()?;
+    require_before_deadline(deadline)?;
+    Ok(StartingConditionsCapture {
+        nvidia_gpu_uuid: selector.value().to_owned(),
+        observation: CapturedMatchedWorkloadStartingConditions {
+            captured_at,
+            conditions: MatchedWorkloadStartingConditions {
+                ambient_millicelsius: observer.ambient_millicelsius,
+                cpu_millicelsius: sample.cpu_millicelsius,
+                gpu_millicelsius: sample.gpu_millicelsius,
+                power_profile: evidence_profile(sample.external_power)?,
+            },
+        },
+        cpu_time_snapshot,
+        cpu_throttle_snapshot,
+    })
+}
+
 #[derive(Serialize)]
 struct BaselineStartingResponse {
     captured_at: EvidenceTimestamp,
@@ -131,23 +172,63 @@ fn capture_baseline_starting_conditions(
     request: BaselineStartingRequest,
     deadline: u64,
 ) -> Result<(), Box<dyn Error>> {
-    let selector = NvidiaGpuSelector::uuid(&request.nvidia_gpu_uuid)?;
-    require_observer(deadline)?;
-    let sample = capture_system_qualification_sample(&selector)?;
-    let observer = require_observer(deadline)?;
-    let (cpu_time_snapshot, cpu_throttle_snapshot) = telemetry::starting_snapshots()?;
+    let capture = capture_starting_conditions(&request.nvidia_gpu_uuid, deadline)?;
     let response = BaselineStartingResponse {
-        captured_at: evidence_timestamp()?,
-        nvidia_gpu_uuid: selector.value().to_owned(),
-        ambient_millicelsius: observer.ambient_millicelsius,
-        cpu_millicelsius: sample.cpu_millicelsius,
-        gpu_millicelsius: sample.gpu_millicelsius,
-        power_profile: evidence_profile(sample.external_power)?,
-        cpu_time_snapshot,
-        cpu_throttle_snapshot,
+        captured_at: capture.observation.captured_at,
+        nvidia_gpu_uuid: capture.nvidia_gpu_uuid,
+        ambient_millicelsius: capture.observation.conditions.ambient_millicelsius,
+        cpu_millicelsius: capture.observation.conditions.cpu_millicelsius,
+        gpu_millicelsius: capture.observation.conditions.gpu_millicelsius,
+        power_profile: capture.observation.conditions.power_profile,
+        cpu_time_snapshot: capture.cpu_time_snapshot,
+        cpu_throttle_snapshot: capture.cpu_throttle_snapshot,
     };
     require_before_deadline(deadline)?;
     write_response(&response)
+}
+
+#[derive(Serialize)]
+struct MatchedStartingResponse {
+    observer_present: bool,
+    nvidia_gpu_uuid: String,
+    observation: CapturedMatchedWorkloadStartingConditions,
+    cpu_time_snapshot: telemetry::CpuTimeSnapshot,
+    cpu_throttle_snapshot: telemetry::CpuThrottleSnapshot,
+}
+
+fn capture_matched_starting_conditions(
+    request: BaselineStartingRequest,
+    deadline: u64,
+) -> Result<(), Box<dyn Error>> {
+    let capture = capture_starting_conditions(&request.nvidia_gpu_uuid, deadline)?;
+    write_response(&MatchedStartingResponse {
+        observer_present: true,
+        nvidia_gpu_uuid: capture.nvidia_gpu_uuid,
+        observation: capture.observation,
+        cpu_time_snapshot: capture.cpu_time_snapshot,
+        cpu_throttle_snapshot: capture.cpu_throttle_snapshot,
+    })
+}
+
+#[derive(Serialize)]
+struct EnduranceStartingResponse {
+    nvidia_gpu_uuid: String,
+    observation: CapturedMatchedWorkloadStartingConditions,
+    cpu_time_snapshot: telemetry::CpuTimeSnapshot,
+    cpu_throttle_snapshot: telemetry::CpuThrottleSnapshot,
+}
+
+fn capture_endurance_starting_conditions(
+    request: BaselineStartingRequest,
+    deadline: u64,
+) -> Result<(), Box<dyn Error>> {
+    let capture = capture_starting_conditions(&request.nvidia_gpu_uuid, deadline)?;
+    write_response(&EnduranceStartingResponse {
+        nvidia_gpu_uuid: capture.nvidia_gpu_uuid,
+        observation: capture.observation,
+        cpu_time_snapshot: capture.cpu_time_snapshot,
+        cpu_throttle_snapshot: capture.cpu_throttle_snapshot,
+    })
 }
 
 #[derive(Serialize)]
