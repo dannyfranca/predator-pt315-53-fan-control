@@ -43,6 +43,7 @@ mod validation;
 pub use acer_hwmon::{AcerHwmonDevice, AcerHwmonDiscoveryError, FanEndpoints, discover_acer_hwmon};
 pub use arming::{
     ArmedFanControl, FanArmingError, FanArmingFailure, FanArmingOperation, FanArmingReadback,
+    QualificationArmedFanControl, arm_both_fans_for_qualification_at_maximum_until,
     arm_both_fans_safely, arm_both_fans_safely_until,
 };
 pub use authority::{

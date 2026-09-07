@@ -34,6 +34,37 @@ pub struct ArmedFanControl {
     gpu_rpm: u32,
 }
 
+/// Receipt for the deliberately narrow, observer-supervised qualification handover.
+///
+/// Unlike [`ArmedFanControl`], this receipt carries no production policy authority. It can only
+/// be created by the qualification-specific entrypoint and is accepted only by qualification
+/// I/O helpers while the same exclusive ownership epoch remains current.
+#[derive(Debug, PartialEq)]
+pub struct QualificationArmedFanControl {
+    pub(crate) ownership_id: u64,
+    pub(crate) custom_epoch: u64,
+    pub(crate) device: AcerHwmonDevice,
+    cpu_rpm: u32,
+    gpu_rpm: u32,
+}
+
+impl QualificationArmedFanControl {
+    pub fn is_current_for<P>(&self, ownership: &ControllerOwnership<'_, P>) -> bool
+    where
+        P: RuntimeLockAccess + ?Sized,
+    {
+        ownership.custom_epoch_is_current(self.ownership_id, self.custom_epoch)
+    }
+
+    pub const fn cpu_rpm(&self) -> u32 {
+        self.cpu_rpm
+    }
+
+    pub const fn gpu_rpm(&self) -> u32 {
+        self.gpu_rpm
+    }
+}
+
 impl ArmedFanControl {
     pub fn is_current_for<P>(&self, ownership: &ControllerOwnership<'_, P>) -> bool
     where
@@ -418,6 +449,50 @@ where
     }
 }
 
+/// Performs the fixed maximum-duty handover used only by supervised hardware qualification.
+///
+/// The caller must already hold exclusive controller ownership and must restore Firmware Auto
+/// before releasing it. This path intentionally cannot create production policy authority.
+pub fn arm_both_fans_for_qualification_at_maximum_until<P>(
+    ownership: &mut ControllerOwnership<'_, P>,
+    device: &AcerHwmonDevice,
+    shutdown: &ShutdownRequest,
+) -> Result<QualificationArmedFanControl, FanArmingError>
+where
+    P: BoundedIdentityBoundFileAccess + Clock + RuntimeLockAccess,
+{
+    let ownership_id = ownership.ownership_id();
+    let (platform, custom_epoch) = ownership.begin_custom_transition(device);
+    match arm_hardware_at_maximum(platform, device, shutdown) {
+        Ok(handover) => Ok(QualificationArmedFanControl {
+            ownership_id,
+            custom_epoch,
+            device: device.clone(),
+            cpu_rpm: handover.cpu_rpm,
+            gpu_rpm: handover.gpu_rpm,
+        }),
+        Err(reason) => match ownership.restore_or_contain_firmware_auto(device) {
+            FirmwareAutoSafingOutcome::Restored => Err(FanArmingError::Rejected(reason)),
+            FirmwareAutoSafingOutcome::Contained {
+                restoration,
+                containment,
+            } => Err(FanArmingError::Recovered {
+                reason,
+                restoration: Box::new(restoration),
+                containment: Box::new(containment),
+            }),
+            FirmwareAutoSafingOutcome::Critical {
+                restoration,
+                containment,
+            } => Err(FanArmingError::RestorationFailed {
+                reason,
+                restoration: Box::new(restoration),
+                containment: Box::new(containment),
+            }),
+        },
+    }
+}
+
 fn arming_failure_endpoint(reason: &FanArmingFailure) -> Option<crate::RuntimeEndpoint> {
     use crate::RuntimeEndpoint;
 
@@ -500,6 +575,51 @@ where
     let handover_deadline = started_at
         .checked_add(HANDOVER_WINDOW)
         .ok_or(FanArmingFailure::DeadlineOverflow)?;
+    let handover = arm_hardware_at_maximum_before(platform, device, handover_deadline, shutdown)?;
+    Ok(ArmedFanControl {
+        ownership_id,
+        custom_epoch,
+        config,
+        device: device.clone(),
+        calibration,
+        cpu_custom_confirmed_at: handover.cpu_custom_confirmed_at,
+        gpu_custom_confirmed_at: handover.gpu_custom_confirmed_at,
+        cpu_rpm: handover.cpu_rpm,
+        gpu_rpm: handover.gpu_rpm,
+    })
+}
+
+struct MaximumHandover {
+    cpu_custom_confirmed_at: Duration,
+    gpu_custom_confirmed_at: Duration,
+    cpu_rpm: u32,
+    gpu_rpm: u32,
+}
+
+fn arm_hardware_at_maximum<P>(
+    platform: &mut P,
+    device: &AcerHwmonDevice,
+    shutdown: &ShutdownRequest,
+) -> Result<MaximumHandover, FanArmingFailure>
+where
+    P: BoundedIdentityBoundFileAccess + Clock + ?Sized,
+{
+    let deadline = platform
+        .monotonic_now()
+        .checked_add(HANDOVER_WINDOW)
+        .ok_or(FanArmingFailure::DeadlineOverflow)?;
+    arm_hardware_at_maximum_before(platform, device, deadline, shutdown)
+}
+
+fn arm_hardware_at_maximum_before<P>(
+    platform: &mut P,
+    device: &AcerHwmonDevice,
+    handover_deadline: Duration,
+    shutdown: &ShutdownRequest,
+) -> Result<MaximumHandover, FanArmingFailure>
+where
+    P: BoundedIdentityBoundFileAccess + Clock + ?Sized,
+{
     confirm_device_identity(platform, device, handover_deadline)?;
 
     confirm(
@@ -627,12 +747,7 @@ where
         FanArmingOperation::FinalConfirmCustom,
     )?;
     ensure_arming_running(shutdown)?;
-    Ok(ArmedFanControl {
-        ownership_id,
-        custom_epoch,
-        config,
-        device: device.clone(),
-        calibration,
+    Ok(MaximumHandover {
         cpu_custom_confirmed_at,
         gpu_custom_confirmed_at,
         cpu_rpm,

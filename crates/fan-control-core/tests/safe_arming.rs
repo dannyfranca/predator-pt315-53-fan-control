@@ -13,7 +13,8 @@ use fan_control_core::{
     RootOwnedQualificationRecordAccess, RuntimeLockAccess, RuntimeLockError,
     SUPERVISED_ENDURANCE_EVIDENCE_PATH, SampleCapture, SampleSetError, SampleSourceError,
     SampleSources, ServiceAccess, ShutdownRequest, TemperatureCelsius, ValidatedConfig,
-    acquire_controller_ownership, admit_policy_authority, arm_both_fans_safely,
+    acquire_controller_ownership, admit_policy_authority,
+    arm_both_fans_for_qualification_at_maximum_until, arm_both_fans_safely,
     arm_both_fans_safely_until, discover_acer_hwmon,
 };
 
@@ -91,6 +92,56 @@ fn ownership_cannot_mint_an_arming_sample_before_firmware_auto_confirmation() {
     );
 
     ownership.restore_firmware_auto(&device).unwrap();
+    ownership.release().unwrap();
+}
+
+#[test]
+fn qualification_handover_reaches_maximum_without_minting_policy_authority() {
+    let (mut platform, device) = fixture("2400\n", "2600\n");
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+
+    let armed = arm_both_fans_for_qualification_at_maximum_until(
+        &mut ownership,
+        &device,
+        &ShutdownRequest::new(),
+    )
+    .unwrap();
+
+    assert!(armed.is_current_for(&ownership));
+    assert_eq!(armed.cpu_rpm(), 2400);
+    assert_eq!(armed.gpu_rpm(), 2600);
+    assert_eq!(ownership.platform().file_contents(cpu_enable()), Some("1"));
+    assert_eq!(ownership.platform().file_contents(gpu_enable()), Some("1"));
+    assert_eq!(ownership.platform().file_contents(cpu_pwm()), Some("255"));
+    assert_eq!(ownership.platform().file_contents(gpu_pwm()), Some("255"));
+
+    ownership.restore_firmware_auto(&device).unwrap();
+    assert!(!armed.is_current_for(&ownership));
+    ownership.release().unwrap();
+}
+
+#[test]
+fn qualification_handover_failure_restores_auto_before_returning() {
+    let (platform, device) = fixture("2400\n", "2600\n");
+    let mut platform = PathAwarePlatform::new(platform, InjectedFault::RejectGpuMaximumWrite);
+    let mut ownership = acquire_controller_ownership(&mut platform).unwrap();
+
+    let error = arm_both_fans_for_qualification_at_maximum_until(
+        &mut ownership,
+        &device,
+        &ShutdownRequest::new(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, FanArmingError::Rejected(_)));
+    assert_eq!(
+        ownership.platform().inner.file_contents(cpu_enable()),
+        Some("2")
+    );
+    assert_eq!(
+        ownership.platform().inner.file_contents(gpu_enable()),
+        Some("2")
+    );
     ownership.release().unwrap();
 }
 
