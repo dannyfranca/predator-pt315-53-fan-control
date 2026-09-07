@@ -1,13 +1,13 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::{
-    EVIDENCE_SCHEMA_VERSION_V2, EvidenceExternalPower, EvidenceFan, EvidenceProfile,
-    EvidenceRecord, EvidenceTimestamp, EvidenceValidationError, FanEndpointIdentitiesEvidence,
-    FanReadbackEvidence, FanReadbackField, FaultEvidence, ObservationOutcome,
-    QualificationEnvelopeIdentityV1, RunOutcomeEvidence, RunOutcomeStatus, StateTransitionEvidence,
-    evidence::validate_identity,
+    AcerHwmonDevice, BoundedIdentityBoundReadAccess, EVIDENCE_SCHEMA_VERSION_V2,
+    EvidenceExternalPower, EvidenceFan, EvidenceProfile, EvidenceRecord, EvidenceTimestamp,
+    EvidenceValidationError, FanEndpointIdentitiesEvidence, FanReadbackEvidence, FanReadbackField,
+    FaultEvidence, ObservationOutcome, PlatformError, QualificationEnvelopeIdentityV1,
+    RunOutcomeEvidence, RunOutcomeStatus, StateTransitionEvidence, evidence::validate_identity,
 };
 
 pub const LIVE_RESTART_DELAY_MILLIS: u64 = 2_000;
@@ -165,6 +165,57 @@ pub struct LiveLifecycleFanAutoObservation {
     pub fresh: bool,
     pub enable_readback: Option<u32>,
     pub endpoint_identity: String,
+}
+
+/// Performs one fresh, identity-bound fan-mode read for a live qualification boundary.
+///
+/// The endpoint identity comes from the same discovered device generation used for the read.
+/// Malformed values are rejected instead of being represented as an inconclusive observation.
+pub fn observe_fan_firmware_auto_before(
+    files: &mut (impl BoundedIdentityBoundReadAccess + ?Sized),
+    device: &AcerHwmonDevice,
+    fan: EvidenceFan,
+    observed_at: EvidenceTimestamp,
+    deadline: Duration,
+) -> Result<LiveLifecycleFanAutoObservation, PlatformError> {
+    let endpoints = match fan {
+        EvidenceFan::Cpu => device.cpu(),
+        EvidenceFan::Gpu => device.gpu(),
+    };
+    let endpoint = endpoints.enable();
+    let endpoint_identity = device
+        .endpoint_identity(endpoint)
+        .expect("fan enable endpoint belongs to the discovered device");
+    let child = endpoint
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("fan endpoint is a direct UTF-8 child");
+    let readback = files.read_bound_before(
+        device.root(),
+        device.backing_identity(),
+        child,
+        endpoint_identity,
+        deadline,
+    )?;
+    let enable_readback = readback.trim().parse::<u32>().map_err(|_| {
+        PlatformError::new(
+            crate::PlatformErrorKind::Unavailable,
+            format!(
+                "malformed fan enable readback at {}: {readback:?}",
+                endpoint.display()
+            ),
+        )
+    })?;
+    Ok(LiveLifecycleFanAutoObservation {
+        observed_at,
+        fresh: true,
+        enable_readback: Some(enable_readback),
+        endpoint_identity: format!(
+            "device-{}-inode-{}",
+            endpoint_identity.device(),
+            endpoint_identity.inode()
+        ),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2664,4 +2715,86 @@ pub(crate) fn live_lifecycle_is_complete(record: &EvidenceRecord) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod firmware_auto_observation_tests {
+    use std::{path::Path, time::Duration};
+
+    use crate::{
+        EvidenceFan, EvidenceTimestamp, FakePlatform, FilePermissions, discover_acer_hwmon,
+        observe_fan_firmware_auto_before,
+    };
+
+    const HWMON_ROOT: &str = "/sys/class/hwmon";
+    const ACER_ROOT: &str = "/sys/class/hwmon/hwmon7";
+
+    fn platform_with_fans() -> FakePlatform {
+        let root = Path::new(ACER_ROOT);
+        let mut platform = FakePlatform::new();
+        platform.insert_file_with_permissions(
+            root.join("name"),
+            "acer\n",
+            FilePermissions::READ_ONLY,
+        );
+        for (name, value, permissions) in [
+            ("pwm1", "255\n", FilePermissions::READ_WRITE),
+            ("pwm1_enable", "2\n", FilePermissions::READ_WRITE),
+            ("fan1_input", "3500\n", FilePermissions::READ_ONLY),
+            ("pwm2", "255\n", FilePermissions::READ_WRITE),
+            ("pwm2_enable", "2\n", FilePermissions::READ_WRITE),
+            ("fan2_input", "3500\n", FilePermissions::READ_ONLY),
+        ] {
+            platform.insert_file_with_permissions(root.join(name), value, permissions);
+        }
+        platform
+    }
+
+    #[test]
+    fn result_is_fresh_and_identity_bound() {
+        let mut platform = platform_with_fans();
+        let device = discover_acer_hwmon(&mut platform, Path::new(HWMON_ROOT)).unwrap();
+        let observed_at = EvidenceTimestamp {
+            monotonic_millis: 10,
+            wall_unix_millis: 20,
+        };
+
+        let observation = observe_fan_firmware_auto_before(
+            &mut platform,
+            &device,
+            EvidenceFan::Cpu,
+            observed_at,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(observation.observed_at, observed_at);
+        assert!(observation.fresh);
+        assert_eq!(observation.enable_readback, Some(2));
+        assert!(observation.endpoint_identity.starts_with("device-"));
+    }
+
+    #[test]
+    fn malformed_mode_is_rejected() {
+        let mut platform = platform_with_fans();
+        let device = discover_acer_hwmon(&mut platform, Path::new(HWMON_ROOT)).unwrap();
+        platform.insert_file_with_permissions(
+            Path::new(ACER_ROOT).join("pwm2_enable"),
+            "custom\n",
+            FilePermissions::READ_WRITE,
+        );
+
+        let result = observe_fan_firmware_auto_before(
+            &mut platform,
+            &device,
+            EvidenceFan::Gpu,
+            EvidenceTimestamp {
+                monotonic_millis: 10,
+                wall_unix_millis: 20,
+            },
+            Duration::from_secs(1),
+        );
+
+        assert!(result.is_err());
+    }
 }

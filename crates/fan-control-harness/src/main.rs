@@ -10,12 +10,13 @@ use std::{
 };
 
 use fan_control_core::{
-    CapturedMatchedWorkloadStartingConditions, EvidenceProfile, EvidenceTimestamp, ExternalPower,
-    MatchedWorkloadStartingConditions, NvidiaGpuSelector, NvmlErrorKind,
-    QUALIFICATION_CGROUP_PREFIX, SUPERVISED_ENDURANCE_WORKLOAD_ID, TelemetrySampleEvidence,
-    WorkloadEvidence,
+    CapturedMatchedWorkloadStartingConditions, Clock, EvidenceFan, EvidenceProfile,
+    EvidenceTimestamp, ExternalPower, MatchedWorkloadStartingConditions, NvidiaGpuSelector,
+    NvmlErrorKind, QUALIFICATION_CGROUP_PREFIX, SUPERVISED_ENDURANCE_WORKLOAD_ID,
+    SystemOwnershipPlatform, TelemetrySampleEvidence, WorkloadEvidence, discover_acer_hwmon,
+    observe_fan_firmware_auto_before,
 };
-use fan_control_daemon::{capture_system_qualification_sample, sample_system_nvidia};
+use fan_control_daemon::{HWMON_ROOT, capture_system_qualification_sample, sample_system_nvidia};
 use fan_control_observer::{DEFAULT_SOCKET_PATH, ObserverConfirmation, query_protected_observer};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -56,6 +57,9 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
             capture_endurance_starting_conditions(read_request()?, deadline)
         }
         "confirm-endurance-observer" => confirm_endurance_observer(read_request()?, deadline),
+        "confirm-endurance-firmware-auto" | "confirm-live-lifecycle-firmware-auto" => {
+            confirm_firmware_auto(read_request()?, deadline)
+        }
         "start-baseline-workload" => {
             start_workload(read_request()?, deadline, StartResponse::Plain)
         }
@@ -256,6 +260,31 @@ fn capture_baseline_observation(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyRequest {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FanRequest {
+    fan: EvidenceFan,
+}
+
+fn confirm_firmware_auto(request: FanRequest, deadline: u64) -> Result<(), Box<dyn Error>> {
+    require_before_deadline(deadline)?;
+    let mut platform = SystemOwnershipPlatform::new();
+    let device = discover_acer_hwmon(&mut platform, Path::new(HWMON_ROOT))?;
+    let io_deadline = platform
+        .monotonic_now()
+        .checked_add(Duration::from_secs(1))
+        .ok_or("fan observation deadline overflow")?;
+    let observation = observe_fan_firmware_auto_before(
+        &mut platform,
+        &device,
+        request.fan,
+        evidence_timestamp()?,
+        io_deadline,
+    )?;
+    require_before_deadline(deadline)?;
+    write_response(&observation)
+}
 
 #[derive(Serialize)]
 struct ObserverResponse {

@@ -121,7 +121,7 @@ pub use live_lifecycle::{
     LiveLifecycleObserverAttestation, LiveLifecyclePlanError, LiveLifecyclePowerObservation,
     LiveLifecycleProfileObservation, LiveLifecycleProgress, LiveLifecycleRebootArmObservation,
     LiveLifecycleRebootContinuation, LiveLifecycleReport, LiveLifecycleRequest,
-    LiveLifecycleRequestError, classify_live_lifecycle_request,
+    LiveLifecycleRequestError, classify_live_lifecycle_request, observe_fan_firmware_auto_before,
     resume_live_lifecycle_qualification, run_live_lifecycle_until_reboot,
 };
 pub use matched_workload::{
