@@ -21,6 +21,7 @@ use fan_control_daemon::{HWMON_ROOT, capture_system_qualification_sample, sample
 use fan_control_observer::{DEFAULT_SOCKET_PATH, ObserverConfirmation, query_protected_observer};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+mod lifecycle;
 mod server;
 mod telemetry;
 
@@ -43,6 +44,18 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
             return Err("unexpected qualification harness argument".into());
         }
         return server::serve();
+    }
+    if operation == "lifecycle-controller-internal" {
+        if arguments.next().is_some() {
+            return Err("unexpected lifecycle controller argument".into());
+        }
+        return lifecycle::run_controller();
+    }
+    if operation == "lifecycle-restore-internal" {
+        if arguments.next().is_some() {
+            return Err("unexpected lifecycle restore argument".into());
+        }
+        return lifecycle::restore_controller();
     }
     let deadline = arguments
         .next()
@@ -87,6 +100,15 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
             stop_workload(deadline, StopMode::Kill, StopResponse::Endurance)
         }
         "cleanup-baseline-workload" => cleanup_baseline(read_request()?, deadline),
+        "run-live-lifecycle-case" => lifecycle::run_case(read_request()?, deadline),
+        "restore-live-lifecycle-after-case" => {
+            lifecycle::restore_after_case(read_request()?, deadline)
+        }
+        "resume-live-lifecycle-reboot" => lifecycle::resume_after_reboot(read_request()?, deadline),
+        "arm-live-lifecycle-after-reboot" => lifecycle::arm_after_reboot(read_request()?, deadline),
+        "restore-live-lifecycle-after-reboot" => {
+            lifecycle::restore_after_reboot(read_request()?, deadline)
+        }
         _ => Err(format!("unsupported qualification harness operation: {operation}").into()),
     }
 }

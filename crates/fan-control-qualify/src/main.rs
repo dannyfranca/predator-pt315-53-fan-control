@@ -3436,7 +3436,9 @@ impl LiveLifecycleEnvironment for HarnessEnvironment {
         self.invoke(
             "arm-live-lifecycle-after-reboot",
             request,
-            self.deadline(10_000),
+            // The transient controller has TimeoutStartSec=30s. Leave enough room for
+            // systemd to report that outcome and for the observer to attest it.
+            self.deadline(45_000),
         )
     }
 
