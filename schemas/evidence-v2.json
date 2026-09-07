@@ -580,7 +580,9 @@
     },
     {
       "if": {
-        "properties": { "stage": { "enum": ["preflight", "firmware-auto-baseline"] } },
+        "properties": {
+          "stage": { "enum": ["preflight", "firmware-auto-baseline", "fan-calibration"] }
+        },
         "required": ["stage"]
       },
       "then": {},
@@ -614,6 +616,13 @@
     {
       "if": {
         "properties": { "stage": { "const": "firmware-auto-baseline" } },
+        "required": ["stage"]
+      },
+      "then": { "required": ["fan_endpoint_identities"] }
+    },
+    {
+      "if": {
+        "properties": { "stage": { "const": "fan-calibration" } },
         "required": ["stage"]
       },
       "then": { "required": ["fan_endpoint_identities"] }
@@ -861,7 +870,39 @@
           },
           {
             "properties": {
-              "stage": { "not": { "enum": ["preflight", "firmware-auto-baseline", "live-lifecycle"] } },
+              "stage": { "const": "fan-calibration" },
+              "samples": { "maxItems": 0 },
+              "workload": { "type": "null" },
+              "thermal_summary": { "type": "null" },
+              "commands": { "minItems": 1 },
+              "readbacks": { "minItems": 7 },
+              "state_transitions": {
+                "minItems": 2,
+                "maxItems": 2,
+                "prefixItems": [
+                  {
+                    "properties": {
+                      "from": { "const": "firmware-auto" },
+                      "to": { "const": "custom-control" }
+                    }
+                  },
+                  { "$ref": "#/$defs/firmwareAutoTransition" }
+                ]
+              },
+              "faults": { "maxItems": 0 },
+              "restoration_attempts": {
+                "minItems": 2,
+                "maxItems": 2,
+                "allOf": [
+                  { "contains": { "$ref": "#/$defs/cpuFirmwareAutoRestoration" } },
+                  { "contains": { "$ref": "#/$defs/gpuFirmwareAutoRestoration" } }
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "stage": { "not": { "enum": ["preflight", "firmware-auto-baseline", "fan-calibration", "live-lifecycle"] } },
               "samples": {
                 "minItems": 1,
                 "contains": {

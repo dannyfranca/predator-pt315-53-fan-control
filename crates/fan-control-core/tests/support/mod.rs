@@ -8,12 +8,13 @@ use std::{
 
 use fan_control_core::{
     CalibrationLevelObservation, CalibrationReadbackSample, CalibrationStep,
-    CompatibilityDeclarationV1, CompatibilityObservation, ConservativeFanCalibration,
-    EvidenceCompleteness, EvidenceFan, EvidenceRecord, EvidenceTimestamp, Fan,
-    FanCalibrationEvidence, FanCommandEvidence, FanControlField, FanEndpointIdentitiesEvidence,
-    FanHoldObservation, FanWriteBackend, ObservedFanAbi, QualificationEnvelopeIdentityV1,
-    RestorationAttemptEvidence, RestorationOutcome, RunOutcomeStatus, StateTransitionEvidence,
-    ValidatedConfig, parse_compatibility_v1, parse_config_v1, validate_config_v1,
+    CompatibilityDeclarationV1, CompatibilityObservation, CompletedFanCalibrationRun,
+    ConservativeFanCalibration, EvidenceCompleteness, EvidenceFan, EvidenceRecord,
+    EvidenceTimestamp, Fan, FanCalibrationEvidence, FanCommandEvidence, FanControlField,
+    FanEndpointIdentitiesEvidence, FanHoldObservation, FanWriteBackend, ObservedFanAbi,
+    QualificationEnvelopeIdentityV1, RestorationAttemptEvidence, RestorationOutcome,
+    RunOutcomeStatus, StateTransitionEvidence, ValidatedConfig, build_fan_calibration_record,
+    parse_compatibility_v1, parse_config_v1, validate_config_v1,
 };
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
@@ -462,7 +463,16 @@ pub fn completed_calibration_record(mut record: EvidenceRecord, fan: Fan) -> Evi
     let calibration = completed_calibration_evidence(fan);
     record.calibration = vec![calibration.clone()];
     bind_record_to_calibration_protocol(&mut record, &calibration);
-    record
+    build_fan_calibration_record(CompletedFanCalibrationRun {
+        qualification_envelope: record.qualification_envelope,
+        calibration,
+        endpoint_identities: fan_endpoint_identities(),
+        started_at: record.started_at,
+        restoration_attempted_at: record.restoration_attempts[0].timestamp,
+        restoration_confirmed_at: record.state_transitions.last().unwrap().timestamp,
+        completed_at: record.completed_at,
+    })
+    .unwrap()
 }
 
 fn record_stable_calibration_level(

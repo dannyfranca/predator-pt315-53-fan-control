@@ -717,7 +717,11 @@ fn v2_schema_rejects_noncanonical_calibration_anchor_duties() {
     let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA_V2).unwrap();
     let validator = jsonschema::validator_for(&schema).unwrap();
     let mut fixture = serde_json::to_value(passing_v2_calibration_record()).unwrap();
-    assert!(validator.is_valid(&fixture));
+    assert!(
+        validator.is_valid(&fixture),
+        "{:?}",
+        validator.iter_errors(&fixture).collect::<Vec<_>>()
+    );
 
     fixture["calibration"][0]["anchors"][1]["duty_basis_points"] = 6_000.into();
     assert!(!validator.is_valid(&fixture));

@@ -4,9 +4,11 @@ mod support;
 
 use fan_control_core::{
     CalibrationLevelObservation, CalibrationObservationError, CalibrationReadbackSample,
-    CalibrationStep, ConservativeFanCalibration, EvidenceFan, EvidenceRecord, Fan,
-    FanHoldObservation, MAXIMUM_CALIBRATION_RESPONSE_MILLIS, REQUIRED_FLOOR_HOLD_MILLIS,
-    REQUIRED_MAXIMUM_TO_FLOOR_TRANSITIONS, RunOutcomeStatus, parse_evidence_v1, parse_evidence_v2,
+    CalibrationStep, CompletedFanCalibrationRun, ConservativeFanCalibration, EvidenceFan,
+    EvidenceRecord, Fan, FanEndpointIdentitiesEvidence, FanHoldObservation,
+    MAXIMUM_CALIBRATION_RESPONSE_MILLIS, REQUIRED_FLOOR_HOLD_MILLIS,
+    REQUIRED_MAXIMUM_TO_FLOOR_TRANSITIONS, RunOutcomeStatus, build_fan_calibration_record,
+    parse_evidence_v1, parse_evidence_v2,
 };
 
 thread_local! {
@@ -173,7 +175,29 @@ fn passing_publication_record(session: &ConservativeFanCalibration) -> EvidenceR
     record.outcome.reason = "fan calibration passed".into();
     record.outcome.another_passing_run_required = false;
     support::bind_record_to_calibration_protocol(&mut record, session.evidence().unwrap());
-    record
+    let mut calibration_record = build_fan_calibration_record(CompletedFanCalibrationRun {
+        qualification_envelope: record.qualification_envelope,
+        calibration: session.evidence().unwrap().clone(),
+        endpoint_identities: test_endpoint_identities(),
+        started_at: record.started_at,
+        restoration_attempted_at: record.restoration_attempts[0].timestamp,
+        restoration_confirmed_at: record.state_transitions.last().unwrap().timestamp,
+        completed_at: record.completed_at,
+    })
+    .unwrap();
+    calibration_record.calibration.clear();
+    calibration_record
+}
+
+fn test_endpoint_identities() -> FanEndpointIdentitiesEvidence {
+    FanEndpointIdentitiesEvidence {
+        cpu_pwm: "cpu-pwm-identity".into(),
+        cpu_enable: "cpu-enable-identity".into(),
+        cpu_tachometer: "cpu-tachometer-identity".into(),
+        gpu_pwm: "gpu-pwm-identity".into(),
+        gpu_enable: "gpu-enable-identity".into(),
+        gpu_tachometer: "gpu-tachometer-identity".into(),
+    }
 }
 
 #[test]
@@ -629,6 +653,32 @@ fn completed_calibration_is_atomically_published_as_protected_v2_evidence() {
     stripped.calibration.clear();
     assert!(stripped.validate().is_err());
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn completed_run_builds_calibration_specific_evidence_without_a_fake_workload() {
+    let session = complete_calibration(Fan::Cpu);
+    let fixture = passing_publication_record(&session);
+    let restoration_attempted_at = fixture.restoration_attempts[0].timestamp;
+    let restoration_confirmed_at = fixture.state_transitions.last().unwrap().timestamp;
+
+    let record = build_fan_calibration_record(CompletedFanCalibrationRun {
+        qualification_envelope: fixture.qualification_envelope,
+        calibration: session.evidence().unwrap().clone(),
+        endpoint_identities: test_endpoint_identities(),
+        started_at: fixture.started_at,
+        restoration_attempted_at,
+        restoration_confirmed_at,
+        completed_at: fixture.completed_at,
+    })
+    .unwrap();
+
+    assert_eq!(record.stage, "fan-calibration");
+    assert!(record.workload.is_none());
+    assert!(record.samples.is_empty());
+    assert!(record.thermal_summary.is_none());
+    assert_eq!(record.calibration, [session.evidence().unwrap().clone()]);
+    record.validate().unwrap();
 }
 
 #[test]

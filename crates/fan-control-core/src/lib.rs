@@ -63,8 +63,9 @@ pub use baseline::{
 pub use calibration::{
     CalibrationCheckpoint, CalibrationEvidenceWriteError, CalibrationLevelObservation,
     CalibrationObservationError, CalibrationReadbackSample, CalibrationStep,
-    ConservativeFanCalibration, FanHoldObservation, MAXIMUM_CALIBRATION_RESPONSE_MILLIS,
-    REQUIRED_FLOOR_HOLD_MILLIS, REQUIRED_MAXIMUM_TO_FLOOR_TRANSITIONS,
+    CompletedFanCalibrationRun, ConservativeFanCalibration, FanHoldObservation,
+    MAXIMUM_CALIBRATION_RESPONSE_MILLIS, REQUIRED_FLOOR_HOLD_MILLIS,
+    REQUIRED_MAXIMUM_TO_FLOOR_TRANSITIONS, build_fan_calibration_record,
 };
 pub use compatibility::{
     AdmittedCompatibility, CompatibilityAdmissionError, CompatibilityDeclarationError,

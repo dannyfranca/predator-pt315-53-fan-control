@@ -3,8 +3,12 @@ use std::{error::Error, fmt, path::Path};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EVIDENCE_SCHEMA_VERSION_V2, EvidenceFan, EvidenceRecord, EvidenceValidationError,
-    EvidenceWriteError, Fan, FanCalibrationEvidence, RpmAnchorEvidence,
+    EVIDENCE_SCHEMA_VERSION_V2, EvidenceFan, EvidenceRecord, EvidenceTimestamp,
+    EvidenceValidationError, EvidenceWriteError, Fan, FanCalibrationEvidence, FanCommandEvidence,
+    FanControlField, FanEndpointIdentitiesEvidence, FanReadbackEvidence, FanReadbackField,
+    ObservationOutcome, QualificationEnvelopeIdentityV1, RestorationAttemptEvidence,
+    RestorationOutcome, RpmAnchorEvidence, RunOutcomeEvidence, RunOutcomeStatus,
+    StateTransitionEvidence,
     tachometer::{MAXIMUM_PLAUSIBLE_RPM, MINIMUM_PLAUSIBLE_RPM},
     write_evidence_atomically,
 };
@@ -141,6 +145,357 @@ pub struct FanHoldObservation {
     pub samples: Vec<CalibrationReadbackSample>,
     pub stall_observed: bool,
     pub unexplained_rpm_collapse_observed: bool,
+}
+
+/// Exact successful run facts needed to construct one calibration evidence record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedFanCalibrationRun {
+    pub qualification_envelope: QualificationEnvelopeIdentityV1,
+    pub calibration: FanCalibrationEvidence,
+    pub endpoint_identities: FanEndpointIdentitiesEvidence,
+    pub started_at: EvidenceTimestamp,
+    pub restoration_attempted_at: EvidenceTimestamp,
+    pub restoration_confirmed_at: EvidenceTimestamp,
+    pub completed_at: EvidenceTimestamp,
+}
+
+/// Builds and validates the canonical evidence record for one completed fan calibration.
+pub fn build_fan_calibration_record(
+    run: CompletedFanCalibrationRun,
+) -> Result<EvidenceRecord, EvidenceValidationError> {
+    let checkpoint = run.calibration.protocol_checkpoint.as_ref().ok_or(
+        EvidenceValidationError::InvalidValue {
+            field: "calibration.protocol_checkpoint",
+            index: 0,
+        },
+    )?;
+    let selected_fan = run.calibration.fan;
+    let other_fan = match selected_fan {
+        EvidenceFan::Cpu => EvidenceFan::Gpu,
+        EvidenceFan::Gpu => EvidenceFan::Cpu,
+    };
+    let wall_unix_millis = run.started_at.wall_unix_millis;
+    let timestamp = |monotonic_millis| EvidenceTimestamp {
+        monotonic_millis,
+        wall_unix_millis,
+    };
+    let mut commands = Vec::new();
+    let mut readbacks = Vec::new();
+    for event in &checkpoint.events {
+        let (step, samples) = match event {
+            CalibrationCheckpointEvent::Level { step, observation } => {
+                commands.push(FanCommandEvidence {
+                    timestamp: timestamp(observation.commanded_at_monotonic_millis),
+                    fan: selected_fan,
+                    field: FanControlField::Pwm,
+                    value: u32::from(step.pwm_value().expect("level steps command PWM")),
+                });
+                (*step, observation.samples.as_slice())
+            }
+            CalibrationCheckpointEvent::Hold { step, observation } => {
+                (*step, observation.samples.as_slice())
+            }
+        };
+        let selected_pwm_identity = endpoint_identity(
+            &run.endpoint_identities,
+            selected_fan,
+            FanReadbackField::Pwm,
+        );
+        let selected_enable_identity = endpoint_identity(
+            &run.endpoint_identities,
+            selected_fan,
+            FanReadbackField::Enable,
+        );
+        let selected_rpm_identity = endpoint_identity(
+            &run.endpoint_identities,
+            selected_fan,
+            FanReadbackField::Rpm,
+        );
+        let other_pwm_identity =
+            endpoint_identity(&run.endpoint_identities, other_fan, FanReadbackField::Pwm);
+        let other_enable_identity = endpoint_identity(
+            &run.endpoint_identities,
+            other_fan,
+            FanReadbackField::Enable,
+        );
+        for sample in samples {
+            let observed_at = timestamp(sample.monotonic_millis);
+            readbacks.extend([
+                confirmed_readback(
+                    observed_at,
+                    selected_fan,
+                    FanReadbackField::Enable,
+                    u32::from(sample.selected_enable_readback),
+                    selected_enable_identity,
+                ),
+                confirmed_readback(
+                    observed_at,
+                    selected_fan,
+                    FanReadbackField::Pwm,
+                    u32::from(sample.selected_pwm_readback),
+                    selected_pwm_identity,
+                ),
+                FanReadbackEvidence {
+                    timestamp: observed_at,
+                    source_timestamp: None,
+                    fresh: None,
+                    boot_id: None,
+                    fan: selected_fan,
+                    field: FanReadbackField::Rpm,
+                    value: sample.selected_rpm,
+                    endpoint_identity: selected_rpm_identity.to_owned(),
+                    outcome: if sample.selected_rpm.is_some() {
+                        ObservationOutcome::Confirmed
+                    } else {
+                        ObservationOutcome::Unreadable
+                    },
+                    phase: None,
+                },
+                confirmed_readback(
+                    observed_at,
+                    other_fan,
+                    FanReadbackField::Enable,
+                    u32::from(sample.other_enable_readback),
+                    other_enable_identity,
+                ),
+                confirmed_readback(
+                    observed_at,
+                    other_fan,
+                    FanReadbackField::Pwm,
+                    u32::from(sample.other_pwm_readback),
+                    other_pwm_identity,
+                ),
+            ]);
+        }
+        debug_assert_eq!(
+            step.pwm_value(),
+            samples.first().map(|sample| sample.selected_pwm_readback)
+        );
+    }
+    for fan in [EvidenceFan::Cpu, EvidenceFan::Gpu] {
+        readbacks.push(confirmed_readback(
+            run.restoration_confirmed_at,
+            fan,
+            FanReadbackField::Enable,
+            2,
+            endpoint_identity(&run.endpoint_identities, fan, FanReadbackField::Enable),
+        ));
+    }
+    let mut record = EvidenceRecord::complete_v2(
+        run.qualification_envelope,
+        "fan-calibration",
+        run.started_at,
+        run.completed_at,
+        RunOutcomeEvidence {
+            status: RunOutcomeStatus::Passed,
+            reason: "fan calibration passed".to_owned(),
+            another_passing_run_required: false,
+            final_firmware_auto_confirmed: true,
+        },
+    );
+    record.fan_endpoint_identities = Some(run.endpoint_identities);
+    record.commands = commands;
+    record.readbacks = readbacks;
+    record.state_transitions = vec![
+        StateTransitionEvidence {
+            timestamp: run.started_at,
+            boot_id: None,
+            from: "firmware-auto".to_owned(),
+            to: "custom-control".to_owned(),
+        },
+        StateTransitionEvidence {
+            timestamp: run.restoration_confirmed_at,
+            boot_id: None,
+            from: "custom-control".to_owned(),
+            to: "firmware-auto".to_owned(),
+        },
+    ];
+    record.restoration_attempts = [EvidenceFan::Cpu, EvidenceFan::Gpu]
+        .into_iter()
+        .map(|fan| RestorationAttemptEvidence {
+            timestamp: run.restoration_attempted_at,
+            fan,
+            auto_write_succeeded: true,
+            enable_readback: Some(2),
+            outcome: RestorationOutcome::FirmwareAutoConfirmed,
+        })
+        .collect();
+    record.calibration = vec![run.calibration];
+    record.validate()?;
+    Ok(record)
+}
+
+fn endpoint_identity(
+    identities: &FanEndpointIdentitiesEvidence,
+    fan: EvidenceFan,
+    field: FanReadbackField,
+) -> &str {
+    match (fan, field) {
+        (EvidenceFan::Cpu, FanReadbackField::Pwm) => &identities.cpu_pwm,
+        (EvidenceFan::Cpu, FanReadbackField::Enable) => &identities.cpu_enable,
+        (EvidenceFan::Cpu, FanReadbackField::Rpm) => &identities.cpu_tachometer,
+        (EvidenceFan::Gpu, FanReadbackField::Pwm) => &identities.gpu_pwm,
+        (EvidenceFan::Gpu, FanReadbackField::Enable) => &identities.gpu_enable,
+        (EvidenceFan::Gpu, FanReadbackField::Rpm) => &identities.gpu_tachometer,
+    }
+}
+
+fn confirmed_readback(
+    timestamp: EvidenceTimestamp,
+    fan: EvidenceFan,
+    field: FanReadbackField,
+    value: u32,
+    endpoint_identity: &str,
+) -> FanReadbackEvidence {
+    FanReadbackEvidence {
+        timestamp,
+        source_timestamp: None,
+        fresh: None,
+        boot_id: None,
+        fan,
+        field,
+        value: Some(value),
+        endpoint_identity: endpoint_identity.to_owned(),
+        outcome: ObservationOutcome::Confirmed,
+        phase: None,
+    }
+}
+
+pub(crate) fn fan_calibration_is_complete(record: &EvidenceRecord) -> bool {
+    if record.workload.is_some()
+        || !record.samples.is_empty()
+        || record.thermal_summary.is_some()
+        || record.firmware_auto_cleanup.is_some()
+        || record.preflight_checks.is_some()
+        || !record.faults.is_empty()
+        || !record.process_stops.is_empty()
+        || record.calibration.len() != 1
+        || record.commands.is_empty()
+    {
+        return false;
+    }
+    let Some(identities) = &record.fan_endpoint_identities else {
+        return false;
+    };
+    let calibration = &record.calibration[0];
+    let Some(checkpoint) = &calibration.protocol_checkpoint else {
+        return false;
+    };
+    let selected_fan = calibration.fan;
+    let other_fan = match selected_fan {
+        EvidenceFan::Cpu => EvidenceFan::Gpu,
+        EvidenceFan::Gpu => EvidenceFan::Cpu,
+    };
+    let mut expected = Vec::new();
+    for event in &checkpoint.events {
+        let samples = match event {
+            CalibrationCheckpointEvent::Level { observation, .. } => observation.samples.as_slice(),
+            CalibrationCheckpointEvent::Hold { observation, .. } => observation.samples.as_slice(),
+        };
+        for sample in samples {
+            expected.extend([
+                (
+                    sample.monotonic_millis,
+                    selected_fan,
+                    FanReadbackField::Enable,
+                    Some(u32::from(sample.selected_enable_readback)),
+                    endpoint_identity(identities, selected_fan, FanReadbackField::Enable),
+                    ObservationOutcome::Confirmed,
+                ),
+                (
+                    sample.monotonic_millis,
+                    selected_fan,
+                    FanReadbackField::Pwm,
+                    Some(u32::from(sample.selected_pwm_readback)),
+                    endpoint_identity(identities, selected_fan, FanReadbackField::Pwm),
+                    ObservationOutcome::Confirmed,
+                ),
+                (
+                    sample.monotonic_millis,
+                    selected_fan,
+                    FanReadbackField::Rpm,
+                    sample.selected_rpm,
+                    endpoint_identity(identities, selected_fan, FanReadbackField::Rpm),
+                    if sample.selected_rpm.is_some() {
+                        ObservationOutcome::Confirmed
+                    } else {
+                        ObservationOutcome::Unreadable
+                    },
+                ),
+                (
+                    sample.monotonic_millis,
+                    other_fan,
+                    FanReadbackField::Enable,
+                    Some(u32::from(sample.other_enable_readback)),
+                    endpoint_identity(identities, other_fan, FanReadbackField::Enable),
+                    ObservationOutcome::Confirmed,
+                ),
+                (
+                    sample.monotonic_millis,
+                    other_fan,
+                    FanReadbackField::Pwm,
+                    Some(u32::from(sample.other_pwm_readback)),
+                    endpoint_identity(identities, other_fan, FanReadbackField::Pwm),
+                    ObservationOutcome::Confirmed,
+                ),
+            ]);
+        }
+    }
+    let Some(calibration_readback_count) = record.readbacks.len().checked_sub(2) else {
+        return false;
+    };
+    let calibration_readbacks = &record.readbacks[..calibration_readback_count];
+    let calibration_readbacks_match = calibration_readbacks.len() == expected.len()
+        && calibration_readbacks.iter().zip(expected).all(
+            |(readback, (monotonic_millis, fan, field, value, identity, outcome))| {
+                readback.timestamp.monotonic_millis == monotonic_millis
+                    && readback.fan == fan
+                    && readback.field == field
+                    && readback.value == value
+                    && readback.endpoint_identity == identity
+                    && readback.outcome == outcome
+                    && readback.source_timestamp.is_none()
+                    && readback.fresh.is_none()
+                    && readback.boot_id.is_none()
+                    && readback.phase.is_none()
+            },
+        );
+    let final_readbacks = record.readbacks.iter().rev().take(2).collect::<Vec<_>>();
+    let final_readbacks_match = [EvidenceFan::Cpu, EvidenceFan::Gpu].into_iter().all(|fan| {
+        final_readbacks.iter().any(|readback| {
+            readback.fan == fan
+                && readback.field == FanReadbackField::Enable
+                && readback.value == Some(2)
+                && readback.endpoint_identity
+                    == endpoint_identity(identities, fan, FanReadbackField::Enable)
+                && readback.outcome == ObservationOutcome::Confirmed
+                && readback.source_timestamp.is_none()
+                && readback.fresh.is_none()
+                && readback.boot_id.is_none()
+                && readback.phase.is_none()
+        })
+    });
+    let restorations_match = record.restoration_attempts.len() == 2
+        && [EvidenceFan::Cpu, EvidenceFan::Gpu].into_iter().all(|fan| {
+            record.restoration_attempts.iter().any(|attempt| {
+                attempt.fan == fan
+                    && attempt.auto_write_succeeded
+                    && attempt.enable_readback == Some(2)
+                    && attempt.outcome == RestorationOutcome::FirmwareAutoConfirmed
+            })
+        });
+    let transitions_match = matches!(
+        record.state_transitions.as_slice(),
+        [entered, restored]
+            if entered.timestamp == record.started_at
+                && entered.boot_id.is_none()
+                && entered.from == "firmware-auto"
+                && entered.to == "custom-control"
+                && restored.boot_id.is_none()
+                && restored.from == "custom-control"
+                && restored.to == "firmware-auto"
+    );
+    calibration_readbacks_match && final_readbacks_match && restorations_match && transitions_match
 }
 
 #[derive(Debug)]

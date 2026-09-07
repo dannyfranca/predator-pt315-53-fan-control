@@ -359,7 +359,7 @@ pub struct FanEndpointIdentitiesEvidence {
 }
 
 impl FanEndpointIdentitiesEvidence {
-    pub(crate) fn from_device(device: &crate::AcerHwmonDevice) -> Option<Self> {
+    pub fn from_device(device: &crate::AcerHwmonDevice) -> Option<Self> {
         Some(Self {
             cpu_pwm: Self::endpoint_identity(device, device.cpu().pwm())?,
             cpu_enable: Self::endpoint_identity(device, device.cpu().enable())?,
@@ -974,12 +974,17 @@ impl EvidenceRecord {
         ) {
             (
                 EVIDENCE_SCHEMA_VERSION_V2,
-                "preflight" | "firmware-auto-baseline",
+                "preflight" | "firmware-auto-baseline" | "fan-calibration",
                 _,
                 Some(identities),
             ) if identities.is_valid() => {}
             (EVIDENCE_SCHEMA_VERSION_V2, "preflight", RunOutcomeStatus::Failed, None) => {}
-            (EVIDENCE_SCHEMA_VERSION_V2, "preflight" | "firmware-auto-baseline", _, _)
+            (
+                EVIDENCE_SCHEMA_VERSION_V2,
+                "preflight" | "firmware-auto-baseline" | "fan-calibration",
+                _,
+                _,
+            )
             | (_, _, _, Some(_)) => {
                 return Err(EvidenceValidationError::InvalidValue {
                     field: "fan_endpoint_identities",
@@ -1553,11 +1558,13 @@ impl EvidenceRecord {
             });
         }
         if matches!(self.outcome.status, RunOutcomeStatus::Passed)
-            && ((!matches!(self.stage.as_str(), "preflight" | "live-lifecycle")
-                && !self
-                    .samples
-                    .iter()
-                    .any(|sample| sample.freshness == SampleFreshness::Fresh))
+            && ((!matches!(
+                self.stage.as_str(),
+                "preflight" | "fan-calibration" | "live-lifecycle"
+            ) && !self
+                .samples
+                .iter()
+                .any(|sample| sample.freshness == SampleFreshness::Fresh))
                 || self.readbacks.is_empty()
                 || !self.outcome.final_firmware_auto_confirmed)
         {
@@ -1579,6 +1586,9 @@ impl EvidenceRecord {
                         && final_enable_readback_confirms_auto(self, EvidenceFan::Gpu)
                 }
                 "firmware-auto-baseline" => firmware_auto_baseline_is_complete(self),
+                "fan-calibration" if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2 => {
+                    crate::calibration::fan_calibration_is_complete(self)
+                }
                 "matched-workload" if self.schema_version == EVIDENCE_SCHEMA_VERSION_V2 => {
                     crate::matched_workload::matched_workload_is_complete(self)
                 }
