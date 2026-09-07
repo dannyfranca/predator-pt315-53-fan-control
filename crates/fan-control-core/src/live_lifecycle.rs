@@ -557,6 +557,14 @@ impl LiveLifecycleCheckpoint {
         self.started_at
     }
 
+    /// Returns the boot identity captured immediately before the reboot boundary.
+    ///
+    /// The external harness must echo this exact value after boot; exposing it avoids relying on
+    /// mutable out-of-band state to bind the continuation to this protected checkpoint.
+    pub fn pre_reboot_boot_id(&self) -> &str {
+        &self.pre_reboot_boot_id
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         validate_identity(&self.envelope).map_err(|error| error.to_string())?;
         if !crate::evidence::is_lower_hex(&self.prerequisite_binding_sha256, 64) {

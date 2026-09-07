@@ -10,17 +10,20 @@ of the exact reviewed harness executable; a different executable is rejected bef
 The runner invokes `HARNESS OPERATION ABSOLUTE_MONOTONIC_DEADLINE`, writes one JSON request to
 stdin, and reads one JSON response from stdout. The reviewed root-owned harness implements:
 
-- `run-live-lifecycle-case`: request contains the serialized `case` and fixed `instruction`;
+- `run-live-lifecycle-case`: request contains the serialized `case`, fixed `instruction`, exact
+  protected policy source, qualification envelope, measured CPU/GPU calibrations, and selected
+  NVIDIA UUID;
   response is `LiveLifecycleObserved<LiveLifecycleCaseObservation>`.
 - `restore-live-lifecycle-after-case`: signal-safe stop/containment and firmware-ownership restore
   after every non-reboot case; response is `LiveLifecycleObserved<EvidenceTimestamp>`. It is always
   invoked before the independent terminal Auto reads, even when the case harness failed.
 - `confirm-live-lifecycle-firmware-auto`: request contains `fan`; response is
   `LiveLifecycleFanAutoObservation`. This cleanup operation must remain available after a signal.
-- `resume-live-lifecycle-reboot`: response is
+- `resume-live-lifecycle-reboot`: request contains the checkpoint-bound `boot_id_before`; response is
   `LiveLifecycleObserved<LiveLifecycleRebootContinuation>` with distinct pre/post boot IDs and no
   Custom-control observer attestations.
-- `arm-live-lifecycle-after-reboot`: response is
+- `arm-live-lifecycle-after-reboot`: request contains the same exact protected control inputs as a
+  live case; response is
   `LiveLifecycleObserved<LiveLifecycleRebootArmObservation>`.
 - `restore-live-lifecycle-after-reboot`: stops the post-boot controller and restores firmware
   ownership; response is `LiveLifecycleObserved<EvidenceTimestamp>`. This cleanup operation must

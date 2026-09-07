@@ -1152,6 +1152,20 @@ fn live_lifecycle_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> {
     let _signal_handlers = TerminationSignalHandlers::install(shutdown.clone())?;
     let mut harness = HarnessEnvironment::new_control(arguments.stage.harness, shutdown.clone())?;
     harness.select_nvidia_gpu(manifest.nvidia_gpu_uuid.clone());
+    harness.configure_qualification_control(
+        read_protected_file(&manifest.protected_policy)?,
+        manifest.qualification_envelope.clone(),
+        cpu_calibration
+            .calibration
+            .first()
+            .cloned()
+            .ok_or("CPU calibration evidence has no calibration payload")?,
+        gpu_calibration
+            .calibration
+            .first()
+            .cloned()
+            .ok_or("GPU calibration evidence has no calibration payload")?,
+    )?;
 
     let report = if checkpoint_path.exists() {
         let checkpoint: LiveLifecycleCheckpoint =
@@ -1169,6 +1183,7 @@ fn live_lifecycle_command(values: Vec<OsString>) -> Result<(), Box<dyn Error>> {
             return Err("lifecycle checkpoint predates the matched workload sequence".into());
         }
         println!("RESUME live lifecycle after reboot: observer approved");
+        harness.set_lifecycle_pre_reboot_boot_id(checkpoint.pre_reboot_boot_id().to_owned());
         resume_live_lifecycle_qualification(&mut harness, checkpoint)?
     } else {
         validate_root_owned_output_destination(&checkpoint_path)?;
@@ -2245,6 +2260,7 @@ struct HarnessEnvironment {
     system_health: Option<SystemHealthMonitor>,
     control_session: RefCell<Option<ControlHarnessSession>>,
     qualification_control_request: Option<Value>,
+    lifecycle_pre_reboot_boot_id: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2269,6 +2285,7 @@ impl HarnessEnvironment {
             system_health: None,
             control_session: RefCell::new(None),
             qualification_control_request: None,
+            lifecycle_pre_reboot_boot_id: None,
         })
     }
 
@@ -2298,6 +2315,27 @@ impl HarnessEnvironment {
             "nvidia_gpu_uuid": self.selected_nvidia_gpu()?,
         }));
         Ok(())
+    }
+
+    fn set_lifecycle_pre_reboot_boot_id(&mut self, boot_id: String) {
+        self.lifecycle_pre_reboot_boot_id = Some(boot_id);
+    }
+
+    fn lifecycle_request(&self, fields: Value) -> Result<Value, String> {
+        let mut request = self
+            .qualification_control_request
+            .clone()
+            .ok_or("qualification control policy was not configured")?;
+        let request = request
+            .as_object_mut()
+            .ok_or("qualification control request is not an object")?;
+        let fields = fields
+            .as_object()
+            .ok_or("lifecycle request fields are not an object")?;
+        for (key, value) in fields {
+            request.insert(key.clone(), value.clone());
+        }
+        Ok(Value::Object(request.clone()))
     }
 
     fn start_observation_window(
@@ -3355,9 +3393,13 @@ impl LiveLifecycleEnvironment for HarnessEnvironment {
         &mut self,
         case: LiveLifecycleCase,
     ) -> Result<LiveLifecycleObserved<LiveLifecycleCaseObservation>, String> {
+        let request = self.lifecycle_request(json!({
+            "case": case,
+            "instruction": case.instruction(),
+        }))?;
         self.invoke(
             "run-live-lifecycle-case",
-            json!({ "case": case, "instruction": case.instruction() }),
+            request,
             self.deadline(20 * 60 * 1_000),
         )
     }
@@ -3376,9 +3418,13 @@ impl LiveLifecycleEnvironment for HarnessEnvironment {
     fn resume_after_reboot(
         &mut self,
     ) -> Result<LiveLifecycleObserved<LiveLifecycleRebootContinuation>, String> {
+        let boot_id_before = self
+            .lifecycle_pre_reboot_boot_id
+            .as_deref()
+            .ok_or("pre-reboot boot identity was not configured")?;
         self.invoke(
             "resume-live-lifecycle-reboot",
-            json!({}),
+            json!({ "boot_id_before": boot_id_before }),
             self.deadline(30_000),
         )
     }
@@ -3386,9 +3432,10 @@ impl LiveLifecycleEnvironment for HarnessEnvironment {
     fn arm_after_reboot(
         &mut self,
     ) -> Result<LiveLifecycleObserved<LiveLifecycleRebootArmObservation>, String> {
+        let request = self.lifecycle_request(json!({}))?;
         self.invoke(
             "arm-live-lifecycle-after-reboot",
-            json!({}),
+            request,
             self.deadline(10_000),
         )
     }
@@ -4036,6 +4083,8 @@ done"#,
             r#"request=$(cat)
 case "$1" in
   run-live-lifecycle-case)
+    printf '%s' "$request" | grep -q '"protected_policy_source":"policy"' || exit 8
+    printf '%s' "$request" | grep -q '"nvidia_gpu_uuid":"GPU-test"' || exit 8
     printf '%s' '{"observation":{"case":"invalid-configuration","observed_at":{"monotonic_millis":1,"wall_unix_millis":1},"fresh":true,"rejected_before_custom_control":true},"observer_attestations":[]}'
     ;;
   restore-live-lifecycle-after-reboot)
@@ -4047,6 +4096,13 @@ esac"#,
         let shutdown = ShutdownRequest::new();
         let mut harness =
             HarnessEnvironment::new_control(script.path.clone(), shutdown.clone()).unwrap();
+        harness.qualification_control_request = Some(json!({
+            "protected_policy_source": "policy",
+            "qualification_envelope": {},
+            "cpu_calibration": {},
+            "gpu_calibration": {},
+            "nvidia_gpu_uuid": "GPU-test",
+        }));
 
         let observed = LiveLifecycleEnvironment::run_case(
             &mut harness,
