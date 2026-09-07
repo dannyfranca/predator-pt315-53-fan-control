@@ -4,6 +4,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::thread;
+use std::time::Duration;
 use tempfile::TempDir;
 
 const RELEASE: &str = "7.1.8-cachyos-pt31553";
@@ -22,6 +24,39 @@ fn write_executable(path: &Path, source: &str) {
     let mut permissions = fs::metadata(path).unwrap().permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions).unwrap();
+}
+
+fn output_with_exec_retry(command: &mut Command) -> Output {
+    for attempt in 0..50 {
+        match command.output() {
+            Ok(output) => return output,
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && attempt < 49 => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("run candidate declaration fixture: {error}"),
+        }
+    }
+    unreachable!("the final execution attempt always returns or panics")
+}
+
+#[test]
+fn fixture_execution_waits_for_an_executable_writer_to_close() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = root.path().join("busy-fixture");
+    write_executable(&executable, "#!/usr/bin/bash\nexit 0\n");
+    let writer = fs::OpenOptions::new()
+        .write(true)
+        .open(&executable)
+        .unwrap();
+    let release = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(25));
+        drop(writer);
+    });
+
+    let output = output_with_exec_retry(&mut Command::new(&executable));
+    release.join().unwrap();
+
+    assert!(output.status.success());
 }
 
 fn module(
@@ -242,13 +277,13 @@ except loaded.DeclarationError as error:
     }
 
     fn generate_compatibility(&self) -> Output {
-        self.command()
-            .args(["compatibility", "--provenance"])
-            .arg(&self.provenance)
-            .arg("--output")
-            .arg(&self.compatibility)
-            .output()
-            .unwrap()
+        output_with_exec_retry(
+            self.command()
+                .args(["compatibility", "--provenance"])
+                .arg(&self.provenance)
+                .arg("--output")
+                .arg(&self.compatibility),
+        )
     }
 
     fn generate_manifest(&self) -> Output {
@@ -256,25 +291,25 @@ except loaded.DeclarationError as error:
     }
 
     fn generate_manifest_with(&self, mut command: Command) -> Output {
-        command
-            .args(["manifest", "--provenance"])
-            .arg(&self.provenance)
-            .arg("--compatibility")
-            .arg(&self.compatibility)
-            .arg("--controller-package")
-            .arg(&self.controller_package)
-            .arg("--controller-signature")
-            .arg(&self.controller_signature)
-            .args([
-                "--controller-signer-fingerprint",
-                "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
-            ])
-            .arg("--package-manifest-signature")
-            .arg(&self.package_manifest_signature)
-            .arg("--output")
-            .arg(&self.manifest)
-            .output()
-            .unwrap()
+        output_with_exec_retry(
+            command
+                .args(["manifest", "--provenance"])
+                .arg(&self.provenance)
+                .arg("--compatibility")
+                .arg(&self.compatibility)
+                .arg("--controller-package")
+                .arg(&self.controller_package)
+                .arg("--controller-signature")
+                .arg(&self.controller_signature)
+                .args([
+                    "--controller-signer-fingerprint",
+                    "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+                ])
+                .arg("--package-manifest-signature")
+                .arg(&self.package_manifest_signature)
+                .arg("--output")
+                .arg(&self.manifest),
+        )
     }
 }
 
