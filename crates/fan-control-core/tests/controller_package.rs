@@ -10,8 +10,6 @@ use fan_control_core::{
     QUALIFICATION_CGROUP_PREFIX, parse_compatibility_v1, parse_config_v1, validate_config_v1,
 };
 
-const SOURCE_COMMIT: &str = "828b1a31fd751241d430264100494812f0250f5b";
-const SOURCE_SHA256: &str = "b2a2297c2a87b2a9ffc59ee032a62f244abfa0ab70649ccc6899bc6c0ec52092";
 const README: &str = include_str!("../../../README.md");
 const SKILL: &str = include_str!("../../../skills/predator-fan-control/SKILL.md");
 const OPERATIONS: &str =
@@ -36,6 +34,43 @@ fn repository_root() -> PathBuf {
 
 fn package_root() -> PathBuf {
     repository_root().join("packaging/controller")
+}
+
+fn package_source_identity() -> (String, String) {
+    let pkgbuild = fs::read_to_string(package_root().join("PKGBUILD")).unwrap();
+    let commit = pkgbuild
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("_commit='")
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .expect("PKGBUILD must pin _commit")
+        .to_owned();
+    let sha256 = pkgbuild
+        .lines()
+        .skip_while(|line| line.trim() != "sha256sums=(")
+        .skip(1)
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .and_then(|line| line.strip_prefix('\''))
+        .and_then(|line| line.strip_suffix('\''))
+        .expect("PKGBUILD must pin a source SHA-256")
+        .to_owned();
+
+    for (name, value, length) in [
+        ("source commit", commit.as_str(), 40),
+        ("source SHA-256", sha256.as_str(), 64),
+    ] {
+        assert_eq!(value.len(), length, "invalid {name} length");
+        assert!(
+            value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "{name} must be lowercase hexadecimal"
+        );
+    }
+
+    (commit, sha256)
 }
 
 fn contract_source_root() -> PathBuf {
@@ -63,7 +98,8 @@ fn stage_package_fixture() -> (PathBuf, PathBuf) {
     ));
     let srcdir = root.join("src");
     let pkgdir = root.join("pkg");
-    let source_root = srcdir.join(format!("predator-pt315-53-fan-control-{SOURCE_COMMIT}"));
+    let (source_commit, _) = package_source_identity();
+    let source_root = srcdir.join(format!("predator-pt315-53-fan-control-{source_commit}"));
     let repository = contract_source_root();
 
     for binary in [
@@ -165,9 +201,10 @@ fn source_metadata_is_exact_and_reproducible() {
     let package = package_root();
     let pkgbuild = fs::read_to_string(package.join("PKGBUILD")).unwrap();
     let srcinfo = fs::read_to_string(package.join(".SRCINFO")).unwrap();
+    let (source_commit, source_sha256) = package_source_identity();
 
-    assert!(pkgbuild.contains(&format!("_commit='{SOURCE_COMMIT}'")));
-    assert!(pkgbuild.contains(SOURCE_SHA256));
+    assert!(pkgbuild.contains(&format!("_commit='{source_commit}'")));
+    assert!(pkgbuild.contains(&source_sha256));
     let pkgrel = pkgbuild
         .lines()
         .find_map(|line| line.strip_prefix("pkgrel="))
@@ -197,8 +234,8 @@ fn source_metadata_is_exact_and_reproducible() {
     assert!(pkgbuild.contains("[[ $test_name == source_complete_handoff ]] && continue"));
     assert!(pkgbuild.contains("cargo test --frozen -p fan-control-core --lib"));
     assert!(pkgbuild.contains("cargo test --frozen -p fan-control-core --doc"));
-    assert!(srcinfo.contains(&format!("archive/{SOURCE_COMMIT}.tar.gz")));
-    assert!(srcinfo.contains(SOURCE_SHA256));
+    assert!(srcinfo.contains(&format!("archive/{source_commit}.tar.gz")));
+    assert!(srcinfo.contains(&source_sha256));
     assert!(
         srcinfo
             .lines()
@@ -264,7 +301,8 @@ fn archive_checks_ignore_ambient_git_configuration() {
         NEXT_DIR.fetch_add(1, Ordering::Relaxed)
     ));
     let srcdir = root.join("src");
-    let source_root = srcdir.join(format!("predator-pt315-53-fan-control-{SOURCE_COMMIT}"));
+    let (source_commit, _) = package_source_identity();
+    let source_root = srcdir.join(format!("predator-pt315-53-fan-control-{source_commit}"));
     let hostile_home = root.join("hostile-home");
     let cargo_calls = root.join("cargo-calls");
     fs::create_dir_all(source_root.join("crates/fan-control-core/tests")).unwrap();
@@ -462,7 +500,8 @@ fn prepare_hardens_reused_source_ancestors() {
         NEXT_DIR.fetch_add(1, Ordering::Relaxed)
     ));
     let srcdir = root.join("src");
-    let source_root = srcdir.join(format!("predator-pt315-53-fan-control-{SOURCE_COMMIT}"));
+    let (source_commit, _) = package_source_identity();
+    let source_root = srcdir.join(format!("predator-pt315-53-fan-control-{source_commit}"));
     let nested_crate = source_root.join("crates/fan-control-core");
     fs::create_dir_all(&nested_crate).unwrap();
     fs::set_permissions(&srcdir, fs::Permissions::from_mode(0o775)).unwrap();
@@ -503,6 +542,7 @@ fn prepare_hardens_reused_source_ancestors() {
 #[cfg(unix)]
 #[test]
 fn package_layout_keeps_authority_and_state_boundaries_separate() {
+    let (source_commit, _) = package_source_identity();
     let (root, pkgdir) = stage_package_fixture();
     let repository = contract_source_root();
     let package = package_root();
@@ -618,7 +658,7 @@ fn package_layout_keeps_authority_and_state_boundaries_separate() {
     );
     assert_eq!(
         fs::read_to_string(pkgdir.join("usr/share/pt31553-fan-control/source-commit")).unwrap(),
-        format!("{SOURCE_COMMIT}\n")
+        format!("{source_commit}\n")
     );
     for asset in [
         "usr/lib/pt31553-fan-control/compatibility.toml",

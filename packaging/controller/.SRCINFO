@@ -1,7 +1,7 @@
 pkgbase = pt31553-fan-control
 	pkgdesc = Fail-closed PT315-53 fan controller and qualification suite
 	pkgver = 0.1.0
-	pkgrel = 16
+	pkgrel = 18
 	url = https://github.com/dannyfranca/predator-pt315-53-fan-control
 	arch = x86_64
 	license = MIT
@@ -21,7 +21,7 @@ pkgbase = pt31553-fan-control
 	options = !debug
 	options = !lto
 	backup = etc/pt31553-fan-control/config.toml
-	source = pt31553-fan-control-0.1.0.tar.gz::https://github.com/dannyfranca/predator-pt315-53-fan-control/archive/f6722aca6bacf9bcfefb0883410f05c813588bdf.tar.gz
-	sha256sums = ea8c92325a114bf176f49f9f64e7a15dfd23a05e7dc435a3fd88ae5451b8f4c3
+	source = pt31553-fan-control-0.1.0.tar.gz::https://github.com/dannyfranca/predator-pt315-53-fan-control/archive/4ba6029cb5c9752b4f257b9df2b0a6843d417a09.tar.gz
+	sha256sums = 0f46aa57328bbc1a5cc17ad162525bd725d36a8c9913abf132a0d2aee5ebae35
 
 pkgname = pt31553-fan-control
