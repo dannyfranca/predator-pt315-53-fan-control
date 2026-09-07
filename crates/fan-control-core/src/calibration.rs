@@ -147,6 +147,16 @@ pub struct FanHoldObservation {
     pub unexplained_rpm_collapse_observed: bool,
 }
 
+/// Reports whether a level observation contains a valid settled trailing RPM window.
+///
+/// The same classifier is used when the completed protocol is validated, keeping live capture
+/// and evidence replay on one definition of settled behavior.
+pub fn calibration_level_is_settled(
+    observation: &CalibrationLevelObservation,
+) -> Result<bool, CalibrationObservationError> {
+    settled_level(observation).map(|settled| settled.is_some())
+}
+
 /// Exact successful run facts needed to construct one calibration evidence record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedFanCalibrationRun {
@@ -1182,25 +1192,34 @@ fn settled_level(
     if rpm_samples.len() < MINIMUM_SETTLED_SAMPLES {
         return Err(CalibrationObservationError::InconclusiveObservation);
     }
-    let settled_samples = &observation.samples[observation.samples.len() - rpm_samples.len()..];
-    if sample_duration(settled_samples)
-        .is_none_or(|duration| duration < MINIMUM_SETTLED_SAMPLE_SPAN_MILLIS)
-        || settled_samples.windows(2).any(|samples| {
-            samples[1]
-                .monotonic_millis
-                .saturating_sub(samples[0].monotonic_millis)
-                < MINIMUM_SETTLED_SAMPLE_GAP_MILLIS
-        })
-    {
+    if !timestamps_are_continuous(&observation.samples) {
         return Err(CalibrationObservationError::InconclusiveObservation);
     }
-    let Some(median_rpm) = stable_rpm_median_values(&rpm_samples) else {
-        return Ok(None);
-    };
-    Ok(Some(SettledLevel {
-        median_rpm,
-        response_millis,
-    }))
+    Ok(
+        (first_rpm_index..observation.samples.len()).find_map(|start| {
+            let settled_samples = &observation.samples[start..];
+            if settled_samples.len() < MINIMUM_SETTLED_SAMPLES
+                || sample_duration(settled_samples)
+                    .is_none_or(|duration| duration < MINIMUM_SETTLED_SAMPLE_SPAN_MILLIS)
+                || settled_samples.windows(2).any(|samples| {
+                    samples[1]
+                        .monotonic_millis
+                        .saturating_sub(samples[0].monotonic_millis)
+                        < MINIMUM_SETTLED_SAMPLE_GAP_MILLIS
+                })
+            {
+                return None;
+            }
+            let rpm_samples = settled_samples
+                .iter()
+                .map(|sample| sample.selected_rpm.expect("RPM suffix was validated above"))
+                .collect::<Vec<_>>();
+            stable_rpm_median_values(&rpm_samples).map(|median_rpm| SettledLevel {
+                median_rpm,
+                response_millis,
+            })
+        }),
+    )
 }
 
 fn stable_rpm_median(

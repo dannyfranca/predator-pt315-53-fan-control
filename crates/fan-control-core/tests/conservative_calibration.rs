@@ -8,7 +8,7 @@ use fan_control_core::{
     EvidenceRecord, Fan, FanEndpointIdentitiesEvidence, FanHoldObservation,
     MAXIMUM_CALIBRATION_RESPONSE_MILLIS, REQUIRED_FLOOR_HOLD_MILLIS,
     REQUIRED_MAXIMUM_TO_FLOOR_TRANSITIONS, RunOutcomeStatus, build_fan_calibration_record,
-    parse_evidence_v1, parse_evidence_v2,
+    calibration_level_is_settled, parse_evidence_v1, parse_evidence_v2,
 };
 
 thread_local! {
@@ -54,6 +54,34 @@ fn unstable(step: CalibrationStep) -> CalibrationLevelObservation {
         sample.selected_rpm = Some(if index % 2 == 0 { 900 } else { 1_300 });
     }
     observation
+}
+
+#[test]
+fn a_normal_rpm_ramp_can_settle_in_a_trailing_window() {
+    let step = CalibrationStep::Sweep {
+        duty_basis_points: 6_000,
+        pwm_value: 153,
+    };
+    let started_at = allocate_time(1_500);
+    let observation = CalibrationLevelObservation {
+        commanded_at_monotonic_millis: started_at,
+        samples: [5_000, 3_100, 3_020, 3_000]
+            .into_iter()
+            .enumerate()
+            .map(|(index, rpm)| CalibrationReadbackSample {
+                monotonic_millis: started_at + index as u64 * 500,
+                selected_enable_readback: 1,
+                selected_pwm_readback: step.pwm_value().unwrap(),
+                other_enable_readback: 1,
+                other_pwm_readback: u8::MAX,
+                selected_rpm: Some(rpm),
+            })
+            .collect(),
+        stall_observed: false,
+        unexplained_rpm_collapse_observed: false,
+    };
+
+    assert_eq!(calibration_level_is_settled(&observation), Ok(true));
 }
 
 fn establish_floor(session: &mut ConservativeFanCalibration) {
