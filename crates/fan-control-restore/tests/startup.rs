@@ -1,8 +1,11 @@
 use std::{
     fs,
-    os::unix::{fs::PermissionsExt, net::UnixDatagram},
+    os::unix::{
+        fs::{OpenOptionsExt, PermissionsExt},
+        net::UnixDatagram,
+    },
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
 };
 
 #[path = "../../../tests/support/native_journal.rs"]
@@ -56,6 +59,34 @@ fn restoration_entrypoint_delivers_faults_to_native_journald() {
 
 #[test]
 fn restore_command_retries_ownership_then_restores_both_fake_platform_fans() {
+    let (output, event_ids, fan_modes) = run_fake_platform_restore(0o644, "15s");
+    assert!(
+        output.status.success(),
+        "restore command failed (status {}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("waiting for recovery ownership"));
+    assert_eq!(fan_modes, ["2", "2"]);
+    assert_eq!(
+        event_ids,
+        [
+            "pt31553.runtime-fault.v1",
+            "pt31553.restoration-attempt.v1",
+            "pt31553.state-transition.v1",
+        ]
+    );
+}
+
+#[test]
+fn rejected_fake_platform_permissions_time_out_without_restoring_fans() {
+    let (output, _, fan_modes) = run_fake_platform_restore(0o600, "5s");
+    assert_eq!(output.status.code(), Some(124));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot discover recovery endpoints"));
+    assert_eq!(fan_modes, ["1", "1"]);
+}
+
+fn run_fake_platform_restore(mode: u32, timeout: &str) -> (Output, Vec<String>, [String; 2]) {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sandbox = tempfile::Builder::new()
         .prefix(".restore-command-test-")
@@ -69,8 +100,22 @@ fn restore_command_retries_ownership_then_restores_both_fake_platform_fans() {
     fs::write(acer_root.join("name"), "acer\n").expect("write hwmon name");
     set_mode(&acer_root.join("name"), 0o444);
     for channel in 1..=2 {
-        fs::write(acer_root.join(format!("pwm{channel}")), "128\n").expect("write fake PWM");
-        fs::write(acer_root.join(format!("pwm{channel}_enable")), "1\n").expect("write fake mode");
+        for (name, value) in [
+            (format!("pwm{channel}"), "128\n"),
+            (format!("pwm{channel}_enable"), "1\n"),
+        ] {
+            let path = acer_root.join(name);
+            // Reproduce a restrictive umask without changing process-global
+            // state shared by parallel tests, then set the exact hwmon ABI mode.
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .expect("create private fake PWM attribute");
+            fs::write(&path, value).expect("write fake PWM attribute");
+            set_mode(&path, mode);
+        }
         fs::write(acer_root.join(format!("fan{channel}_input")), "2400\n")
             .expect("write fake tachometer");
         set_mode(&acer_root.join(format!("fan{channel}_input")), 0o444);
@@ -86,9 +131,12 @@ fn restore_command_retries_ownership_then_restores_both_fake_platform_fans() {
         ),
     );
 
-    let (journal, journal_path) = journal_receiver("restore-fake-platform");
+    let (journal, journal_path) = journal_receiver(&format!("restore-fake-platform-{mode:o}"));
 
-    let output = Command::new("/usr/bin/bwrap")
+    // Recovery deliberately retries forever in production. Bound the entire
+    // sandbox process group so a rejected fixture fails instead of hanging CI.
+    let output = Command::new("/usr/bin/timeout")
+        .args(["--kill-after=2s", timeout, "/usr/bin/bwrap"])
         .args([
             "--die-with-parent",
             "--unshare-user",
@@ -130,25 +178,13 @@ fn restore_command_retries_ownership_then_restores_both_fake_platform_fans() {
         .output()
         .expect("run restore command on fake platform");
 
-    assert!(
-        output.status.success(),
-        "restore command failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("waiting for recovery ownership"));
-    assert_eq!(read_trimmed(acer_root.join("pwm1_enable")), "2");
-    assert_eq!(read_trimmed(acer_root.join("pwm2_enable")), "2");
-
+    fs::remove_file(&journal_path).expect("remove fake journal");
     let event_ids = receive_event_ids(&journal);
-    assert_eq!(
-        event_ids,
-        [
-            "pt31553.runtime-fault.v1",
-            "pt31553.restoration-attempt.v1",
-            "pt31553.state-transition.v1",
-        ]
-    );
-    fs::remove_file(journal_path).expect("remove fake journal");
+    let fan_modes = [
+        read_trimmed(acer_root.join("pwm1_enable")),
+        read_trimmed(acer_root.join("pwm2_enable")),
+    ];
+    (output, event_ids, fan_modes)
 }
 
 fn write_executable(path: &Path, contents: &str) {
@@ -159,7 +195,7 @@ fn write_executable(path: &Path, contents: &str) {
 fn set_mode(path: &Path, mode: u32) {
     let mut permissions = fs::metadata(path).unwrap().permissions();
     permissions.set_mode(mode);
-    fs::set_permissions(path, permissions).expect("make fixture executable");
+    fs::set_permissions(path, permissions).expect("set fixture permissions");
 }
 
 fn read_trimmed(path: PathBuf) -> String {
