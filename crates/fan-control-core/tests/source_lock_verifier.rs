@@ -2701,6 +2701,27 @@ fn checked_in_lock_records_every_input_class_and_raw_oci_identity() {
 
     let parsed: toml::Value = toml::from_str(&lock).expect("parse checked-in lock");
     let inputs = parsed["inputs"].as_array().expect("lock inputs");
+    // The runbook stages repository inputs from this checkout, not old Git blobs.
+    // Check every such input so new build tools cannot escape a hand-written list.
+    for record in inputs {
+        let origin = record["origin"].as_str().expect("input origin");
+        if let Some(path) = origin.strip_prefix("repository:") {
+            let bytes =
+                fs::read(root.join("../..").join(path)).expect("read repository-sourced input");
+            let digest = sha(&bytes);
+            assert_eq!(record["sha256"].as_str(), Some(digest.as_str()), "{origin}");
+            assert_eq!(
+                record["revision"].as_str(),
+                Some(digest.as_str()),
+                "{origin}"
+            );
+            assert_eq!(
+                record["size"].as_integer(),
+                Some(bytes.len() as i64),
+                "{origin}"
+            );
+        }
+    }
     for (name, kind, revision, digest, size) in [
         (
             "nvidia-open-source",
