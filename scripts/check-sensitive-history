@@ -1501,6 +1501,7 @@ def base64_children(
 
     run = []
     run_size = 0
+    run_has_fields = False
     structured_runs = []
     structured_reverse_runs = []
     structured_ordered_run = []
@@ -1508,11 +1509,15 @@ def base64_children(
     structured_field_count = 0
 
     def flush_run() -> bool:
-        nonlocal run, run_size
-        if not inspect_run(run, run_size):
+        nonlocal run, run_size, run_has_fields
+        # Whitespace-delimited prose/assignments are structured fields, not
+        # evidence of an irregular Base64 wrap. Still decode their complete
+        # concatenation and every line suffix, as for the field-column scan.
+        if not inspect_run(run, run_size, reject_ambiguous=not run_has_fields):
             return False
         run = []
         run_size = 0
+        run_has_fields = False
         return True
 
     def flush_structured_run() -> bool:
@@ -1615,6 +1620,7 @@ def base64_children(
         if compact:
             run.append(compact)
             run_size += len(compact)
+            run_has_fields |= b" " in stripped or b"\t" in stripped
             if len(run) > MAX_EMBEDDED_CANDIDATES or run_size > MAX_BASE64_TOKEN:
                 return None
             continue

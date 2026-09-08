@@ -1078,6 +1078,36 @@ fn rejects_unsafe_historical_paths_containing_newlines() {
 }
 
 #[test]
+fn whitespace_delimited_prose_is_inspected_without_encoded_wrap_ambiguity() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import base64
+import runpy
+import sys
+scan = runpy.run_path(sys.argv[1])['sensitive']
+prose = (b'    Ordinary device drivers provide useful support\n'
+         b'    This configuration enables additional devices\n')
+assert not scan(prose, 'Kconfig'), 'prose was mistaken for an irregular encoded wrap'
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+encoded = base64.b64encode(secret)
+for width in (8, 24, 32):
+    fragments = [encoded[i:i+width] for i in range(0, len(encoded), width)]
+    assert scan(prose + b' '.join(fragments) + b'\n', 'Kconfig')
+    assert scan(prose + b'\n'.join(fragments) + b'\n', 'Kconfig')
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn allows_empty_pkcs11_scheme_constants_but_rejects_key_references() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = r#"
