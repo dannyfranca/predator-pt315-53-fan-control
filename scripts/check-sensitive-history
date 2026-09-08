@@ -1605,6 +1605,9 @@ def base64_children(
             and not re.fullmatch(
                 rb"(?:import|tree|parent) [A-Za-z0-9_]+", stripped
             )
+            # Kbuild's host-tool label is not part of the encoded path. The
+            # path still enters the structured-field and path-cadence scans.
+            and not re.fullmatch(rb"(?:HOSTCC|HOSTLD)[ \t]+[A-Za-z0-9+/=]{8,}", stripped)
         )
         if base64_line and len(stripped) > 2 * MAX_BASE64_TOKEN:
             return None
@@ -1707,7 +1710,11 @@ def contains_private_jwk(content: bytes) -> bool:
     except json.JSONDecodeError:
         pass
     decoder = json.JSONDecoder()
-    for index, match in enumerate(re.finditer(r"[\[{]", text)):
+    # Compiler labels such as [M] cannot begin JSON. Do not charge impossible
+    # containers against the bounded decoder budget; retain every legal first
+    # token (including Python's NaN/Infinity extension) and incomplete openers.
+    containers = r'\{(?=\s*(?:"|\}|$))|\[(?=\s*(?:["{\[\]\-0-9tfnNI]|$))'
+    for index, match in enumerate(re.finditer(containers, text)):
         if index >= 4096:
             return True
         try:

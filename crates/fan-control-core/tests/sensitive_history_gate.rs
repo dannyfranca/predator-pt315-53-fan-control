@@ -1127,6 +1127,73 @@ fn rejects_private_jwks_even_after_the_worktree_deletes_them() {
 }
 
 #[test]
+fn compiler_module_labels_do_not_exhaust_json_key_inspection() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import json
+import runpy
+import sys
+m = runpy.run_path(sys.argv[1])
+scan = m['contains_private_jwk']
+log = b'  CC [M] drivers/platform/x86/acer-wmi.o\n' * 5000
+assert not scan(log), 'compiler labels are not possible JSON containers'
+secret = json.dumps(dict(kty='oct', k='synthetic-test-value')).encode()
+for prefix in (b'', b'\xff', log):
+    for wrapper in (secret, b'[ \n' + secret + b']', b'{"nested":' + secret + b'}'):
+        assert scan(prefix + wrapper), 'private key hidden behind compiler labels'
+assert not scan(b'{} ' * 4096)
+assert scan(b'{} ' * 4097), 'JSON candidate budget was relaxed'
+assert scan(log + b'{} ' * 4097)
+for value in (b'[]', b'[true]', b'[false]', b'[null]', b'[-1]', b'[0]', b'["x"]'):
+    assert scan(value + b' ' + b'{} ' * 4096), value
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn inspects_host_tool_status_paths_without_treating_labels_as_base64() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import base64
+import runpy
+import sys
+m = runpy.run_path(sys.argv[1])
+scan = m['sensitive']
+log = (b'  HOSTLD  arch/x86/tools/relocs\n'
+       b'  HOSTCC  arch/x86/tools/vdso2c\n'
+       b'  HOSTCC  scripts/ipe/polgen/polgen\n'
+       b'  HOSTCC  scripts/selinux/mdp/mdp\n')
+assert not scan(log, 'build.log'), 'host-tool status rows are structured fields'
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+encoded = base64.b64encode(secret)
+for width in (8, 24, 32, len(encoded)):
+    for label in (b'HOSTCC', b'HOSTLD'):
+        fragments = [encoded[start:start+width] for start in range(0, len(encoded), width)]
+        disguised = b''.join(b'  ' + label + b'  ' + part + b'\n' for part in fragments)
+        assert scan(log + disguised, 'build.log'), (width, label)
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn rejects_binary_prefixed_jwks_and_exhausted_json_scan_budgets() {
     for (name, mut content) in [
         ("binary.json", vec![0xff]),
