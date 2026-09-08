@@ -941,7 +941,12 @@ def embedded_compressed_children(
             # stream when the following method byte explicitly contradicts
             # that format. Still fail closed on truncated headers and on
             # every malformed stream claiming the supported method.
-            if kind == "gzip" and offset + 2 < len(content) and content[offset + 2] != 8:
+            if kind == "gzip" and (
+                (offset + 2 < len(content) and content[offset + 2] != 8)
+                # RFC 1952 section 2.3.1: reserved flags cannot occur in a
+                # gzip header. Instruction bytes can share its short magic.
+                or (offset + 3 < len(content) and content[offset + 3] & 0xE0)
+            ):
                 offset = content.find(magic, offset + 1)
                 continue
             if kind == "bzip2" and (

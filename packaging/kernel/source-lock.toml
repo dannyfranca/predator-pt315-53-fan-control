@@ -162,9 +162,9 @@ name = "sensitive-output-scanner"
 kind = "sensitive-scanner"
 path = "check-sensitive-history"
 origin = "repository:scripts/check-sensitive-history"
-revision = "f1a328b16a2e9f6e5ae07d54e4f6578faa6c32bea5d71759aada74ee20cd7286"
-sha256 = "f1a328b16a2e9f6e5ae07d54e4f6578faa6c32bea5d71759aada74ee20cd7286"
-size = 103552
+revision = "19913513bcc66661410f7c5f3911d720c3fe536b63ad3096e77392021c8dfe79"
+sha256 = "19913513bcc66661410f7c5f3911d720c3fe536b63ad3096e77392021c8dfe79"
+size = 103815
 
 [[inputs]]
 name = "makepkg-config"

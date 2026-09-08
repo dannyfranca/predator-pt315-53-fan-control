@@ -1124,6 +1124,36 @@ fn rejects_unsafe_historical_paths_containing_newlines() {
 }
 
 #[test]
+fn incidental_gzip_prefix_with_impossible_flags_is_not_an_embedded_stream() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import gzip
+import runpy
+import sys
+scan = runpy.run_path(sys.argv[1])['sensitive']
+prefix = b'\x7fELF\0ordinary code\0'
+for flags in (32,64,128,139,255):
+    incidental = bytes([31,139,8,flags,64,4,72,137,242,72,193,226])
+    assert not scan(prefix + incidental, 'host-tool'), flags
+    assert scan(incidental, 'claimed.gz'), 'claimed outer compression must still fail'
+for truncated in (bytes([31,139]), bytes([31,139,8]), bytes([31,139,8,0])):
+    assert scan(prefix + truncated, 'host-tool')
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+assert scan(prefix + gzip.compress(secret), 'host-tool')
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn whitespace_delimited_prose_is_inspected_without_encoded_wrap_ambiguity() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = r#"
