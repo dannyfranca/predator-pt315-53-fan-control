@@ -1067,10 +1067,62 @@ fn locked_make_flags_suppress_command_echoes_but_retain_errors() {
 
 #[cfg(unix)]
 #[test]
+fn kernel_boot_payload_retains_only_required_trust_symbols() {
+    let fixture = Fixture::new();
+    let root = fixture.root.join("trust-symbols");
+    fs::create_dir_all(root.join("arch/x86/boot/compressed")).unwrap();
+    fs::write(
+        root.join("arch/x86/boot/compressed/Makefile"),
+        "OBJCOPYFLAGS_vmlinux.bin :=  -R .comment -S\n",
+    )
+    .unwrap();
+    fs::write(root.join("symbols.c"), "const char system_certificate_list[] = {1,2,3};\nconst unsigned long system_certificate_list_size = 3;\nconst unsigned long module_cert_size = 3;\nconst int unrelated_symbol = 0;\n").unwrap();
+    let wrapper =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/build-candidate");
+    let output = Command::new("bash")
+        .args([
+            "-c",
+            r#"
+set -euo pipefail
+source <(sed -n '/^signing_recipe=(/,/^)/p' "$1")
+prepare() { :; }
+pkgbase=linux-cachyos-pt31553
+package_linux-cachyos-pt31553-headers() { :; }
+eval "$(printf '%s\n' "${signing_recipe[@]}")"
+_source_lock_keep_trust_symbols
+cc -c symbols.c -o symbols.o
+flags=$(sed -n 's/^OBJCOPYFLAGS_vmlinux.bin :=  //p' arch/x86/boot/compressed/Makefile)
+read -ra args <<< "$flags"
+objcopy "${args[@]}" symbols.o retained.o
+nm --defined-only retained.o > retained-symbols
+[[ $(wc -l < retained-symbols) == 3 ]]
+for symbol in system_certificate_list system_certificate_list_size module_cert_size; do
+    grep -Eq " [Rr] $symbol$" retained-symbols
+done
+! grep -q unrelated_symbol retained-symbols
+if (set -e; _source_lock_keep_trust_symbols); then exit 1; fi
+"#,
+            "trust-symbol-test",
+        ])
+        .arg(wrapper)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", failure_text(&output));
+}
+
+#[cfg(unix)]
+#[test]
 fn external_module_signer_never_enters_kernel_key_generation() {
     let fixture = Fixture::new();
     let root = fixture.root.join("module-key-build");
     fs::create_dir_all(root.join("signing")).unwrap();
+    fs::create_dir_all(root.join("arch/x86/boot/compressed")).unwrap();
+    fs::write(
+        root.join("arch/x86/boot/compressed/Makefile"),
+        "OBJCOPYFLAGS_vmlinux.bin :=  -R .comment -S\n",
+    )
+    .unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(
         root.join(".config"),
@@ -1119,6 +1171,7 @@ openssl x509 -in "$key_path" -pubkey -noout >certs/certificate-public.pem
 cmp certs/key-public.pem certs/certificate-public.pem
 [[ ! -e certs/signing_key.pem ]]
 for stale in version actual-release; do
+    printf '%s\n' 'OBJCOPYFLAGS_vmlinux.bin :=  -R .comment -S' > arch/x86/boot/compressed/Makefile
     printf '%s\n' "$_kernuname" > version
     printf '%s\n' "$_kernuname" > actual-release
     printf '%s\n' '7.1.8-1-cachyos-pt31553' > "$stale"
@@ -1286,6 +1339,12 @@ fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
     fs::create_dir_all(&archive_root).expect("create packaging tree");
     fs::create_dir_all(kernel_root.join("drivers/platform/x86"))
         .expect("create kernel source tree");
+    fs::create_dir_all(kernel_root.join("arch/x86/boot/compressed")).unwrap();
+    fs::write(
+        kernel_root.join("arch/x86/boot/compressed/Makefile"),
+        "OBJCOPYFLAGS_vmlinux.bin :=  -R .comment -S\n",
+    )
+    .unwrap();
     fs::write(
         kernel_root.join("drivers/platform/x86/acer-wmi.c"),
         pinned_acer_wmi_contexts(),

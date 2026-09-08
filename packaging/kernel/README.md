@@ -143,6 +143,12 @@ headers package, including its embedded copy in `build/vmlinux`. Both locations
 permit only the supplied public module-signing certificate, never a private key
 or an additional trust certificate. The provenance verifier requires the explicit
 external-key setting.
+The boot payload's strip step retains only the three ELF symbols required to
+authenticate `System.map`: `system_certificate_list`,
+`system_certificate_list_size`, and `module_cert_size`. All other symbols and
+debug metadata remain stripped. Retention changes non-loadable metadata, not
+the kernel's executable or fan-control behavior; the signed image must still
+bind the exact certificate to its actual built-in trust store.
 The `cfg80211.ko` wireless module additionally retains the two public regulatory
 database authorities from the locked kernel's `net/wireless/certs/` source:
 `sforshee` (SHA-256 `cad3ddc5f274b8213c9956e2611a415252fd3619ca6700dc8ed396ed23acf6b0`)

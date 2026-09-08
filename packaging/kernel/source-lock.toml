@@ -153,9 +153,9 @@ name = "build-wrapper"
 kind = "build-wrapper"
 path = "build-candidate"
 origin = "repository:packaging/kernel/build-candidate"
-revision = "16c787bb1df8a685134a68e145bee0a104f1c8a102beb6e41faca7f4f1d0c3b6"
-sha256 = "16c787bb1df8a685134a68e145bee0a104f1c8a102beb6e41faca7f4f1d0c3b6"
-size = 32822
+revision = "5f55f38d7fd9eeeca38e437d1a72d649ac3fdaf20d6e2acb55b1853fe8fa1d44"
+sha256 = "5f55f38d7fd9eeeca38e437d1a72d649ac3fdaf20d6e2acb55b1853fe8fa1d44"
+size = 33329
 
 [[inputs]]
 name = "sensitive-output-scanner"
