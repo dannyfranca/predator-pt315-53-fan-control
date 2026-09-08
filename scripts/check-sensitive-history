@@ -449,11 +449,19 @@ def openpgp_public_material_end(
                 return None
         return cursor if declared_end is None or cursor == declared_end else None
     if algorithm in (18, 19, 22):
-        if cursor >= end or content[cursor] == 0 or cursor + 1 + content[cursor] > end:
+        if cursor >= end or content[cursor] in (0, 255) or cursor + 1 + content[cursor] > end:
             return None
         cursor += 1 + content[cursor]
+        point_start = cursor + 2
         cursor = openpgp_mpi_end(content, cursor, end)
         if cursor is None:
+            return None
+        # RFC 9580 sections 9.2.1/11.2: EC points use SEC1 or the 0x40
+        # prefixed-native form. Random instruction MPIs are not curve points.
+        prefixes = (0x40,) if algorithm == 22 else (
+            (2, 3, 4, 6, 7, 0x40) if algorithm == 18 else (2, 3, 4, 6, 7)
+        )
+        if point_start >= cursor or content[point_start] not in prefixes:
             return None
         if algorithm == 18:
             if cursor >= end or content[cursor] < 3 or cursor + 1 + content[cursor] > end:

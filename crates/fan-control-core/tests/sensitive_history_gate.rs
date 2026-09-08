@@ -175,6 +175,17 @@ for cipher in (1,2,3,4,7,8,9,10,11,12,13,100,110,253,254,255):
 assert not scan(bytes([151]) + public + bytes([80]) + bytes(16)), 'unassigned cipher in unframed instruction bytes'
 unknown = public + bytes([80]) + bytes(16)
 assert scan(bytes([197, len(unknown)]) + unknown), 'bounded unknown secret envelope must still fail closed'
+for algorithm in (18,19,22):
+    oid = bytes.fromhex('2b06010401da470f01')
+    prefixes = (64,) if algorithm == 22 else ((2,3,4,6,7,64) if algorithm == 18 else (2,3,4,6,7))
+    for prefix in (*prefixes, 255):
+        point = mpi(int.from_bytes(bytes([prefix]) + bytes(32), 'big'))
+        body = bytes([4,0,0,0,0,algorithm,len(oid)]) + oid + point
+        if algorithm == 18:
+            body += bytes([3,1,8,9])
+        body += bytes([0]) + mpi(11) + bytes(2)
+        envelope = bytes([197,len(body)]) + body
+        assert scan(envelope) == (prefix != 255), (algorithm,prefix)
 "#;
     let output = Command::new("python3")
         .args(["-I", "-c", source])
