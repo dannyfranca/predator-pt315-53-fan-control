@@ -1043,7 +1043,7 @@ fn external_module_signer_never_enters_kernel_key_generation() {
     .unwrap();
     fs::write(
         root.join("Makefile"),
-        "include auto.conf\n.PHONY: syncconfig FORCE\nsyncconfig:\n\tsed 's/\"//g' .config > auto.conf\nifeq ($(CONFIG_MODULE_SIG_KEY),certs/signing_key.pem)\ncerts/signing_key.pem: FORCE\n\t@echo 'unexpected kernel key generation' >&2; exit 1\nendif\ncerts/signing_key.x509: $(CONFIG_MODULE_SIG_KEY) FORCE\n\topenssl x509 -in $(CONFIG_MODULE_SIG_KEY) -outform DER -out $@\nFORCE:\n",
+        "include auto.conf\n.PHONY: syncconfig kernelrelease FORCE\nkernelrelease:\n\t@cat actual-release\nsyncconfig:\n\tsed 's/\"//g' .config > auto.conf\nifeq ($(CONFIG_MODULE_SIG_KEY),certs/signing_key.pem)\ncerts/signing_key.pem: FORCE\n\t@echo 'unexpected kernel key generation' >&2; exit 1\nendif\ncerts/signing_key.x509: $(CONFIG_MODULE_SIG_KEY) FORCE\n\topenssl x509 -in $(CONFIG_MODULE_SIG_KEY) -outform DER -out $@\nFORCE:\n",
     )
     .unwrap();
     let wrapper =
@@ -1060,6 +1060,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=module-key-test \
 openssl x509 -in signing/certificate.pem -outform DER -out signing/module-signing-certificate.der
 source <(sed -n '/^signing_recipe=(/,/^)/p' "$1")
 pkgbase=linux-cachyos-pt31553
+_kernuname=7.1.8-cachyos-pt31553
+printf '%s\n' "$_kernuname" > version
+printf '%s\n' "$_kernuname" > actual-release
 BUILD_FLAGS=()
 prepare() { :; }
 package_linux-cachyos-pt31553-headers() { :; }
@@ -1073,6 +1076,18 @@ openssl pkey -in "$key_path" -pubout -out certs/key-public.pem
 openssl x509 -in "$key_path" -pubkey -noout >certs/certificate-public.pem
 cmp certs/key-public.pem certs/certificate-public.pem
 [[ ! -e certs/signing_key.pem ]]
+for stale in version actual-release; do
+    printf '%s\n' "$_kernuname" > version
+    printf '%s\n' "$_kernuname" > actual-release
+    printf '%s\n' '7.1.8-1-cachyos-pt31553' > "$stale"
+    printf '%s\n' 'CONFIG_MODULE_SIG_KEY="certs/signing_key.pem"' > .config
+    set +e
+    (set -e; prepare) 2> release-error
+    status=$?
+    set -e
+    [[ $status == 2 ]]
+    grep -Fqx 'prepared kernel release differs from the required ABI' release-error
+done
 "#,
             "module-key-test",
         ])
@@ -1178,7 +1193,7 @@ fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
     .unwrap();
     fs::write(
         kernel_root.join("Makefile"),
-        ".PHONY: syncconfig\nsyncconfig:\n\tmkdir -p include/config\n\tsed 's/\"//g' .config > include/config/auto.conf\n",
+        ".PHONY: syncconfig kernelrelease\nsyncconfig:\n\tmkdir -p include/config\n\tsed 's/\"//g' .config > include/config/auto.conf\nkernelrelease:\n\t@printf '7.1.8%s%s\\n' \"$$(cat localversion.10-pkgrel)\" \"$$(cat localversion.20-pkgname)\"\n",
     )
     .unwrap();
     fs::write(
@@ -1204,6 +1219,9 @@ pkgname=("$pkgbase" "$pkgbase-headers")
 [[ "${_build_nvidia_open:-no}" == yes ]] && pkgname+=("$pkgbase-nvidia-open")
 prepare() {
     cd "$TEST_KERNEL_ROOT"
+    echo "-$pkgrel" > localversion.10-pkgrel
+    echo "${pkgbase#linux}" > localversion.20-pkgname
+    make -s kernelrelease > version
     local patch src
     for patch in "${source[@]}"; do
         src="${patch##*/}"
@@ -1464,6 +1482,11 @@ if [[ "${TEST_PACKAGE_MUTATION:-}" == probe-kernel-key ]]; then
 fi
 if [[ -z "${TEST_PACKAGE_MUTATION:-}" ]]; then
     prepare
+    [[ "$(<version)" == "$_kernuname" ]] || {
+        printf 'actual kernel release %s differs from required %s\n' "$(<version)" "$_kernuname" >&2
+        exit 43
+    }
+    [[ "$(make -s kernelrelease)" == "$_kernuname" ]]
     openssl x509 -in certs/pt31553-signing-key.pem -outform DER -out certs/signing_key.x509
 fi
 create_package() {

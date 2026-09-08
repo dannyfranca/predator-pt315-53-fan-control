@@ -311,6 +311,10 @@ sed -i 's/^pkgbase="linux-$_pkgsuffix"$/pkgbase="linux-cachyos-pt31553"/' \
 [[ "$(grep -Fxc '_kernuname="${pkgver}-${_pkgsuffix}"' "$package_root/PKGBUILD")" == 1 ]]
 sed -i 's/^_kernuname="${pkgver}-${_pkgsuffix}"$/_kernuname="${pkgver}-cachyos-pt31553"/' \
     "$package_root/PKGBUILD"
+# Package revision belongs in the archive version, not this policy-bound ABI.
+[[ "$(grep -Fxc '    echo "-$pkgrel" > localversion.10-pkgrel' "$package_root/PKGBUILD")" == 1 ]]
+sed -i 's/^    echo "-$pkgrel" > localversion\.10-pkgrel$/    : > localversion.10-pkgrel/' \
+    "$package_root/PKGBUILD"
 [[ "$(grep -Fc 'cachyos/kernel-patches/master/' "$package_root/PKGBUILD")" -ge 1 ]] || {
     echo "pinned packaging recipe is missing its expected patch-source URL" >&2
     exit 2
@@ -329,6 +333,9 @@ signing_recipe=(
     '    openssl x509 -inform DER -in "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der" >>"certs/pt31553-signing-key.pem"'
     '    chmod 0400 "certs/pt31553-signing-key.pem"'
     '    make "${BUILD_FLAGS[@]}" syncconfig'
+    '    [[ "$(<version)" == "$_kernuname" && "$(make -s "${BUILD_FLAGS[@]}" kernelrelease)" == "$_kernuname" ]] || {'
+    '        echo "prepared kernel release differs from the required ABI" >&2; return 2;'
+    '    }'
     '}'
     'eval "$(declare -f "package_$pkgbase-headers" | sed "1s/^package_${pkgbase}-headers /_source_lock_package_headers /")"'
     'eval "package_$pkgbase-headers() { _source_lock_package_headers; install -Dm0444 \"\$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der\" \"\$pkgdir/usr/lib/modules/\$(<version)/build/certs/signing_key.x509\"; }"'

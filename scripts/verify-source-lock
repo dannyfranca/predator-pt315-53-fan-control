@@ -74,7 +74,7 @@ STAGE1_PATCH_SHA256 = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9ca
 STAGE2_PATCH_SHA256 = "67b0d9fcd62451ae717e452d63f6419c02d8f4a34a82a060229cde5b3a96009d"
 STAGE1_BUILD_WRAPPER_SHA256 = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
 STAGE2_BUILD_WRAPPER_SHA256 = "5b47af002478f06de04575ba56e233959d83d855758ce13ad0a0c919675f42f7"
-PACKAGE_BUILD_WRAPPER_SHA256 = "ed58104074562a43f030e63d8187974b20e514e1e7646f68bda7727aaa3033fd"
+PACKAGE_BUILD_WRAPPER_SHA256 = "02b4557c36e7f8a2bc7389f7ee2349ced17881371bd1efcf54e116fbad7b771d"
 PACKAGE_SENSITIVE_SCANNER_SHA256 = "945aabcc1bac1273f8ff33b65b2b431cee0ffaa14d7f258f0fb9df383d90b7be"
 PACKAGE_SENSITIVE_SCANNER_SIZE = 100810
 PACKAGE_BUILD_DEPENDENCIES_SHA256 = "8eeea0c4de0ff046f32edba1572a47b9cd61ff7c9fd20cf7799ff1bd07cbd384"
@@ -1078,6 +1078,8 @@ def verify_patch_wrapper(wrapper: str, candidate: str) -> None:
                 {
                     'pkgbase="linux-cachyos-pt31553"': "does not assign the unique package base",
                     '_kernuname="${pkgver}-cachyos-pt31553"': "does not assign the unique kernel release suffix",
+                    ': > localversion.10-pkgrel': "does not remove the upstream package revision from the kernel ABI",
+                    '[[ "$(<version)" == "$_kernuname" && "$(make -s "${BUILD_FLAGS[@]}" kernelrelease)" == "$_kernuname" ]]': "does not reject a prepared kernel release outside the required ABI",
                     "CachyOS/kernel-patches/fcdc4806b62f86b62a61b92c4b7213a1759537e5/": "does not pin NVIDIA patch recipe URLs",
                     "! grep -Fq 'cachyos/kernel-patches/master/'": "does not reject floating NVIDIA patch recipe URLs",
                     'ln -s "/bundle/$nvidia_source" "$package_root/source-cache/$nvidia_source"': "does not stage the locked NVIDIA source",
