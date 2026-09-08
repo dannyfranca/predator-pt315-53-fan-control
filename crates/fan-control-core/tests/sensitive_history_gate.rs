@@ -155,18 +155,43 @@ import sys
 m = runpy.run_path(sys.argv[1])
 artifact = m['inspection_budget']()
 history = m['inspection_budget'](historical=True)
-assert artifact['base64_candidates'] == 65536
+assert artifact['base64_candidates'] == 262144
 assert history['base64_candidates'] == 1048576
 for name in artifact:
     if name != 'base64_candidates':
         assert artifact[name] == history[name], name
 assert not m['spend_budget'](history, 'base64_candidates', 1048577)
+assert not m['spend_budget'](artifact, 'base64_candidates', 262145)
 "#;
     let output = Command::new("python3")
         .args(["-I", "-c", source])
         .arg(workspace.join("scripts/check-sensitive-history"))
         .output()
         .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn output_tree_accepts_a_complete_public_dependency_manifest() {
+    let root = repository();
+    let artifacts = root.join("artifacts");
+    fs::create_dir(&artifacts).unwrap();
+    let mut manifest = String::new();
+    for index in 0..1024_u32 {
+        let digest = sha2::Sha256::digest(index.to_le_bytes());
+        writeln!(
+            manifest,
+            "[[inputs]]\nname = \"dependency-{index:04}\"\norigin = \"https://archive.archlinux.org/packages/p/package-{index}/package-{index}-1.0-1-x86_64.pkg.tar.zst\"\nrevision = \"1.0-1\"\nsha256 = \"{digest:x}\"\nsize = 1234\n"
+        )
+        .unwrap();
+    }
+    fs::write(artifacts.join("source-lock.toml"), manifest).unwrap();
+    let output = tree_gate(&artifacts, &[]);
+    fs::remove_dir_all(root).unwrap();
     assert!(
         output.status.success(),
         "{}",

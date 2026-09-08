@@ -84,7 +84,10 @@ MODULE_SIGNATURE_MAGIC = b"~Module signature appended~\n"
 MAX_BLOB = 512 * 1024 * 1024
 MAX_EMBEDDED_WORK = 8 * MAX_BLOB
 MAX_EMBEDDED_CANDIDATES = 4096
-MAX_BASE64_CANDIDATES = 65_536
+# Complete dependency locks can exceed 65,536 candidate probes by themselves.
+# Preserve a bounded artifact-wide allowance without skipping any token or
+# changing the cryptographic, expanded-byte, subprocess, or work limits.
+MAX_BASE64_CANDIDATES = 262_144
 # Historical review transcripts contain many more distinct encoded-looking
 # source references than a package evidence tree. Keep their allowance bounded
 # separately; all other byte/work/probe limits and the history deadline apply.
