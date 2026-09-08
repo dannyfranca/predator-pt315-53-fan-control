@@ -117,8 +117,11 @@ cryptographic-probe limits; every charge also consumes a package-wide budget
 (64 GiB work, 8 GiB cumulative expansion, 262,144 candidates/probes, 4,194,304
 Base64 candidates, and 65,537 Zstandard processes). Package evidence trees
 allow at most 16 package archives within their existing physical file/byte
-limits. Nested archives never receive a fresh package allowance. The separate
-provenance verifier uses the same aggregate/local budgets and permits at most
+limits. Nested archives never receive a fresh package allowance.
+Direct members receive their full four-layer content nesting limit; the outer
+package compression and TAR inventory do not consume it. Nested packages
+cannot reset that limit or acquire another direct-inventory allowance.
+The separate provenance verifier uses the same aggregate/local budgets and permits at most
 65,536 direct compressed members, while retaining exact envelope validation.
 Generated symbol/configuration columns allow at most 1,048,576 structured
 fields or independently padded fragments, within the existing 16 MiB token,

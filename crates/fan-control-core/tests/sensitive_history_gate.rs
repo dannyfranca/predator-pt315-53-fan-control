@@ -1359,6 +1359,14 @@ assert not m['sensitive'](package, 'kernel/headers.pkg.tar.zst'), 'direct invent
 modules = archive((f'usr/lib/modules/test/m{i}.ko.zst', zstd(b'ordinary payload')) for i in range(70))
 assert not m['sensitive'](zstd(modules), 'kernel/modules.pkg.tar.zst'), 'direct compression count'
 assert m['sensitive'](zstd(archive([('nested.tar', inventory)])), 'bad.pkg.tar.zst'), 'nested limit reset'
+assert m['sensitive'](zstd(archive([('nested.pkg.tar.zst', zstd(inventory))])), 'bad.pkg.tar.zst'), 'nested package regained inventory allowance'
+import gzip
+layered = b'\0\0'
+for _ in range(3): layered = gzip.compress(layered)
+assert not m['sensitive'](layered, 'payload.bin')
+assert not m['sensitive'](zstd(archive([('payload.bin', layered)])), 'depth.pkg.tar.zst'), 'package envelope consumed member nesting depth'
+for _ in range(2): layered = gzip.compress(layered)
+assert m['sensitive'](zstd(archive([('payload.bin', layered)])), 'depth.pkg.tar.zst'), 'member nesting became unbounded'
 secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
 assert m['sensitive'](zstd(archive([('ordinary.h', secret)])), 'bad.pkg.tar.zst')
 aggregate = m['package_inspection_budget']()

@@ -2415,6 +2415,7 @@ def sensitive(
 ) -> bool:
     package_compression = (
         depth == 0
+        and (budget is None or "package_members" in budget)
         and re.fullmatch(r"[^/]+\.pkg\.tar\.zst", pathlib.PurePosixPath(path).name) is not None
     )
     if budget is None:
@@ -2587,7 +2588,7 @@ def sensitive(
         if sensitive(
             child_content,
             child_path,
-            depth + 1,
+            0 if direct_package_inventory else depth + 1,
             child_budget,
             allowed_public_certificates,
             child_certificate_location_eligible,
