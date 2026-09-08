@@ -151,6 +151,12 @@ Only these exact DER certificates inside that ELF module are permitted. They
 cannot authorize module or kernel-image signatures, appear at other artifact
 paths, or replace the three external signing identities. Signed regulatory
 database enforcement and the locked wireless configuration remain unchanged.
+The `kheaders.ko` module's embedded XZ header inventory is inspected in memory.
+Its bounded TAR may contain relative aliases only to regular files in that same
+inventory; no link is followed or extracted. Every header and TAR metadata block
+is scanned, with local limits and the enclosing package's aggregate budget.
+Absolute, escaping, cyclic, dangling, and directory aliases remain forbidden;
+ordinary and recursively nested archives do not receive this allowance.
 The verifier places the exact parsed source-lock bytes into its private
 snapshot for retention; do not add `source-lock.toml` to the input bundle.
 

@@ -1509,6 +1509,91 @@ assert scan(encoded[:16] + b'=' + encoded[16:], 'fragmented.txt')
 }
 
 #[test]
+fn embedded_kernel_headers_resolve_only_internal_regular_file_aliases() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import io, lzma, runpy, sys, tarfile
+m = runpy.run_path(sys.argv[1])
+scan = m['sensitive']
+module = 'usr/lib/modules/test/kernel/kernel/kheaders.ko'
+def archive(target='../a.h', payload=b'ordinary public header\n', count=1):
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode='w', format=tarfile.USTAR_FORMAT) as tar:
+        for name in ('.', './include', './include/sub'):
+            entry = tarfile.TarInfo(name); entry.type = tarfile.DIRTYPE; tar.addfile(entry)
+        for i in range(count):
+            entry = tarfile.TarInfo('./include/a.h' if i == 0 else './include/h%d.h' % i)
+            entry.size = len(payload); tar.addfile(entry, io.BytesIO(payload))
+        entry = tarfile.TarInfo('./include/sub/alias.h')
+        entry.type = tarfile.SYMTYPE; entry.linkname = target; tar.addfile(entry)
+    return stream.getvalue()
+def image(data): return b'\x7fELF\0' + lzma.compress(data)
+assert not scan(image(archive(count=4100)), module)
+for target in ('/etc/shadow', '../../../escape.h', 'missing.h', 'alias.h', '../sub'):
+    assert scan(image(archive(target)), module), target
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+assert scan(image(archive(payload=secret)), module)
+assert scan(image(archive()) + secret, module)
+assert scan(image(archive()), 'ordinary.bin'), 'generic TAR restrictions changed'
+assert scan(image(archive())[:-1], module), 'truncated archive accepted'
+aggregate = m['package_inspection_budget']()
+aggregate['package_members'] = 1
+assert scan(image(archive()), module, budget=m['package_member_budget'](aggregate)), 'inventory reset the parent member budget'
+aggregate = m['package_inspection_budget']()
+aggregate['work'] = 1
+assert scan(image(archive()), module, budget=m['package_member_budget'](aggregate)), 'inventory reset the parent work budget'
+assert scan(image(archive(payload=image(archive()))), module), 'nested header regained inventory allowance'
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn embedded_streams_are_inspected_in_byte_order_not_magic_order() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import gzip, runpy, subprocess, sys
+m = runpy.run_path(sys.argv[1])
+children = m['embedded_compressed_children']
+budget = m['inspection_budget']
+prefix = b'public image prefix\0'
+incidental = bytes.fromhex('1f8b0802038c3cc972dcb892')
+# Isolate the framing boundary: the decoder has already authenticated and
+# consumed this complete frame; compressed bytes are not another stream.
+frame = bytes.fromhex('28b52ffd20') + bytes((len(incidental),))
+frame += ((len(incidental) << 3) | 1).to_bytes(3, 'little') + incidental
+original = children.__globals__['zstd_decompress']
+children.__globals__['zstd_decompress'] = lambda data: b'ordinary decoded bytes'
+assert children(prefix + frame, 'image', budget()) == [
+    (f'image#embedded-zstd-{len(prefix)}', b'ordinary decoded bytes')]
+assert children(prefix + frame + incidental, 'image', budget()) is None
+children.__globals__['zstd_decompress'] = original
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+compressed = subprocess.check_output(['zstd', '-q', '-c'], input=gzip.compress(secret))
+assert m['sensitive'](prefix + compressed, 'image')
+assert m['sensitive'](prefix + compressed[:-2], 'image')
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn incidental_gzip_stored_block_must_have_complementary_lengths() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = r#"
@@ -1608,6 +1693,9 @@ prefix = b'\x7fELF\0ordinary code\0'
 incidental = bytes.fromhex('28b52ffd740e83e1f031c081')
 assert not scan(prefix + incidental, 'host-tool')
 assert scan(incidental, 'claimed.zst')
+small_window = bytes.fromhex('28b52ffd742ac744240c502a')
+assert not scan(prefix + small_window, 'host-tool')
+assert scan(small_window, 'claimed.zst')
 public = bytearray(subprocess.check_output(['zstd', '-q', '-c'], input=b'ordinary public data\n'))
 public[4] |= 0x10  # RFC 8878 requires decoders to ignore this unused bit.
 assert subprocess.check_output(['zstd', '-q', '-d', '-c'], input=public) == b'ordinary public data\n'

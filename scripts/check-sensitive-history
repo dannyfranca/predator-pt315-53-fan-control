@@ -14,6 +14,7 @@ import json
 import lzma
 import os
 import pathlib
+import posixpath
 import re
 import selectors
 import subprocess
@@ -692,6 +693,21 @@ def zstd_container(content: bytes) -> bool:
     return 0x184D2A50 <= magic <= 0x184D2A5F
 
 
+def zstd_block_maximum(content: bytes, offset: int, header_size: int) -> int:
+    descriptor = content[offset + 4]
+    if descriptor & 0x20:
+        size_bytes = (1, 2, 4, 8)[descriptor >> 6]
+        end = offset + header_size
+        window = int.from_bytes(content[end - size_bytes:end], "little")
+        if size_bytes == 2:
+            window += 256
+    else:
+        window_descriptor = content[offset + 5]
+        base = 1 << (10 + (window_descriptor >> 3))
+        window = base + (base >> 3) * (window_descriptor & 7)
+    return min(window, 128 * 1024)
+
+
 def impossible_zstd_first_block(content: bytes, offset: int) -> bool:
     """Reject incidental magic with a complete but impossible first block header."""
     if offset + 5 > len(content):
@@ -709,7 +725,10 @@ def impossible_zstd_first_block(content: bytes, offset: int) -> bool:
     block_header = int.from_bytes(content[block_at : block_at + 3], "little")
     # RFC 8878 sections 3.1.1.2 and 3.1.1.2.3: reserved block type and
     # a block larger than 128 KiB cannot occur in any supported frame.
-    return (block_header >> 1) & 3 == 3 or block_header >> 3 > 128 * 1024
+    return (
+        (block_header >> 1) & 3 == 3
+        or block_header >> 3 > zstd_block_maximum(content, offset, header_size)
+    )
 
 
 def zstd_frame_end(content: bytes, offset: int, block_budget: list[int]) -> int | None:
@@ -729,6 +748,7 @@ def zstd_frame_end(content: bytes, offset: int, block_budget: list[int]) -> int 
     header_size = 5 + (0 if single_segment else 1) + dictionary_size + content_size_size
     if offset + header_size > len(content):
         return None
+    block_maximum = zstd_block_maximum(content, offset, header_size)
     offset += header_size
     while True:
         block_budget[0] += 1
@@ -741,7 +761,7 @@ def zstd_frame_end(content: bytes, offset: int, block_budget: list[int]) -> int 
         last_block = bool(block_header & 1)
         block_type = (block_header >> 1) & 0x03
         block_size = block_header >> 3
-        if block_type == 3 or block_size > 128 * 1024:
+        if block_type == 3 or block_size > block_maximum:
             return None
         stored_size = 1 if block_type == 1 else block_size
         if offset + stored_size > len(content):
@@ -801,7 +821,7 @@ def tar_container(content: bytes) -> bool:
     return expected in (unsigned, signed)
 
 
-def complete_tar_envelope(content: bytes) -> bool:
+def complete_tar_envelope(content: bytes, *, internal_header_links: bool = False) -> bool:
     offset = 0
     zero_blocks = 0
     while offset + 512 <= len(content):
@@ -819,9 +839,12 @@ def complete_tar_envelope(content: bytes) -> bool:
             entry = tarfile.TarInfo.frombuf(header, "utf-8", "surrogateescape")
         except (tarfile.TarError, UnicodeError, ValueError):
             return False
-        if entry.type not in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE):
+        allowed_types = (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE)
+        if internal_header_links:
+            allowed_types += (tarfile.SYMTYPE,)
+        if entry.type not in allowed_types:
             return False
-        if entry.size > MAX_BLOB or (entry.isdir() and entry.size != 0):
+        if entry.size > MAX_BLOB or ((entry.isdir() or entry.issym()) and entry.size != 0):
             return False
         data_end = offset + entry.size
         padded_end = data_end + (-entry.size % 512)
@@ -1008,6 +1031,56 @@ def spend_budget(budget: dict[str, object], field: str, amount: int) -> bool:
     return remaining >= 0 and parent_available
 
 
+def plausible_compression_header(content: bytes, offset: int, kind: str) -> bool:
+    # RFC 1952 defines only compression method 8 (DEFLATE). Two
+    # incidental magic bytes in decoded source text are not a gzip
+    # stream when the following method byte explicitly contradicts
+    # that format. Still fail closed on truncated headers and on
+    # every malformed stream claiming the supported method.
+    if kind == "gzip" and (
+        (offset + 2 < len(content) and content[offset + 2] != 8)
+        # RFC 1952 section 2.3.1: reserved flags cannot occur in a
+        # gzip header. Instruction bytes can share its short magic.
+        or (offset + 3 < len(content) and content[offset + 3] & 0xE0)
+        # For the fixed header, an uncompressed first DEFLATE block
+        # must encode LEN and its one's complement (RFC 1951 3.2.4).
+        # Relocation integers can share the entire gzip magic/header;
+        # impossible block framing still cannot carry a gzip stream.
+        or (
+            offset + 15 <= len(content)
+            and content[offset + 3] & 0x1E == 0
+            and content[offset + 10] & 0x06 == 0
+            and int.from_bytes(content[offset + 11:offset + 13], "little")
+            ^ int.from_bytes(content[offset + 13:offset + 15], "little")
+            != 0xFFFF
+        )
+    ):
+        return False
+    # XZ 2.1.1.2 requires a zero version byte and zero reserved flag
+    # bits. Compiled format-identification constants are not streams.
+    # Truncated headers and supported headers still fail closed below.
+    if kind == "xz" and (
+        (offset + 6 < len(content) and content[offset + 6] != 0)
+        or (offset + 7 < len(content) and content[offset + 7] & 0xF0)
+    ):
+        return False
+    # RFC 8878 reserves descriptor bit 3; it cannot identify a
+    # supported frame. Do not confuse a compiled magic comparison
+    # with compressed data, but retain rejection of claimed streams.
+    if kind == "zstd" and offset + 4 < len(content) and content[offset + 4] & 0x08:
+        return False
+    if kind == "zstd" and impossible_zstd_first_block(content, offset):
+        return False
+    if kind == "bzip2" and (
+        offset + 10 > len(content)
+        or content[offset + 3] not in b"123456789"
+        or content[offset + 4 : offset + 10]
+        not in (b"1AY&SY", b"\x17rE8P\x90")
+    ):
+        return False
+    return True
+
+
 def embedded_compressed_children(
     content: bytes, path: str, budget: dict[str, object]
 ) -> list[tuple[str, bytes]] | None:
@@ -1020,93 +1093,52 @@ def embedded_compressed_children(
     children = []
     if not spend_budget(budget, "work", len(content) * len(magics)):
         return None
-    for kind, magic in magics:
-        offset = content.find(magic, 1)
-        while offset >= 0:
-            # RFC 1952 defines only compression method 8 (DEFLATE). Two
-            # incidental magic bytes in decoded source text are not a gzip
-            # stream when the following method byte explicitly contradicts
-            # that format. Still fail closed on truncated headers and on
-            # every malformed stream claiming the supported method.
-            if kind == "gzip" and (
-                (offset + 2 < len(content) and content[offset + 2] != 8)
-                # RFC 1952 section 2.3.1: reserved flags cannot occur in a
-                # gzip header. Instruction bytes can share its short magic.
-                or (offset + 3 < len(content) and content[offset + 3] & 0xE0)
-                # For the fixed header, an uncompressed first DEFLATE block
-                # must encode LEN and its one's complement (RFC 1951 3.2.4).
-                # Relocation integers can share the entire gzip magic/header;
-                # impossible block framing still cannot carry a gzip stream.
-                or (
-                    offset + 15 <= len(content)
-                    and content[offset + 3] & 0x1E == 0
-                    and content[offset + 10] & 0x06 == 0
-                    and int.from_bytes(content[offset + 11:offset + 13], "little")
-                    ^ int.from_bytes(content[offset + 13:offset + 15], "little")
-                    != 0xFFFF
-                )
-            ):
-                offset = content.find(magic, offset + 1)
-                continue
-            # XZ 2.1.1.2 requires a zero version byte and zero reserved flag
-            # bits. Compiled format-identification constants are not streams.
-            # Truncated headers and supported headers still fail closed below.
-            if kind == "xz" and (
-                (offset + 6 < len(content) and content[offset + 6] != 0)
-                or (offset + 7 < len(content) and content[offset + 7] & 0xF0)
-            ):
-                offset = content.find(magic, offset + 1)
-                continue
-            # RFC 8878 reserves descriptor bit 3; it cannot identify a
-            # supported frame. Do not confuse a compiled magic comparison
-            # with compressed data, but retain rejection of claimed streams.
-            if kind == "zstd" and offset + 4 < len(content) and content[offset + 4] & 0x08:
-                offset = content.find(magic, offset + 1)
-                continue
-            if kind == "zstd" and impossible_zstd_first_block(content, offset):
-                offset = content.find(magic, offset + 1)
-                continue
-            if kind == "bzip2" and (
-                offset + 10 > len(content)
-                or content[offset + 3] not in b"123456789"
-                or content[offset + 4 : offset + 10]
-                not in (b"1AY&SY", b"\x17rE8P\x90")
-            ):
-                offset = content.find(magic, offset + 1)
-                continue
-            if not spend_budget(budget, "candidates", 1):
+    cursor = 1
+    while cursor < len(content):
+        matches = [(content.find(magic, cursor), kind) for kind, magic in magics]
+        matches = [(offset, kind) for offset, kind in matches if offset >= 0]
+        if not matches:
+            break
+        offset, kind = min(matches)
+        cursor = offset + 1
+        if not plausible_compression_header(content, offset, kind):
+            continue
+        if not spend_budget(budget, "candidates", 1):
+            return None
+        if kind == "zstd":
+            block_budget = budget["zstd_blocks"]
+            assert isinstance(block_budget, list)
+            try:
+                end = zstd_frame_end(content, offset, block_budget)
+            except OverflowError:
                 return None
-            if kind == "zstd":
-                block_budget = budget["zstd_blocks"]
-                assert isinstance(block_budget, list)
-                try:
-                    end = zstd_frame_end(content, offset, block_budget)
-                except OverflowError:
-                    return None
-                if end is None:
-                    return None
-                if not spend_budget(budget, "work", end - offset):
-                    return None
-                if not spend_budget(budget, "zstd_processes", 1):
-                    return None
-                expanded = zstd_decompress(content[offset:end])
-                if expanded is None:
-                    return None
-            else:
-                suffix_size = len(content) - offset
-                if not spend_budget(budget, "work", suffix_size):
-                    return None
-                try:
-                    result = decompress_first_stream(memoryview(content)[offset:], kind)
-                except OverflowError:
-                    return None
-                if result is None:
-                    return None
-                expanded = result[0]
-            if not spend_budget(budget, "expanded", len(expanded)):
+            if end is None:
                 return None
-            children.append((f"{path}#embedded-{kind}-{offset}", expanded))
-            offset = content.find(magic, offset + 1)
+            if not spend_budget(budget, "work", end - offset):
+                return None
+            if not spend_budget(budget, "zstd_processes", 1):
+                return None
+            expanded = zstd_decompress(content[offset:end])
+            if expanded is None:
+                return None
+        else:
+            suffix_size = len(content) - offset
+            if not spend_budget(budget, "work", suffix_size):
+                return None
+            try:
+                result = decompress_first_stream(memoryview(content)[offset:], kind)
+            except OverflowError:
+                return None
+            if result is None:
+                return None
+            expanded = result[0]
+            end = offset + result[1]
+        if not spend_budget(budget, "expanded", len(expanded)):
+            return None
+        children.append((f"{path}#embedded-{kind}-{offset}", expanded))
+        # Consume one complete envelope before looking for its next sibling.
+        # Its decoded payload is scanned recursively, not its opaque bytes.
+        cursor = end
     return children
 
 
@@ -2295,6 +2327,81 @@ def contains_pkcs11_reference(content: bytes) -> bool:
     return False
 
 
+def sensitive_kernel_header_inventory(
+    content: bytes, path: str, parent_budget: dict[str, object]
+) -> bool:
+    """Inspect the in-memory IKHEADERS TAR without extracting or following links."""
+    if len(content) > MAX_BLOB or not complete_tar_envelope(
+        content, internal_header_links=True
+    ):
+        return True
+    inventory_budget = package_inspection_budget()
+    # This is a second real inventory, not another compressed-payload recursion.
+    # Keep local per-header budgets and charge the enclosing package aggregate,
+    # when present. No header can recursively gain this inventory context.
+    aggregate = parent_budget.get("aggregate")
+    if isinstance(aggregate, dict):
+        inventory_budget["aggregate"] = aggregate
+    if not spend_budget(parent_budget, "work", len(content)):
+        return True
+    try:
+        with tarfile.open(fileobj=io.BytesIO(content), mode="r:") as archive:
+            entries = archive.getmembers()
+            if len(entries) > MAX_PACKAGE_MEMBERS or not spend_budget(
+                inventory_budget, "package_members", len(entries)
+            ):
+                return True
+            names = {}
+            for entry in entries:
+                name = entry.name.removeprefix("./").removesuffix("/")
+                if entry.pax_headers or name in names:
+                    return True
+                if name == ".":
+                    if not entry.isdir():
+                        return True
+                elif not safe_archive_path(name) or unsafe_path(name):
+                    return True
+                names[name] = entry
+            for name, entry in names.items():
+                for ancestor in pathlib.PurePosixPath(name).parents:
+                    if str(ancestor) in names and not names[str(ancestor)].isdir():
+                        return True
+                if entry.issym():
+                    target = entry.linkname
+                    if not target or target.startswith("/") or "\0" in target:
+                        return True
+                    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
+                    if (
+                        not safe_archive_path(resolved) or unsafe_path(resolved)
+                        or resolved not in names or not names[resolved].isfile()
+                    ):
+                        return True
+                elif not entry.isfile() and not entry.isdir():
+                    return True
+                local = package_member_budget(inventory_budget)
+                # Inspect all TAR metadata as data too, including alias targets.
+                if sensitive(
+                    content[entry.offset:entry.offset + 512], path + "#tar-header",
+                    budget=local, certificate_location_eligible=False,
+                    validated_tar_header=True,
+                ):
+                    return True
+                if entry.isfile():
+                    source = archive.extractfile(entry)
+                    if source is None:
+                        return True
+                    payload = source.read(MAX_BLOB + 1)
+                    if len(payload) > MAX_BLOB or not spend_budget(local, "expanded", len(payload)):
+                        return True
+                    if sensitive(
+                        payload, name, budget=local, certificate_location_eligible=False
+                    ):
+                        return True
+    except (OSError, ValueError, tarfile.TarError, UnicodeError):
+        return True
+    return False
+
+
 def sensitive(
     content: bytes,
     path: str = "<historical blob>",
@@ -2312,6 +2419,10 @@ def sensitive(
     )
     if budget is None:
         budget = package_inspection_budget() if package_compression else inspection_budget()
+    if certificate_location_eligible and re.fullmatch(
+        r"usr/lib/modules/[^/]+/kernel/kernel/kheaders\.ko#embedded-xz-[0-9]+", path
+    ):
+        return sensitive_kernel_header_inventory(content, path, budget)
     direct_package_inventory = (
         direct_package_archive and depth == 1 and path.endswith(".pkg.tar")
         and "package_members" in budget
