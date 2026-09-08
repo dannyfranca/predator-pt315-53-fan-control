@@ -442,11 +442,15 @@ def openpgp_public_material_end(
     return None
 
 
+OPENPGP_SECRET_PACKET_HEADER = re.compile(rb"[\x94-\x97\x9c-\x9f\xc5\xc7]")
+
+
 def contains_openpgp_secret_key(content: bytes) -> bool:
     public_key_algorithms = frozenset((1, 2, 3, 16, 17, 18, 19, 22, 25, 26, 27, 28))
-    for offset, value in enumerate(content):
-        if not value & 0x80:
-            continue
+    # Only tags 5 and 7 can contain secret keys. Match every old-format length
+    # variant and both new-format tags before parsing, including embedded keys.
+    for match in OPENPGP_SECRET_PACKET_HEADER.finditer(content):
+        offset = match.start()
         packet = openpgp_packet(content, offset)
         if packet is None or packet[0] not in (5, 7):
             continue

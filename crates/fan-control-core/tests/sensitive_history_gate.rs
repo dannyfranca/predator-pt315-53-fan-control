@@ -103,6 +103,50 @@ fn tree_gate(root: &Path, allowed_certificates: &[&Path]) -> std::process::Outpu
 }
 
 #[test]
+fn openpgp_secret_scan_only_parses_secret_packet_headers() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import runpy
+import sys
+m = runpy.run_path(sys.argv[1])
+scan = m['contains_openpgp_secret_key']
+packet = m['openpgp_packet']
+expected = {value for value in range(256) if value & 128 and
+            ((value & 63) if value & 64 else ((value >> 2) & 15)) in (5, 7)}
+seen = []
+def record(content, offset):
+    seen.append(content[offset])
+    return None
+scan.__globals__['openpgp_packet'] = record
+assert not scan(bytes(range(256)))
+assert seen == sorted(expected), seen
+scan.__globals__['openpgp_packet'] = packet
+# A minimal v4 RSA secret-key body, with public and secret MPIs plus checksum.
+body = bytes([4, 0, 0, 0, 0, 1, 0, 8, 128, 0, 2, 3, 0, 0, 8, 128, 0, 0])
+for tag in (5, 7):
+    packets = [bytes([192 | tag, len(body)]) + body,
+               bytes([192 | tag, 255]) + len(body).to_bytes(4, 'big') + body]
+    for kind, width in enumerate((1, 2, 4, 0)):
+        packets.append(bytes([128 | tag << 2 | kind]) +
+                       (len(body).to_bytes(width, 'big') if width else b'') + body)
+    for encoded in packets:
+        assert scan(b'ordinary prefix\n' + encoded), (tag, encoded[:6])
+        assert not scan(encoded[:-3]), (tag, 'truncated')
+assert not scan(bytes([198, len(body)]) + body)  # Public-key tag, same body.
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn historical_capacity_does_not_relax_artifact_or_crypto_limits() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = r#"
