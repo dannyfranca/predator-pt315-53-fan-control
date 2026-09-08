@@ -149,6 +149,10 @@ authenticate `System.map`: `system_certificate_list`,
 debug metadata remain stripped. Retention changes non-loadable metadata, not
 the kernel's executable or fan-control behavior; the signed image must still
 bind the exact certificate to its actual built-in trust store.
+The provenance check permits the kernel's embedded `IKCONFIG` gzip only when
+its unique start/end markers frame one complete stream and the expanded bytes
+exactly equal the already inspected packaged `.config`. Other embedded
+compressed payloads remain rejected by the trust-store proof.
 The `cfg80211.ko` wireless module additionally retains the two public regulatory
 database authorities from the locked kernel's `net/wireless/certs/` source:
 `sforshee` (SHA-256 `cad3ddc5f274b8213c9956e2611a415252fd3619ca6700dc8ed396ed23acf6b0`)

@@ -10,6 +10,87 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn embedded_kernel_configuration_must_match_packaged_bytes() {
+    let accepted = Fixture::new();
+    let certificate = fs::read(&accepted.module_cert_der).unwrap();
+    let config = fs::read(accepted.root.join(format!(
+        "stage-{HEADERS}/usr/lib/modules/{RELEASE}/build/.config"
+    )))
+    .unwrap();
+    let mut payload = fake_builtin_trust_payload(&certificate);
+    payload.extend_from_slice(b"IKCFG_ST");
+    payload.extend_from_slice(&gzip_bytes(&config));
+    payload.extend_from_slice(b"IKCFG_ED");
+    replace_fake_kernel_image(&accepted, fake_kernel_image(&payload));
+    let output = accepted.run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for case in ["mismatch", "truncated", "duplicate", "unframed", "trailing"] {
+        let mut bad = fake_builtin_trust_payload(&certificate);
+        if case != "unframed" {
+            bad.extend_from_slice(b"IKCFG_ST");
+        }
+        bad.extend_from_slice(&gzip_bytes(if case == "mismatch" {
+            b"CONFIG_WRONG=y\n"
+        } else {
+            &config
+        }));
+        if case == "truncated" {
+            bad.pop();
+        }
+        bad.extend_from_slice(b"IKCFG_ED");
+        if case == "duplicate" {
+            bad.extend_from_slice(b"IKCFG_ST");
+        }
+        if case == "trailing" {
+            bad.extend_from_slice(&gzip_bytes(b"unexpected payload"));
+        }
+        replace_fake_kernel_image(&accepted, fake_kernel_image(&bad));
+        assert!(
+            !accepted.run().status.success(),
+            "accepted {case} embedded configuration"
+        );
+    }
+}
+
+#[test]
+fn kernel_payload_compression_uses_canonical_header_framing() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import gzip, pathlib, runpy, sys, tempfile
+m = runpy.run_path(sys.argv[1])
+with tempfile.TemporaryDirectory() as temporary:
+    work = pathlib.Path(temporary)
+    for content in (bytes.fromhex('1f8b08000000000084d600000000000002000000f2c80000'),
+                    b'\xfd7zXZ\0ERRNO', bytes.fromhex('28b52ffd742ac744240c502a')):
+        assert m['embedded_compressed_children'](b'code\0' + content, 'kernel', work, m['inspection_budget']()) == []
+    compressed = gzip.compress(b'ordinary public data')
+    children = m['embedded_compressed_children'](b'code\0' + compressed, 'kernel', work, m['inspection_budget']())
+    assert len(children) == 1 and children[0][1] == b'ordinary public data'
+    try:
+        m['embedded_compressed_children'](b'code\0' + compressed[:-2], 'kernel', work, m['inspection_budget']())
+    except m['VerificationError']:
+        pass
+    else:
+        raise AssertionError('truncated stream accepted')
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/verify-package-provenance"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 const RELEASE: &str = "7.1.8-cachyos-pt31553";
 const KERNEL: &str = "linux-cachyos-pt31553";
 const HEADERS: &str = "linux-cachyos-pt31553-headers";

@@ -891,6 +891,9 @@ def embedded_compressed_children(
     for kind, magic in magics:
         offset = content.find(magic, 1 if skip_outer_compression else 0)
         while offset >= 0:
+            if not sensitive_scanner().plausible_compression_header(content, offset, kind):
+                offset = content.find(magic, offset + 1)
+                continue
             if any(
                 start <= offset and offset + len(magic) <= end
                 for start, end in ignored_ranges
@@ -2060,8 +2063,38 @@ def builtin_trust_certificate_count(
     return 1
 
 
+def embedded_kernel_config_range(
+    payload: bytes, expected_config: bytes | None, label: str,
+    budget: dict[str, object], residency_budget: list[int],
+) -> tuple[tuple[int, int], ...]:
+    """Authenticate IKCONFIG bytes before exempting their compression envelope."""
+    start = payload.find(b"IKCFG_ST")
+    if start < 0 or expected_config is None:
+        return ()
+    if payload.count(b"IKCFG_ST") != 1 or payload.count(b"IKCFG_ED") != 1:
+        fail(f"{label} has ambiguous embedded kernel configuration markers")
+    offset = start + 8
+    spend_budget(budget, "candidates", 1, label)
+    spend_budget(budget, "work", len(payload) - offset, label)
+    limit = min(len(expected_config), residency_budget[0] // 2)
+    try:
+        result = decompress_first_stream(memoryview(payload)[offset:], "gzip", max_output_size=limit)
+    except OverflowError:
+        fail(f"{label} has oversized embedded kernel configuration")
+    if result is None:
+        fail(f"{label} has invalid embedded kernel configuration")
+    config, consumed = result
+    end = offset + consumed
+    if config != expected_config or payload[end:end + 8] != b"IKCFG_ED":
+        fail(f"{label} embedded configuration does not match packaged configuration")
+    spend_budget(budget, "expanded", len(config), label)
+    residency_budget[0] -= 2 * len(config)
+    return ((offset, end),)
+
+
 def kernel_payload_certificate_counts(
-    image: bytes, certificate: bytes, symbols: dict[str, int], work: pathlib.Path
+    image: bytes, certificate: bytes, symbols: dict[str, int], work: pathlib.Path,
+    expected_config: bytes | None = None,
 ) -> tuple[int, int]:
     budget = inspection_budget()
     residency_budget = [MAX_KERNEL_PAYLOAD_RESIDENCY]
@@ -2088,6 +2121,9 @@ def kernel_payload_certificate_counts(
                 (certificate_offset, certificate_offset + len(certificate))
             )
             certificate_offset = payload.find(certificate, certificate_offset + 1)
+        config_ranges = embedded_kernel_config_range(
+            payload, expected_config, label, budget, residency_budget
+        )
         if embedded_compressed_children(
             payload,
             label,
@@ -2095,7 +2131,7 @@ def kernel_payload_certificate_counts(
             budget,
             max_expanded_size=residency_budget[0] // 2,
             residency_budget=residency_budget,
-            ignored_ranges=tuple(certificate_ranges),
+            ignored_ranges=tuple(certificate_ranges) + config_ranges,
         ):
             fail(f"{label} contains a non-exact embedded compressed payload")
         raw_count += payload.count(certificate)
@@ -2263,7 +2299,7 @@ def verify_kernel_module_trust(
     symbols = kernel_trust_symbols(system_map_content)
     image_content = read_limited(image, "signed kernel image", 512 * 1024 * 1024)
     raw_count, trusted_count = kernel_payload_certificate_counts(
-        image_content, module_certificate_der, symbols, work
+        image_content, module_certificate_der, symbols, work, config_content
     )
     if raw_count != 1 or trusted_count != 1:
         fail(
