@@ -3569,8 +3569,11 @@ fn mtree_must_bind_package_member_inventory_and_content() {
     let directory = Fixture::new();
     rebuild_kernel_archive(&directory, &[], true);
     let stage = directory.root.join(format!("stage-{KERNEL}"));
-    let mtree = read_mtree(&stage).replace("mode=755 type=dir", "mode=700 type=dir");
-    replace_kernel_mtree(&directory, mtree.as_bytes());
+    // Change the archived directory after recording its mode in MTREE. A text
+    // replacement of mode=755 can be a no-op under a restrictive caller umask.
+    let member = stage.join("usr");
+    let mode = fs::metadata(&member).unwrap().permissions().mode();
+    fs::set_permissions(&member, fs::Permissions::from_mode(mode ^ 0o020)).unwrap();
     write_kernel_archive(&directory, &kernel_archive_members(&[]), true);
     let output = directory.run();
     assert!(
