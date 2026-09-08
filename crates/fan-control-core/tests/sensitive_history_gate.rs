@@ -457,6 +457,45 @@ fn rejects_sensitive_commit_and_annotated_tag_payloads() {
 }
 
 #[test]
+fn regulatory_certificates_are_scoped_to_the_wireless_module() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = temporary_fixture("regulatory-certificates");
+    fs::write(root.join("public.der"), large_rsa_certificate_der()).unwrap();
+    fs::write(root.join("private.der"), unencrypted_pkcs8_der()).unwrap();
+    let source = r#"
+import hashlib, pathlib, runpy, sys
+m = runpy.run_path(sys.argv[1])
+scan = m['sensitive']
+certificate = pathlib.Path(sys.argv[2], 'public.der').read_bytes()
+private = pathlib.Path(sys.argv[2], 'private.der').read_bytes()
+module = 'usr/lib/modules/test/kernel/net/wireless/cfg80211.ko'
+# Substitute only the synthetic fixture digest, never a production identity.
+scan.__globals__['KERNEL_REGULATORY_CERTIFICATE_SHA256'] = frozenset((hashlib.sha256(certificate).hexdigest(),))
+assert not scan(b'\x7fELF\0' + certificate, module)
+for path in ('build.log', 'usr/lib/modules/test/vmlinuz', module + '#base64-0',
+             'usr/lib/modules/test/kernel/net/wireless/other.ko'):
+    assert scan(b'\x7fELF\0' + certificate, path), path
+assert scan(b'\x7fELF\0' + certificate, module, certificate_location_eligible=False)
+assert scan(certificate, module), 'not an ELF module'
+assert scan(b'\x7fELF\0' + certificate + private, module), 'private payload hidden by certificate'
+scan.__globals__['KERNEL_REGULATORY_CERTIFICATE_SHA256'] = frozenset()
+assert scan(b'\x7fELF\0' + certificate, module), 'unapproved certificate'
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .arg(&root)
+        .output()
+        .unwrap();
+    fs::remove_dir_all(root).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn output_tree_allows_public_certificates_only_at_documented_artifact_paths() {
     let root = temporary_fixture("output-tree-certificate-paths");
     let certificate = legacy_x509_certificate_pem();

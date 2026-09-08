@@ -143,6 +143,14 @@ headers package, including its embedded copy in `build/vmlinux`. Both locations
 permit only the supplied public module-signing certificate, never a private key
 or an additional trust certificate. The provenance verifier requires the explicit
 external-key setting.
+The `cfg80211.ko` wireless module additionally retains the two public regulatory
+database authorities from the locked kernel's `net/wireless/certs/` source:
+`sforshee` (SHA-256 `cad3ddc5f274b8213c9956e2611a415252fd3619ca6700dc8ed396ed23acf6b0`)
+and `wens` (`eeb049594eb3a83e50bfb6782e7fdf9e96fbd5c2954a0bbb0931cd55321d0bcf`).
+Only these exact DER certificates inside that ELF module are permitted. They
+cannot authorize module or kernel-image signatures, appear at other artifact
+paths, or replace the three external signing identities. Signed regulatory
+database enforcement and the locked wireless configuration remain unchanged.
 The verifier places the exact parsed source-lock bytes into its private
 snapshot for retention; do not add `source-lock.toml` to the input bundle.
 

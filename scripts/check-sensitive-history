@@ -81,6 +81,12 @@ UNSAFE_PATH_PARTS = (
 )
 PBES2_OID = b"\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x05\x0d"
 MODULE_SIGNATURE_MAGIC = b"~Module signature appended~\n"
+# Public regulatory DB authorities from the locked cachyos-7.1.8-1 source,
+# net/wireless/certs/{sforshee,wens}.hex. These are NOT module or boot signers.
+KERNEL_REGULATORY_CERTIFICATE_SHA256 = frozenset((
+    "cad3ddc5f274b8213c9956e2611a415252fd3619ca6700dc8ed396ed23acf6b0",
+    "eeb049594eb3a83e50bfb6782e7fdf9e96fbd5c2954a0bbb0931cd55321d0bcf",
+))
 MAX_BLOB = 512 * 1024 * 1024
 MAX_EMBEDDED_WORK = 8 * MAX_BLOB
 MAX_EMBEDDED_CANDIDATES = 4096
@@ -2411,7 +2417,19 @@ def sensitive(
             if x509 is None:
                 return True
             if x509.returncode == 0:
-                if not allow_public_certificate or asn1_candidate not in allowed_public_certificates:
+                regulatory_certificate = (
+                    certificate_location_eligible
+                    and content.startswith(b"\x7fELF")
+                    and re.fullmatch(
+                        r"usr/lib/modules/[^/]+/kernel/net/wireless/cfg80211\.ko", path
+                    ) is not None
+                    and hashlib.sha256(asn1_candidate).hexdigest()
+                    in KERNEL_REGULATORY_CERTIFICATE_SHA256
+                )
+                if not regulatory_certificate and (
+                    not allow_public_certificate
+                    or asn1_candidate not in allowed_public_certificates
+                ):
                     return True
                 approved_certificates.append(asn1_candidate)
             pkcs12 = probe(
