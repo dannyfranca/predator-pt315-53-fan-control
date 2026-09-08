@@ -1280,7 +1280,11 @@ assert not scan(b'{} ' * 4096)
 assert scan(b'{} ' * 4097), 'JSON candidate budget was relaxed'
 assert scan(log + b'{} ' * 4097)
 for value in (b'[]', b'[true]', b'[false]', b'[null]', b'[-1]', b'[0]', b'["x"]'):
-    assert scan(value + b' ' + b'{} ' * 4096), value
+    assert not scan(value + b' ' + b'{} ' * 4096), value
+    assert scan(value + b' ' + b'{} ' * 4097), value
+declarations = b'unsigned field[0x10];\n' * 5000
+assert not scan(declarations), 'array declarations cannot be JWK objects'
+assert scan(declarations + b'[' + secret + b']'), 'array-wrapped private object was lost'
 "#;
     let output = Command::new("python3")
         .args(["-I", "-c", source])

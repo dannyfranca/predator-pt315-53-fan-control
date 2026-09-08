@@ -1740,10 +1740,10 @@ def contains_private_jwk(content: bytes) -> bool:
     except json.JSONDecodeError:
         pass
     decoder = json.JSONDecoder()
-    # Compiler labels such as [M] cannot begin JSON. Do not charge impossible
-    # containers against the bounded decoder budget; retain every legal first
-    # token (including Python's NaN/Infinity extension) and incomplete openers.
-    containers = r'\{(?=\s*(?:"|\}|$))|\[(?=\s*(?:["{\[\]\-0-9tfnNI]|$))'
+    # A JWK is always an object. Scan every possible object opener, including
+    # objects inside arrays, without charging C array bounds or compiler labels
+    # as candidate keys. The object-decoder limit remains unchanged.
+    containers = r'\{(?=\s*(?:"|\}|$))'
     for index, match in enumerate(re.finditer(containers, text)):
         if index >= 4096:
             return True
