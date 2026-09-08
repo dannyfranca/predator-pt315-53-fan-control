@@ -410,8 +410,9 @@ spec = importlib.util.spec_from_loader("history_scanner", loader)
 module = importlib.util.module_from_spec(spec)
 loader.exec_module(module)
 # A structural hash whose decoded bytes claim supported gzip (method 8, flags 0),
-# but contain a corrupt stream. It must remain rejected outside headers.
-tree = bytes((99, 53, 56, 54, 49, 102, 56, 98, 48, 56, 48, 48, 53, 49, 52, 57, 48, 99, 54, 50, 52, 102, 54, 99, 48, 49, 57, 98, 100, 102, 55, 100, 52, 53, 50, 102, 54, 56, 51, 50))
+# and a fixed-Huffman block, but a corrupt stream. It must remain rejected
+# outside headers, without relying on impossible stored-block framing.
+tree = b"c5861f8b080051490c624f6c039bdf7d452f6832"
 parent = bytes((100, 102, 99, 56, 51, 49, 50, 101, 100, 100, 52, 51, 53, 50, 97, 101, 49, 51, 48, 102, 51, 48, 98, 101, 51, 101, 100, 54, 52, 48, 49, 97, 54, 98, 53, 99, 97, 97, 101, 57))
 header = b"tree " + tree + b"\nparent " + parent + b"\n\nsafe\n"
 message = b"tree " + b"0" * 40 + b"\nparent " + b"0" * 40 + b"\n\n" + tree + b"\n" + parent + b"\n"

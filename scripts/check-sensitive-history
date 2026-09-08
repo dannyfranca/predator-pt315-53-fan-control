@@ -1348,9 +1348,9 @@ def base64_children(
     ):
         token = memoryview(content)[match.start() : match.end()]
         assignment = re.fullmatch(
-            rb"[A-Za-z_][A-Za-z0-9_]{0,63}=([A-Za-z0-9+/]+={0,2})", token
+            rb"description=([A-Za-z0-9+/]+={0,2})", token
         )
-        # A metadata assignment is not internal Base64 padding. Inspect its
+        # A module description is not internal Base64 padding. Inspect its
         # value independently and retain normalized/fragmented interpretations
         # of the entire token, including keys disguised as assignment names.
         if assignment and not append_aligned_tokens(assignment.group(1)):
