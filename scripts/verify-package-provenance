@@ -47,6 +47,7 @@ MAX_MTREE_EXPANDED_BYTES = (
     MAX_ARCHIVE_LISTING_BYTES + MAX_ARCHIVE_MEMBERS * MAX_MTREE_RECORD_OVERHEAD
 )
 MAX_SENSITIVE_BLOB = 512 * 1024 * 1024
+MAX_CANONICAL_PACKAGE_SCAN_SECONDS = 3600
 MAX_EMBEDDED_CANDIDATES = 4096
 MAX_BASE64_CANDIDATES = 16_384
 MAX_OPENSSL_PROBES = 256
@@ -1550,7 +1551,7 @@ def canonical_sensitive_artifact_inspection(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             check=False,
-            timeout=120,
+            timeout=MAX_CANONICAL_PACKAGE_SCAN_SECONDS,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         fail("canonical sensitive-artifact inspection failed")

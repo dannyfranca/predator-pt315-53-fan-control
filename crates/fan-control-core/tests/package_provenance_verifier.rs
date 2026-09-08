@@ -3765,6 +3765,49 @@ loaded.list_archive(pathlib.Path("untrusted.pkg.tar.zst"))
 }
 
 #[test]
+fn canonical_package_scan_has_a_bounded_production_deadline() {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .to_path_buf();
+    let source = r#"
+import pathlib, runpy, subprocess, sys
+m = runpy.run_path(sys.argv[1])
+scan = m['canonical_sensitive_artifact_inspection']
+g = scan.__globals__
+class Result:
+    returncode = 0
+    stderr = b''
+def run(command, **kwargs):
+    assert kwargs['timeout'] == 3600
+    return Result()
+g['subprocess'].run = run
+args = (pathlib.Path('.'),) * 4
+scan(*args)
+def expired(command, **kwargs):
+    raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+g['subprocess'].run = expired
+try:
+    scan(*args)
+except g['VerificationError']:
+    pass
+else:
+    raise AssertionError('timeout did not fail closed')
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/verify-package-provenance"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn mtree_expansion_budget_accepts_a_production_sized_inventory() {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
