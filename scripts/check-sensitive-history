@@ -686,6 +686,26 @@ def zstd_container(content: bytes) -> bool:
     return 0x184D2A50 <= magic <= 0x184D2A5F
 
 
+def impossible_zstd_first_block(content: bytes, offset: int) -> bool:
+    """Reject incidental magic with a complete but impossible first block header."""
+    if offset + 5 > len(content):
+        return False
+    descriptor = content[offset + 4]
+    single_segment = bool(descriptor & 0x20)
+    header_size = (
+        5 + (0 if single_segment else 1)
+        + (0, 1, 2, 4)[descriptor & 0x03]
+        + (1 if single_segment else 0, 2, 4, 8)[descriptor >> 6]
+    )
+    block_at = offset + header_size
+    if block_at + 3 > len(content):
+        return False
+    block_header = int.from_bytes(content[block_at : block_at + 3], "little")
+    # RFC 8878 sections 3.1.1.2 and 3.1.1.2.3: reserved block type and
+    # a block larger than 128 KiB cannot occur in any supported frame.
+    return (block_header >> 1) & 3 == 3 or block_header >> 3 > 128 * 1024
+
+
 def zstd_frame_end(content: bytes, offset: int, block_budget: list[int]) -> int | None:
     if offset + 5 > len(content):
         return None
@@ -693,7 +713,7 @@ def zstd_frame_end(content: bytes, offset: int, block_budget: list[int]) -> int 
     if magic != 0xFD2FB528:
         return None
     descriptor = content[offset + 4]
-    if descriptor & 0x18:
+    if descriptor & 0x08:
         return None
     single_segment = bool(descriptor & 0x20)
     checksum = bool(descriptor & 0x04)
@@ -715,7 +735,7 @@ def zstd_frame_end(content: bytes, offset: int, block_budget: list[int]) -> int 
         last_block = bool(block_header & 1)
         block_type = (block_header >> 1) & 0x03
         block_size = block_header >> 3
-        if block_type == 3:
+        if block_type == 3 or block_size > 128 * 1024:
             return None
         stored_size = 1 if block_type == 1 else block_size
         if offset + stored_size > len(content):
@@ -1023,6 +1043,9 @@ def embedded_compressed_children(
             # supported frame. Do not confuse a compiled magic comparison
             # with compressed data, but retain rejection of claimed streams.
             if kind == "zstd" and offset + 4 < len(content) and content[offset + 4] & 0x08:
+                offset = content.find(magic, offset + 1)
+                continue
+            if kind == "zstd" and impossible_zstd_first_block(content, offset):
                 offset = content.find(magic, offset + 1)
                 continue
             if kind == "bzip2" and (

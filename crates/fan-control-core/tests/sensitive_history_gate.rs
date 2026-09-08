@@ -1502,6 +1502,37 @@ assert scan(prefix + compressed, 'host-tool')
 }
 
 #[test]
+fn incidental_zstd_first_block_must_fit_the_format_limit() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import runpy, subprocess, sys
+scan = runpy.run_path(sys.argv[1])['sensitive']
+prefix = b'\x7fELF\0ordinary code\0'
+incidental = bytes.fromhex('28b52ffd740e83e1f031c081')
+assert not scan(prefix + incidental, 'host-tool')
+assert scan(incidental, 'claimed.zst')
+public = bytearray(subprocess.check_output(['zstd', '-q', '-c'], input=b'ordinary public data\n'))
+public[4] |= 0x10  # RFC 8878 requires decoders to ignore this unused bit.
+assert subprocess.check_output(['zstd', '-q', '-d', '-c'], input=public) == b'ordinary public data\n'
+assert not scan(prefix + public, 'host-tool')
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+compressed = bytearray(subprocess.check_output(['zstd', '-q', '-c'], input=secret))
+compressed[4] |= 0x10
+assert scan(prefix + incidental + compressed, 'host-tool')
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn whitespace_delimited_prose_is_inspected_without_encoded_wrap_ambiguity() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = r#"
