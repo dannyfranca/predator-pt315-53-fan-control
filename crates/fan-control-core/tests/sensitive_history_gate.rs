@@ -103,6 +103,34 @@ fn tree_gate(root: &Path, allowed_certificates: &[&Path]) -> std::process::Outpu
 }
 
 #[test]
+fn historical_capacity_does_not_relax_artifact_or_crypto_limits() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import runpy
+import sys
+m = runpy.run_path(sys.argv[1])
+artifact = m['inspection_budget']()
+history = m['inspection_budget'](historical=True)
+assert artifact['base64_candidates'] == 65536
+assert history['base64_candidates'] == 1048576
+for name in artifact:
+    if name != 'base64_candidates':
+        assert artifact[name] == history[name], name
+assert not m['spend_budget'](history, 'base64_candidates', 1048577)
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn accepts_source_reference_with_incidental_decoded_gzip_magic() {
     let root = repository();
     let reference = b"crates/fan-control-core/tests/source_lock_verifier.rs:62:        let packaging_commit = include_bytes!(\"fixtures/source-lock-gpg/packaging.commit\");\n";

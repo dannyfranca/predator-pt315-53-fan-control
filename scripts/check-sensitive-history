@@ -85,6 +85,10 @@ MAX_BLOB = 512 * 1024 * 1024
 MAX_EMBEDDED_WORK = 8 * MAX_BLOB
 MAX_EMBEDDED_CANDIDATES = 4096
 MAX_BASE64_CANDIDATES = 65_536
+# Historical review transcripts contain many more distinct encoded-looking
+# source references than a package evidence tree. Keep their allowance bounded
+# separately; all other byte/work/probe limits and the history deadline apply.
+MAX_HISTORY_BASE64_CANDIDATES = 1_048_576
 MAX_OPENSSL_PROBES = 256
 MAX_STRUCTURED_FIELDS = 131_072
 MAX_EMBEDDED_ZSTD_PROCESSES = 64
@@ -866,11 +870,13 @@ def decompress_exact_streams(content: bytes, kind: str) -> bytes | None:
     return bytes(expanded)
 
 
-def inspection_budget() -> dict[str, object]:
+def inspection_budget(*, historical: bool = False) -> dict[str, object]:
     return {
         "work": MAX_EMBEDDED_WORK,
         "candidates": MAX_EMBEDDED_CANDIDATES,
-        "base64_candidates": MAX_BASE64_CANDIDATES,
+        "base64_candidates": (
+            MAX_HISTORY_BASE64_CANDIDATES if historical else MAX_BASE64_CANDIDATES
+        ),
         "openssl_probes": MAX_OPENSSL_PROBES,
         "expanded": MAX_BLOB,
         "zstd_blocks": [0],
@@ -2612,7 +2618,7 @@ def main() -> int:
             else f"<historical {expected_kind} {expected_oid}>"
         )
         scan_content = mask_git_object_identifier_headers(content, expected_kind)
-        if sensitive(scan_content, label):
+        if sensitive(scan_content, label, budget=inspection_budget(historical=True)):
             process.kill()
             print(
                 f"check-sensitive-history: sensitive historical {expected_kind} "
