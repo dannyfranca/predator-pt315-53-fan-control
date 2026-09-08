@@ -168,6 +168,12 @@ Install the repository's documented toolchain and policy tools first. Build the
 current clean checkout; its resolved `HEAD`, never a tag name, release asset, or
 floating remote branch, is the source identity:
 
+Keep the checkout and candidate output on a disk filesystem with room for the
+full kernel, debug modules, and isolated build environment. The candidate builder
+creates private temporary storage beside its output and passes it through the
+clean build environments; it does not use an inherited `TMPDIR` or the host's
+potentially small RAM-backed `/tmp` for these build stages.
+
 ```sh
 set -eu
 source_root=$(git rev-parse --show-toplevel)

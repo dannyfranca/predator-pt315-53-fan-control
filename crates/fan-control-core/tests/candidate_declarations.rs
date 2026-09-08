@@ -981,6 +981,9 @@ exit 1
         r#"#!/bin/sh
 set -eu
 package="$PKGDEST/pt31553-fan-control-0.1.0-1-x86_64.pkg.tar.zst"
+: "${TMPDIR:?candidate temporary directory was not propagated}"
+test -d "$TMPDIR"
+test "$(stat -c %a "$TMPDIR")" = 700
 if [ "${1:-}" = --packagelist ]; then printf '%s\n' "$package"; exit 0; fi
 printf 'controller package\n' >"$package"
 printf 'controller signature\n' >"$package.sig"
@@ -1005,12 +1008,27 @@ esac
     );
     write_executable(
         &repository.join("scripts/verify-source-lock"),
-        "#!/bin/sh\nset -eu\nmkdir -p \"$SOURCE_LOCK_OUTPUT\"\nprintf 'kernel packages\\n' >\"$SOURCE_LOCK_OUTPUT/SHA256SUMS\"\n",
+        r#"#!/bin/sh
+set -eu
+: "${TMPDIR:?candidate temporary directory was not propagated}"
+test "$TMPDIR" = "${SOURCE_LOCK_OUTPUT%/payload/kernel}/tmp"
+test -d "$TMPDIR"
+test ! -L "$TMPDIR"
+test "$(stat -c %a "$TMPDIR")" = 700
+temporary=$(mktemp -d)
+case "$temporary" in "$TMPDIR"/*) ;; *) exit 1 ;; esac
+python3 -I -c 'import os, pathlib, tempfile; temporary = tempfile.TemporaryDirectory(); assert pathlib.Path(temporary.name).parent == pathlib.Path(os.environ["TMPDIR"])'
+mkdir -p "$SOURCE_LOCK_OUTPUT"
+printf 'kernel packages\n' >"$SOURCE_LOCK_OUTPUT/SHA256SUMS"
+"#,
     );
     write_executable(
         &repository.join("scripts/verify-package-provenance"),
         r#"#!/bin/sh
 set -eu
+: "${TMPDIR:?candidate temporary directory was not propagated}"
+test -d "$TMPDIR"
+test "$(stat -c %a "$TMPDIR")" = 700
 while [ "$#" -gt 0 ]; do
   if [ "$1" = --output ]; then printf '{"verified":true}\n' >"$2"; exit 0; fi
   shift
@@ -1096,6 +1114,7 @@ chmod 0444 "$output"
         let mut command = Command::new(&wrapper);
         command
             .env_clear()
+            .env("TMPDIR", sandbox.path().join("untrusted-ambient-tmp"))
             .args(["--bundle"])
             .arg(&bundle)
             .args(["--kernel-signing-dir"])
@@ -1150,4 +1169,9 @@ chmod 0444 "$output"
     let result = run(&rejected);
     assert!(!result.status.success());
     assert!(!rejected.exists(), "late failure published partial output");
+    assert!(
+        !sandbox.path().join("untrusted-ambient-tmp").exists(),
+        "candidate used the inherited temporary path"
+    );
+    assert_eq!(fs::read_dir(&output_parent).unwrap().count(), 1);
 }

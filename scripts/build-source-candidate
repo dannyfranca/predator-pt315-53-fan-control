@@ -176,7 +176,8 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 /usr/bin/chmod 0700 "$work"
 safe_home="$work/home"
-/usr/bin/install -d -m 0700 "$safe_home" "$safe_home/.config"
+safe_tmp="$work/tmp"
+/usr/bin/install -d -m 0700 "$safe_home" "$safe_home/.config" "$safe_tmp"
 payload="$work/payload"
 kernel_output="$payload/kernel"
 controller_output="$payload/controller"
@@ -185,7 +186,7 @@ signatures="$payload/signatures"
 /usr/bin/install -d -m 0700 "$payload" "$kernel_output" "$controller_output" \
     "$declarations" "$signatures"
 
-/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" TMPDIR="$safe_tmp" \
 SOURCE_LOCK_SIGNING_DIR="$kernel_signing_dir" \
 SOURCE_LOCK_KERNEL_SIGNER="$kernel_signer" \
 SOURCE_LOCK_KERNEL_CERT_SHA256="$kernel_cert_sha256" \
@@ -193,7 +194,7 @@ SOURCE_LOCK_OUTPUT="$kernel_output" \
     "$source_root/scripts/verify-source-lock" --inputs "$bundle" --exec-verified
 
 package_manifest_signature="$signatures/package-set.p7s"
-/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" TMPDIR="$safe_tmp" \
 /usr/bin/openssl cms -sign -binary \
     -in "$kernel_output/SHA256SUMS" \
     -signer "$package_cert" -inkey "$package_key" \
@@ -202,7 +203,7 @@ package_manifest_signature="$signatures/package-set.p7s"
 [[ -s "$package_manifest_signature" ]]
 
 provenance="$declarations/package-provenance-v1.json"
-/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" TMPDIR="$safe_tmp" \
 "$source_root/scripts/verify-package-provenance" \
     --artifacts "$kernel_output" \
     --module-cert "$kernel_signing_dir/module-signing-certificate.der" \
@@ -215,7 +216,7 @@ provenance="$declarations/package-provenance-v1.json"
     --output "$provenance"
 
 compatibility="$declarations/compatibility.toml"
-/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" TMPDIR="$safe_tmp" \
 "$source_root/scripts/generate-candidate-declarations" compatibility \
     --provenance "$provenance" --output "$compatibility"
 
@@ -260,7 +261,7 @@ controller_signer_file="$work/controller-signer-fingerprint"
 (
     cd "$controller_build"
     run_controller_makepkg() {
-        /usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+        /usr/bin/env -i PATH=/usr/bin HOME="$safe_home" TMPDIR="$safe_tmp" \
         XDG_CONFIG_HOME="$safe_home/.config" CARGO_HOME="$cargo_home" \
         GNUPGHOME="$controller_gnupg_home" CARGO_NET_OFFLINE=true \
         SRCDEST="$controller_build" PKGDEST="$controller_build" \
@@ -278,10 +279,10 @@ controller_signer_file="$work/controller-signer-fingerprint"
     [[ -f "${packages[0]}.sig" && ! -L "${packages[0]}.sig" ]]
     package_parent=$(/usr/bin/realpath --canonicalize-existing "${packages[0]%/*}")
     [[ "$package_parent" == "$controller_build" ]]
-    /usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+    /usr/bin/env -i PATH=/usr/bin HOME="$safe_home" TMPDIR="$safe_tmp" \
         /usr/bin/pacman-key --verify "${packages[0]}.sig" "${packages[0]}"
     controller_signature_status="$work/controller-signature.status"
-    /usr/bin/env -i PATH=/usr/bin HOME="$safe_home" LC_ALL=C \
+    /usr/bin/env -i PATH=/usr/bin HOME="$safe_home" TMPDIR="$safe_tmp" LC_ALL=C \
     /usr/bin/gpg --batch --no-options \
         --homedir /etc/pacman.d/gnupg --status-fd 1 \
         --verify "${packages[0]}.sig" "${packages[0]}" \
@@ -323,7 +324,7 @@ mapfile -t controller_packages < <(
 [[ "${#controller_packages[@]}" -eq 1 ]]
 controller_package=${controller_packages[0]}
 controller_signature="$controller_package.sig"
-/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" TMPDIR="$safe_tmp" \
 "$source_root/scripts/generate-candidate-declarations" manifest \
     --provenance "$provenance" \
     --compatibility "$compatibility" \
@@ -333,7 +334,7 @@ controller_signature="$controller_package.sig"
     --package-manifest-signature "$package_manifest_signature" \
     --output "$declarations/candidate-identity-v1.json"
 
-/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
+/usr/bin/env -i PATH=/usr/bin HOME="$safe_home" TMPDIR="$safe_tmp" \
 /usr/bin/python3 -I "$source_root/scripts/check-sensitive-history" --tree "$payload" \
     --allow-public-certificate "$package_cert" \
     --allow-public-certificate "$kernel_cert" \
