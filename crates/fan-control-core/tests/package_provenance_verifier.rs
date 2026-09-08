@@ -4977,13 +4977,11 @@ fn real_signed_module_with_metadata(
 }
 
 fn module_with_signature(payload: &[u8], signature: &[u8]) -> Vec<u8> {
-    let signer = b"fixture-signer";
-    let key_id = b"key-id";
     let mut module = payload.to_vec();
-    module.extend_from_slice(signer);
-    module.extend_from_slice(key_id);
     module.extend_from_slice(signature);
-    module.extend_from_slice(&[0, 6, 2, signer.len() as u8, key_id.len() as u8, 0, 0, 0]);
+    // Linux sign-file leaves algorithm/hash and signer/key-id lengths zero for CMS.
+    // The authenticated CMS object, not this trailer, declares the digest.
+    module.extend_from_slice(&[0, 0, 2, 0, 0, 0, 0, 0]);
     module.extend_from_slice(&(signature.len() as u32).to_be_bytes());
     module.extend_from_slice(b"~Module signature appended~\n");
     module

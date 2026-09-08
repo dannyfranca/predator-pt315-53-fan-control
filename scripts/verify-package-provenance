@@ -2433,7 +2433,9 @@ def verify_module_signature(module: pathlib.Path, cert: pathlib.Path, work: path
     algo, hash_algo, identifier, signer_len, key_id_len, signature_len = struct.unpack(
         ">BBBBB3xI", data[trailer_at : trailer_at + 12]
     )
-    if identifier != 2 or signature_len == 0 or algo > 10 or hash_algo != 6:
+    # sign-file leaves legacy hash metadata zero for CMS. SHA-512 is enforced
+    # against the authenticated CMS digest and signer declarations below.
+    if identifier != 2 or signature_len == 0 or algo > 10 or hash_algo not in (0, 6):
         fail("module signature trailer is invalid")
     signed_length = trailer_at - signer_len - key_id_len - signature_len
     if signed_length <= 0:

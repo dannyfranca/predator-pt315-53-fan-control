@@ -162,8 +162,8 @@ name = "sensitive-output-scanner"
 kind = "sensitive-scanner"
 path = "check-sensitive-history"
 origin = "repository:scripts/check-sensitive-history"
-revision = "7adc40902803b52f7ec03c50e1be85a18ace2c845ba0bfc7fcd8aec0b425f9f9"
-sha256 = "7adc40902803b52f7ec03c50e1be85a18ace2c845ba0bfc7fcd8aec0b425f9f9"
+revision = "b050a01528014c3429bfd823393f0d9d3901b7bb6111528795c51c9a0165d954"
+sha256 = "b050a01528014c3429bfd823393f0d9d3901b7bb6111528795c51c9a0165d954"
 size = 107671
 
 [[inputs]]

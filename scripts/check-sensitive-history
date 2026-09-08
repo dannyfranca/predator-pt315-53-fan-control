@@ -624,7 +624,8 @@ def mask_verified_module_signature(
         identifier != 2
         or signature_length == 0
         or algorithm > 10
-        or not 1 <= hash_algorithm <= 6
+        # Linux CMS signatures leave this legacy hash field zero.
+        or not 0 <= hash_algorithm <= 6
         or signed_length <= 0
     ):
         return content
