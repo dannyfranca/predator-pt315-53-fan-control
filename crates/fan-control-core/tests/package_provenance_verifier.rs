@@ -3888,22 +3888,41 @@ fn expected_top_level_package_compression_does_not_consume_the_embedded_budget()
 
 #[test]
 fn package_member_decompression_process_count_is_bounded() {
-    let fixture = Fixture::new();
-    let stage = fixture.root.join(format!("stage-{KERNEL}"));
-    let members = (0..129)
-        .map(|index| {
-            let member = format!("usr/share/doc/process-bounded-{index}.zst");
-            let path = stage.join(&member);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, zstd_bytes(b"ordinary package documentation\n")).unwrap();
-            member
-        })
-        .collect::<Vec<_>>();
-    let member_refs = members.iter().map(String::as_str).collect::<Vec<_>>();
-    rebuild_kernel_archive(&fixture, &member_refs, true);
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import gzip, io, pathlib, runpy, sys, tarfile, tempfile
+m = runpy.run_path(sys.argv[1])
+assert m['package_inspection_budget']()['top_level_compressions'] == 65536
+assert m['inspection_budget']()['top_level_compressions'] == 128
+with tempfile.TemporaryDirectory(prefix='package-process-budget-') as directory:
+    root = pathlib.Path(directory)
+    archive = root / 'public.tar'
+    members = [f'usr/share/doc/file-{i}.gz' for i in range(3)]
+    with tarfile.open(archive, 'w', format=tarfile.USTAR_FORMAT) as out:
+        for name in members:
+            data = gzip.compress(b'ordinary public documentation\n')
+            entry = tarfile.TarInfo(name)
+            entry.size = len(data)
+            out.addfile(entry, io.BytesIO(data))
+    for allowance in (3, 2):
+        budget = m['package_inspection_budget']()
+        budget['top_level_compressions'] = allowance
+        try:
+            m['scan_archive_members'](archive, members, root, 0, {}, set(), budget)
+        except m['VerificationError'] as error:
+            assert allowance == 2 and 'top_level_compressions' in str(error), str(error)
+        else:
+            assert allowance == 3, 'package process exhaustion did not fail closed'
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/verify-package-provenance"))
+        .output()
+        .unwrap();
     assert!(
-        !fixture.run().status.success(),
-        "accepted more top-level compressed members than the process budget"
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
