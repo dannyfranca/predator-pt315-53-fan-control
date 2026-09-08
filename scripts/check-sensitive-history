@@ -1027,6 +1027,18 @@ def embedded_compressed_children(
                 # RFC 1952 section 2.3.1: reserved flags cannot occur in a
                 # gzip header. Instruction bytes can share its short magic.
                 or (offset + 3 < len(content) and content[offset + 3] & 0xE0)
+                # For the fixed header, an uncompressed first DEFLATE block
+                # must encode LEN and its one's complement (RFC 1951 3.2.4).
+                # Relocation integers can share the entire gzip magic/header;
+                # impossible block framing still cannot carry a gzip stream.
+                or (
+                    offset + 15 <= len(content)
+                    and content[offset + 3] & 0x1E == 0
+                    and content[offset + 10] & 0x06 == 0
+                    and int.from_bytes(content[offset + 11:offset + 13], "little")
+                    ^ int.from_bytes(content[offset + 13:offset + 15], "little")
+                    != 0xFFFF
+                )
             ):
                 offset = content.find(magic, offset + 1)
                 continue

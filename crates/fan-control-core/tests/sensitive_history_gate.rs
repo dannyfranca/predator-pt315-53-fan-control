@@ -1443,6 +1443,37 @@ assert scan(prefix + gzip.compress(secret), 'host-tool')
 }
 
 #[test]
+fn incidental_gzip_stored_block_must_have_complementary_lengths() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import gzip, runpy, sys
+scan = runpy.run_path(sys.argv[1])['sensitive']
+prefix = b'ordinary binary prefix\0'
+# ELF64 relocation addend 0x88b1f followed by the next record's offset/info.
+incidental = bytes.fromhex('1f8b08000000000084d600000000000002000000f2c80000')
+assert not scan(prefix + incidental, 'driver.ko')
+assert scan(incidental, 'claimed.gz')
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+for level in (0, 1, 9):
+    compressed = bytearray(gzip.compress(secret, compresslevel=level))
+    compressed[8:10] = bytes((132,214))  # XFL and OS are not validation gates.
+    assert scan(prefix + incidental + compressed, 'driver.ko')
+    assert scan(prefix + compressed[:-2], 'driver.ko')
+assert scan(prefix + incidental[:12], 'driver.ko')
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn incidental_xz_magic_with_impossible_flags_is_not_an_embedded_stream() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = r#"
