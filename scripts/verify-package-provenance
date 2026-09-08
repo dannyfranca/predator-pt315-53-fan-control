@@ -856,14 +856,16 @@ def inspection_budget(blob_limit: int = MAX_SENSITIVE_BLOB) -> dict[str, object]
     }
 
 
+def package_inspection_budget() -> dict[str, object]:
+    budget = sensitive_scanner().package_inspection_budget()
+    budget["top_level_compressions"] = MAX_ARCHIVE_MEMBERS
+    return budget
+
+
 def spend_budget(
     budget: dict[str, object], field: str, amount: int, label: str
 ) -> None:
-    remaining = budget[field]
-    assert isinstance(remaining, int)
-    remaining -= amount
-    budget[field] = remaining
-    if remaining < 0:
+    if not sensitive_scanner().spend_budget(budget, field, amount):
         fail(f"{label} exceeds the bounded {field} inspection budget")
 
 
@@ -1017,6 +1019,10 @@ def scan_archive_members(
             name for name in actual_names if name.endswith(MODULE_SUFFIXES)
         }
         for member_index, entry in enumerate(entries):
+            member_budget = (
+                sensitive_scanner().package_member_budget(budget)
+                if "package_members" in budget else budget
+            )
             member = entry.name.removesuffix("/")
             if entry.pax_headers:
                 fail(f"package member {member} contains unsupported PAX metadata")
@@ -1070,7 +1076,7 @@ def scan_archive_members(
                 f"package member {member}",
                 work,
                 allowed_certificates,
-                budget=budget,
+                budget=member_budget,
                 skip_outer_compression=compressed_member,
             )
             if compressed_member:
@@ -1080,7 +1086,7 @@ def scan_archive_members(
                 extracted = work / f"scan-{package_index}-{member_index}.compressed"
                 extracted.write_bytes(content)
                 decompressed = work / f"scan-{package_index}-{member_index}.decompressed"
-                decompress_member(extracted, member, decompressed, budget)
+                decompress_member(extracted, member, decompressed, member_budget)
                 try:
                     decompressed_content = read_limited(
                         decompressed,
@@ -1098,7 +1104,7 @@ def scan_archive_members(
                         f"decompressed package member {decompressed_member}",
                         work,
                         allowed_certificates,
-                        budget=budget,
+                        budget=member_budget,
                     )
                 finally:
                     decompressed.unlink(missing_ok=True)
@@ -1142,7 +1148,10 @@ def validate_tar_envelope(
                     header,
                     "package TAR header",
                     work,
-                    budget=budget,
+                    budget=(
+                        sensitive_scanner().package_member_budget(budget)
+                        if "package_members" in budget else budget
+                    ),
                     validated_tar_header=True,
                 )
                 source.seek(entry.size, os.SEEK_CUR)
@@ -1302,7 +1311,7 @@ def package_records(
                 2 * 1024 * 1024 * 1024,
                 destination,
             )
-        package_budget = inspection_budget(2 * 1024 * 1024 * 1024)
+        package_budget = package_inspection_budget()
         module_certificates = frozenset({module_certificate_der})
         allowed_certificates_by_member = {
             member: module_certificates

@@ -84,6 +84,8 @@ MODULE_SIGNATURE_MAGIC = b"~Module signature appended~\n"
 MAX_BLOB = 512 * 1024 * 1024
 MAX_EMBEDDED_WORK = 8 * MAX_BLOB
 MAX_EMBEDDED_CANDIDATES = 4096
+MAX_PACKAGE_MEMBERS = 65_536
+MAX_PACKAGE_FILES = 16
 # Complete dependency locks can exceed 65,536 candidate probes by themselves.
 # Preserve a bounded artifact-wide allowance without skipping any token or
 # changing the cryptographic, expanded-byte, subprocess, or work limits.
@@ -913,12 +915,40 @@ def inspection_budget(*, historical: bool = False) -> dict[str, object]:
     }
 
 
+def package_inspection_budget() -> dict[str, object]:
+    """Aggregate ceiling for one direct package; never a nested member budget."""
+    budget = inspection_budget()
+    budget.update({
+        "work": 128 * MAX_BLOB,
+        "expanded": 16 * MAX_BLOB,
+        "candidates": 4 * MAX_PACKAGE_MEMBERS,
+        "base64_candidates": 16 * MAX_BASE64_CANDIDATES,
+        "openssl_probes": 4 * MAX_PACKAGE_MEMBERS,
+        "zstd_processes": MAX_PACKAGE_MEMBERS + 1,
+        "path_candidate_bytes": 16 * MAX_TOTAL_PATH_BASE64_CANDIDATE_BYTES,
+        "path_token_cache_bytes": 16 * MAX_PATH_BASE64_TOKEN_CACHE_BYTES,
+        "package_members": MAX_PACKAGE_MEMBERS,
+    })
+    return budget
+
+
+def package_member_budget(aggregate: dict[str, object]) -> dict[str, object]:
+    """Give direct siblings separate local limits while charging every parent."""
+    budget = inspection_budget()
+    budget["aggregate"] = aggregate
+    return budget
+
+
 def spend_budget(budget: dict[str, object], field: str, amount: int) -> bool:
     remaining = budget[field]
     assert isinstance(remaining, int)
     remaining -= amount
     budget[field] = remaining
-    return remaining >= 0
+    aggregate = budget.get("aggregate")
+    parent_available = (
+        spend_budget(aggregate, field, amount) if isinstance(aggregate, dict) else True
+    )
+    return remaining >= 0 and parent_available
 
 
 def embedded_compressed_children(
@@ -1807,7 +1837,8 @@ def zstd_decompress(content: bytes) -> bytes | None:
 
 
 def decompressed_children(
-    content: bytes, path: str, budget: dict[str, object]
+    content: bytes, path: str, budget: dict[str, object],
+    direct_package_inventory: bool = False,
 ) -> list[tuple[str, bytes]] | None:
     lowered = path.lower()
     try:
@@ -1930,8 +1961,10 @@ def decompressed_children(
                 return None
             with tarfile.open(fileobj=io.BytesIO(content), mode="r:") as archive:
                 entries = archive.getmembers()
-                if len(entries) > 4096 or not spend_budget(
-                    budget, "candidates", len(entries)
+                member_limit = MAX_PACKAGE_MEMBERS if direct_package_inventory else 4096
+                member_counter = "package_members" if direct_package_inventory else "candidates"
+                if len(entries) > member_limit or not spend_budget(
+                    budget, member_counter, len(entries)
                 ):
                     return None
                 seen_paths = set()
@@ -2174,8 +2207,16 @@ def sensitive(
     validated_tar_header: bool = False,
     skip_outer_compression: bool = False,
 ) -> bool:
+    package_compression = (
+        depth == 0
+        and re.fullmatch(r"[^/]+\.pkg\.tar\.zst", pathlib.PurePosixPath(path).name) is not None
+    )
     if budget is None:
-        budget = inspection_budget()
+        budget = package_inspection_budget() if package_compression else inspection_budget()
+    direct_package_inventory = (
+        direct_package_archive and depth == 1 and path.endswith(".pkg.tar")
+        and "package_members" in budget
+    )
     # Package-container bytes can repeat an approved member certificate in raw
     # or Base64-derived scans. Direct member recursion below deliberately drops
     # this context and rechecks eligibility against each member's logical path.
@@ -2197,7 +2238,7 @@ def sensitive(
         children = (
             []
             if validated_tar_header or skip_outer_compression
-            else decompressed_children(content, path, budget)
+            else decompressed_children(content, path, budget, direct_package_inventory)
         )
         if children is None:
             return True
@@ -2291,19 +2332,15 @@ def sensitive(
                 return True
     if children and depth >= 4:
         return True
-    package_compression = (
-        depth == 0
-        and re.fullmatch(r"[^/]+\.pkg\.tar\.zst", pathlib.PurePosixPath(path).name) is not None
-        and (zstd_container(content) or path.lower().endswith(".zst"))
-    )
     for child_path, child_content in children:
+        child_budget = package_member_budget(budget) if direct_package_inventory else budget
         if len(child_content) > MAX_BLOB or unsafe_path(child_path):
             return True
         if archive_container:
             encoded_names = base64_children(
                 child_path.encode("utf-8", "surrogateescape"),
                 f"{child_path}#archive-member-name",
-                budget,
+                child_budget,
             )
             if encoded_names is None:
                 return True
@@ -2312,7 +2349,7 @@ def sensitive(
                     encoded_name,
                     encoded_path,
                     depth + 1,
-                    budget,
+                    child_budget,
                     allowed_public_certificates,
                     False,
                 ):
@@ -2329,7 +2366,7 @@ def sensitive(
             child_content,
             child_path,
             depth + 1,
-            budget,
+            child_budget,
             allowed_public_certificates,
             child_certificate_location_eligible,
             child_is_direct_package_archive,
@@ -2459,6 +2496,7 @@ def scan_tree(root_argument: str, allowed_certificates: frozenset[bytes]) -> int
         raise SystemExit("check-sensitive-history: tree root must be a non-symlink directory")
 
     budget = inspection_budget()
+    package_files = 0
     files = 0
     total_size = 0
     tree_digests: dict[bytes, bytes] = {}
@@ -2563,13 +2601,20 @@ def scan_tree(root_argument: str, allowed_certificates: frozenset[bytes]) -> int
             if relative == "SHA256SUMS":
                 deferred_sha256sums = (relative, bytes(content))
                 continue
+            file_budget = budget
+            if relative.endswith(".pkg.tar.zst"):
+                package_files += 1
+                if package_files > MAX_PACKAGE_FILES:
+                    print("check-sensitive-history: package count exceeded", file=sys.stderr)
+                    return 1
+                file_budget = package_inspection_budget()
             if sensitive(
                 content,
                 relative,
-                budget=budget,
+                budget=file_budget,
                 allowed_public_certificates=allowed_certificates,
             ):
-                nested = budget.get("sensitive_path")
+                nested = file_budget.get("sensitive_path")
                 suffix = f" (inside {nested})" if isinstance(nested, str) else ""
                 print(
                     f"check-sensitive-history: sensitive tree file: {relative}{suffix}",

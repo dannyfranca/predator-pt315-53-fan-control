@@ -1151,6 +1151,70 @@ fn rejects_unsafe_historical_paths_containing_newlines() {
 }
 
 #[test]
+fn direct_package_inventory_has_bounded_per_member_inspection() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import io
+import runpy
+import subprocess
+import sys
+import tarfile
+import pathlib
+import tempfile
+m = runpy.run_path(sys.argv[1])
+def archive(rows):
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode='w', format=tarfile.USTAR_FORMAT) as tar:
+        for name, data in rows:
+            entry = tarfile.TarInfo(name)
+            entry.size = len(data)
+            tar.addfile(entry, io.BytesIO(data))
+    return out.getvalue()
+def zstd(data):
+    return subprocess.check_output(['/usr/bin/zstd', '-q', '-c'], input=data)
+inventory = archive((f'usr/include/h{i}.h', b'') for i in range(5000))
+assert m['sensitive'](inventory, 'nested.tar'), 'generic TAR bound must remain'
+package = zstd(inventory)
+assert not m['sensitive'](package, 'kernel/headers.pkg.tar.zst'), 'direct inventory rejected'
+modules = archive((f'usr/lib/modules/test/m{i}.ko.zst', zstd(b'ordinary payload')) for i in range(70))
+assert not m['sensitive'](zstd(modules), 'kernel/modules.pkg.tar.zst'), 'direct compression count'
+assert m['sensitive'](zstd(archive([('nested.tar', inventory)])), 'bad.pkg.tar.zst'), 'nested limit reset'
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+assert m['sensitive'](zstd(archive([('ordinary.h', secret)])), 'bad.pkg.tar.zst')
+aggregate = m['package_inspection_budget']()
+local = m['package_member_budget'](aggregate)
+assert local['candidates'] == m['MAX_EMBEDDED_CANDIDATES']
+assert local['openssl_probes'] == m['MAX_OPENSSL_PROBES']
+aggregate['expanded'] = 1
+assert not m['spend_budget'](local, 'expanded', 2), 'aggregate exhaustion ignored'
+aggregate = m['package_inspection_budget']()
+local = m['package_member_budget'](aggregate)
+local['candidates'] = 0
+assert not m['spend_budget'](local, 'candidates', 1), 'local exhaustion ignored'
+v = runpy.run_path(str(pathlib.Path(sys.argv[1]).with_name('verify-package-provenance')))
+with tempfile.TemporaryDirectory() as tmp:
+    work = pathlib.Path(tmp)
+    payload = work / 'package.tar'
+    rows = [(f'usr/lib/data/m{i}.zst', zstd(b'ordinary payload')) for i in range(140)]
+    payload.write_bytes(archive(rows))
+    budget = v.get('package_inspection_budget', v['inspection_budget'])()
+    retained, facts = v['scan_archive_members'](payload, [name for name, _ in rows], work, 0, {}, set(), budget)
+    assert len(facts) == 140 and not retained
+    assert budget['top_level_compressions'] == m['MAX_PACKAGE_MEMBERS'] - 140
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn equals_sign_documentation_rules_still_inspect_fragmented_payloads() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = r#"

@@ -111,6 +111,16 @@ files/directories, has no cycles, and fits 65,536 entries and 2 GiB. It omits th
 redundant `/usr/src` symlink; the canonical `/usr/lib/modules/<release>/build`
 tree remains available. Package inspection continues to reject all links.
 
+Direct package inventories allow up to 65,536 entries. Each regular member
+receives the ordinary local scanner limits, including nested archive and
+cryptographic-probe limits; every charge also consumes a package-wide budget
+(64 GiB work, 8 GiB cumulative expansion, 262,144 candidates/probes, 4,194,304
+Base64 candidates, and 65,537 Zstandard processes). Package evidence trees
+allow at most 16 package archives within their existing physical file/byte
+limits. Nested archives never receive a fresh package allowance. The separate
+provenance verifier uses the same aggregate/local budgets and permits at most
+65,536 direct compressed members, while retaining exact envelope validation.
+
 The locked make configuration uses GNU make's silent mode to avoid retaining
 tens of thousands of routine Kbuild progress records. Compiler warnings, errors,
 and failure status remain intact; the complete emitted output is retained and
