@@ -99,6 +99,7 @@ crates/fan-control-core/tests/read_only_preflight.rs
 crates/fan-control-core/tests/repository_policy_ci.rs
 crates/fan-control-core/tests/requalification.rs
 crates/fan-control-core/tests/rollback_maintenance_runbook.rs
+crates/fan-control-core/tests/root_kernel_signer.rs
 crates/fan-control-core/tests/runtime_diagnostics.rs
 crates/fan-control-core/tests/runtime_restoration_diagnostics.rs
 crates/fan-control-core/tests/safe_arming.rs
@@ -190,6 +191,7 @@ scripts/check-promotion
 scripts/check-repository-policy
 scripts/check-sensitive-history
 scripts/generate-candidate-declarations
+scripts/pt31553-sign-kernel
 scripts/redact-evidence
 scripts/verify-fake-platform-flow
 scripts/verify-package-provenance

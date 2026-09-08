@@ -81,6 +81,62 @@ No private key enters a package or retained evidence.
 The verifier places the exact parsed source-lock bytes into its private
 snapshot for retention; do not add `source-lock.toml` to the input bundle.
 
+### Root-only Secure Boot signing with sbctl
+
+Do not copy an existing root-only Secure Boot key into the build account.
+For machines using sbctl's `/var/lib/sbctl/keys/db/{db.key,db.pem}`, the optional
+`root-sbctl` mode retains that key's protection. After reviewing the helper,
+and with explicit operator approval, install it as a root-owned executable:
+
+```sh
+sudo install -D -o root -g root -m 0755 scripts/pt31553-sign-kernel \
+  /usr/local/libexec/pt31553-sign-kernel
+```
+
+This adds no Polkit rule, setuid bit, daemon, boot entry, or trust enrollment.
+Each invocation uses ordinary `pkexec` authentication. The helper accepts
+only `certificate CERT_SHA256` or `sign CERT_SHA256 IMAGE_SHA256`; it reads
+image bytes from standard input and returns verified signed bytes on standard
+output. It never accepts caller-selected file paths, executes build code as
+root, or exports private-key bytes. Its fixed key path and every ancestor must
+be root-controlled, with the key private. Image staging is root-only under
+`/run` and removed on success or failure. Signing grants trust to bootable code;
+authenticate only the reviewed candidate's signing operation.
+
+Obtain the expected DER fingerprint from the independently approved/enrolled
+identity, then export only the matching public certificate:
+
+```sh
+: "${PT31553_KERNEL_CERT_SHA256:?set the independently approved DER fingerprint}"
+: "${PT31553_KERNEL_SIGNING_DIR:?set the absolute private signing directory}"
+pkexec /usr/local/libexec/pt31553-sign-kernel certificate \
+  "$PT31553_KERNEL_CERT_SHA256" \
+  >"$PT31553_KERNEL_SIGNING_DIR/kernel-signing-certificate.pem"
+```
+
+For this mode the caller-owned signing directory must contain exactly **three**
+files: the module key, module DER certificate, and kernel PEM certificate listed
+above. A kernel private key in that directory is rejected. The executor verifies
+the installed helper's root ownership and exact reviewed source digest before
+building, snapshots these three files, and independently verifies the returned
+image signature before package publication. Use:
+
+```sh
+SOURCE_LOCK_KERNEL_SIGNER=root-sbctl \
+SOURCE_LOCK_KERNEL_CERT_SHA256="$PT31553_KERNEL_CERT_SHA256" \
+SOURCE_LOCK_SIGNING_DIR="$PT31553_KERNEL_SIGNING_DIR" \
+SOURCE_LOCK_OUTPUT="$PWD/build-output" \
+  scripts/verify-source-lock --inputs /bundle --exec-verified
+```
+
+For the canonical `scripts/build-source-candidate` command, prefix the existing
+README invocation with `SOURCE_LOCK_KERNEL_SIGNER=root-sbctl`; its mandatory
+`--kernel-cert-sha256` supplies the approved identity. Keep the operator present
+for the signing prompt after compilation. The default `file` mode remains for
+separately provisioned caller-owned signing identities. To remove this optional
+integration, remove only `/usr/local/libexec/pt31553-sign-kernel` with approval;
+do not remove or alter the sbctl key, certificate, or firmware trust.
+
 ## Offline package provenance verification
 
 Verify the resulting signed package set without network access or live

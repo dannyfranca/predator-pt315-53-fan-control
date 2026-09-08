@@ -16,6 +16,8 @@ usage: scripts/build-source-candidate \
 
 Builds and records an unqualified, disabled-only source candidate. It never
 installs packages, changes a boot default, enables a unit, or runs GitHub Actions.
+Set SOURCE_LOCK_KERNEL_SIGNER=root-sbctl to use the authenticated root-only
+helper instead of a caller-owned Secure Boot private key (see kernel README).
 EOF
     exit 64
 }
@@ -49,6 +51,12 @@ for required in bundle kernel_signing_dir package_cert package_cert_sha256 \
     cargo_home controller_gnupg_home controller_key output; do
     [[ -n "${!required}" ]] || usage
 done
+
+kernel_signer=${SOURCE_LOCK_KERNEL_SIGNER:-file}
+case "$kernel_signer" in
+    file|root-sbctl) ;;
+    *) echo "unsupported kernel signing mode" >&2; exit 2 ;;
+esac
 
 for unsafe_variable in BASH_ENV ENV OPENSSL_CONF OPENSSL_MODULES LD_PRELOAD \
     LD_LIBRARY_PATH PYTHONPATH PYTHONHOME PERL5LIB RUBYLIB NODE_OPTIONS \
@@ -179,6 +187,8 @@ signatures="$payload/signatures"
 
 /usr/bin/env -i PATH=/usr/bin HOME="$safe_home" \
 SOURCE_LOCK_SIGNING_DIR="$kernel_signing_dir" \
+SOURCE_LOCK_KERNEL_SIGNER="$kernel_signer" \
+SOURCE_LOCK_KERNEL_CERT_SHA256="$kernel_cert_sha256" \
 SOURCE_LOCK_OUTPUT="$kernel_output" \
     "$source_root/scripts/verify-source-lock" --inputs "$bundle" --exec-verified
 

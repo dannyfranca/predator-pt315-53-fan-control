@@ -1,0 +1,139 @@
+#!/usr/bin/python3 -I
+"""Authenticated sbctl image signing; no caller paths or private-key export."""
+
+import hashlib
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+
+
+CERTIFICATE = Path("/var/lib/sbctl/keys/db/db.pem")
+PRIVATE_KEY = Path("/var/lib/sbctl/keys/db/db.key")
+MAX_IMAGE = 128 * 1024 * 1024
+ENVIRONMENT = {"PATH": "/usr/bin", "LANG": "C", "LC_ALL": "C", "OPENSSL_CONF": "/dev/null"}
+
+
+class SigningError(Exception):
+    pass
+
+
+def protected_path(path, *, private=False, executable=False):
+    """All ancestors must be root-controlled; never follow a symlink."""
+    if not path.is_absolute():
+        raise SigningError("nonabsolute protected path")
+    for parent in reversed(path.parents):
+        metadata = parent.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            raise SigningError("unsafe protected path ancestor")
+    metadata = path.lstat()
+    forbidden = 0o077 if private else 0o022
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_nlink != 1
+        or metadata.st_mode & forbidden
+        or (executable and not metadata.st_mode & 0o100)
+    ):
+        raise SigningError("unsafe protected file")
+
+
+def run(command, *, input_bytes=None):
+    tool = Path(command[0])
+    if str(tool) not in ("/usr/bin/openssl", "/usr/bin/sbsign", "/usr/bin/sbverify"):
+        raise SigningError("unsupported signing tool")
+    protected_path(tool, executable=True)
+    result = subprocess.run(
+        command, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=ENVIRONMENT, cwd="/", timeout=60, check=False,
+    )
+    if result.returncode:
+        # Do not forward tool diagnostics containing protected paths or data.
+        raise SigningError(f"{tool.name} failed")
+    return result.stdout
+
+
+def certificate_bytes(expected):
+    protected_path(CERTIFICATE)
+    with CERTIFICATE.open("rb") as source:
+        pem = source.read(65537)
+    if not pem or len(pem) > 65536:
+        raise SigningError("invalid certificate size")
+    der = run(["/usr/bin/openssl", "x509", "-outform", "DER"], input_bytes=pem)
+    if hashlib.sha256(der).hexdigest() != expected:
+        raise SigningError("certificate does not match approved fingerprint")
+    run(["/usr/bin/openssl", "x509", "-checkend", "0", "-noout"], input_bytes=pem)
+    return pem
+
+
+def validate_image(image, expected):
+    if not image or len(image) > MAX_IMAGE:
+        raise SigningError("invalid image size")
+    if hashlib.sha256(image).hexdigest() != expected:
+        raise SigningError("image digest mismatch")
+    if len(image) < 64 or image[:2] != b"MZ":
+        raise SigningError("image is not PE/COFF")
+    offset = int.from_bytes(image[60:64], "little")
+    if offset < 64 or image[offset:offset + 6] != b"PE\0\0\x64\x86":
+        raise SigningError("image is not x86_64 PE/COFF")
+
+
+def sign_image(image, pem):
+    protected_path(PRIVATE_KEY, private=True)
+    if not 0 < PRIVATE_KEY.stat().st_size <= 65536:
+        raise SigningError("invalid private key size")
+    # Private key remains at its fixed root-only sbctl path. Only untrusted
+    # image bytes and the public certificate enter root-owned /run staging.
+    metadata = Path("/run").lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+        raise SigningError("unsafe signing temporary parent")
+    with tempfile.TemporaryDirectory(prefix="pt31553-sign-", dir="/run") as directory:
+        staging = Path(directory)
+        unsigned = staging / "unsigned.efi"
+        signed = staging / "signed.efi"
+        certificate = staging / "certificate.pem"
+        unsigned.write_bytes(image)
+        certificate.write_bytes(pem)
+        run(["/usr/bin/sbsign", "--key", str(PRIVATE_KEY), "--cert", str(certificate),
+             "--output", str(signed), str(unsigned)])
+        run(["/usr/bin/sbverify", "--cert", str(certificate), str(signed)])
+        with signed.open("rb") as source:
+            result = source.read(MAX_IMAGE + 65537)
+        if not result or len(result) > MAX_IMAGE + 65536:
+            raise SigningError("invalid signed image size")
+        return result
+
+
+def main(arguments):
+    if (
+        len(arguments) not in (2, 3)
+        or arguments[0] not in ("certificate", "sign")
+        or len(arguments) != (2 if arguments[0] == "certificate" else 3)
+        or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in arguments[1:])
+    ):
+        raise SigningError("usage: pt31553-sign-kernel certificate CERT_SHA256 | sign CERT_SHA256 IMAGE_SHA256")
+    if os.geteuid() != 0:
+        raise SigningError("root authentication required")
+    os.umask(0o077)
+    pem = certificate_bytes(arguments[1])
+    if arguments[0] == "certificate":
+        result = pem
+    else:
+        image = sys.stdin.buffer.read(MAX_IMAGE + 1)
+        validate_image(image, arguments[2])
+        result = sign_image(image, pem)
+    # No output is emitted until all requested checks/signing have succeeded.
+    sys.stdout.buffer.write(result)
+    sys.stdout.buffer.flush()
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except (SigningError, OSError, subprocess.TimeoutExpired) as error:
+        message = str(error) if isinstance(error, SigningError) else "protected signing operation failed"
+        print(f"pt31553-sign-kernel: {message}", file=sys.stderr)
+        sys.exit(1)

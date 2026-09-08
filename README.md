@@ -289,6 +289,13 @@ changes a boot default, enables a unit, or invokes GitHub Actions.
 Unsafe inherited shell, loader, OpenSSL, Git, language, package-build, Cargo,
 or GnuPG environment overrides are rejected before signing.
 
+For an existing root-only sbctl Secure Boot key, use the authenticated
+[`root-sbctl` signing mode](packaging/kernel/README.md#root-only-secure-boot-signing-with-sbctl).
+After the separately approved helper installation, prefix the command above
+with `SOURCE_LOCK_KERNEL_SIGNER=root-sbctl`. This mode needs only the module
+key and two public certificates in the signing directory; the Secure Boot
+private key remains root-only and is never copied into the build account.
+
 The new read-only output contains the three uniquely named kernel packages,
 the signed controller package, detached signatures, verified package
 provenance, generated compatibility declaration, and

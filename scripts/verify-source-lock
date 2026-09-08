@@ -73,7 +73,7 @@ STAGE1_PATCH_SHA256 = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9ca
 STAGE2_PATCH_SHA256 = "67b0d9fcd62451ae717e452d63f6419c02d8f4a34a82a060229cde5b3a96009d"
 STAGE1_BUILD_WRAPPER_SHA256 = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
 STAGE2_BUILD_WRAPPER_SHA256 = "5b47af002478f06de04575ba56e233959d83d855758ce13ad0a0c919675f42f7"
-PACKAGE_BUILD_WRAPPER_SHA256 = "98271e6e793cb1ed7de253aec9a069dcc9a9e494353082a4cec4b731a9669d88"
+PACKAGE_BUILD_WRAPPER_SHA256 = "a205684c0d9a3fbeda071045f9502a9a6c5c92a6a23f3abe5ab9c2708b743243"
 PACKAGE_SENSITIVE_SCANNER_SHA256 = "f6a2882a57e900c0d7b7f9efde3403dd044673da24cffe6ae26e54327f78bf1e"
 PACKAGE_SENSITIVE_SCANNER_SIZE = 100345
 STAGE1_BC_SHA256 = "b3740d2c34090685b6ffe1b6a6b4631c45edd4801dc7a2bde1049de92165b0d3"
@@ -1074,7 +1074,8 @@ def verify_patch_wrapper(wrapper: str, candidate: str) -> None:
                     'src=$module_signing,dst=/signing,ro=true': "does not isolate container-visible module signing inputs from the Secure-Boot key",
                     '/usr/bin/sbsign --key "$signing/kernel-signing-key.pem"': "does not sign the packaged kernel image during finalization",
                     '/usr/bin/sbverify --cert "$signing/kernel-signing-certificate.pem"': "does not verify the finalized kernel signature",
-                    'signing directory must contain exactly the four documented inputs': "does not reject extra signing-directory entries",
+                    'signing directory must contain exactly the documented inputs for its mode': "does not reject extra signing-directory entries",
+                    '/usr/bin/pkexec "$root_signer" sign "$kernel_certificate_sha256"': "does not authenticate root-only image signing",
                     '"/usr/bin/bsdtar" "/usr/bin/openssl" "/usr/bin/python3"': "does not pin host finalization tools",
                     '"$container_output/packages/linux-cachyos-pt31553/.MTREE"': "does not retain rebuilt signed-kernel package metadata",
                     '"$container_output/packages/linux-cachyos-pt31553/.PKGINFO"': "does not retain the finalized installed-size metadata",
@@ -1579,6 +1580,8 @@ def build_from_verified_snapshot(
             "LC_ALL",
             "SOURCE_LOCK_OUTPUT",
             "SOURCE_LOCK_SIGNING_DIR",
+            "SOURCE_LOCK_KERNEL_SIGNER",
+            "SOURCE_LOCK_KERNEL_CERT_SHA256",
             "TMPDIR",
             "XDG_RUNTIME_DIR",
         ):

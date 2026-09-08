@@ -1417,12 +1417,29 @@ fi
 
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let run_executor = |run_output: &Path, mutation: &str| {
+        let root_signing = mutation.starts_with("root-signing-");
+        let kernel_certificate_sha256 = if root_signing {
+            let certificate = Command::new("/usr/bin/openssl")
+                .args(["x509", "-outform", "DER", "-in"])
+                .arg(signing.join("kernel-signing-certificate.pem"))
+                .output()
+                .unwrap();
+            assert!(certificate.status.success());
+            format!("{:x}", Sha256::digest(&certificate.stdout))
+        } else {
+            String::new()
+        };
         Command::new("/bin/bash")
             .arg(&wrapper)
             .env("PATH", &path)
             .env("SOURCE_LOCK_BUNDLE", &bundle)
             .env("SOURCE_LOCK_OUTPUT", run_output)
             .env("SOURCE_LOCK_SIGNING_DIR", &signing)
+            .env(
+                "SOURCE_LOCK_KERNEL_SIGNER",
+                if root_signing { "root-sbctl" } else { "file" },
+            )
+            .env("SOURCE_LOCK_KERNEL_CERT_SHA256", kernel_certificate_sha256)
             .env("TEST_BIN", &bin)
             .env("TEST_BUNDLE", &bundle)
             .env("TEST_EFI_STUB", efi_stub)
@@ -1697,7 +1714,7 @@ fi
     fs::write(signing.join("unexpected.pem"), "unexpected").unwrap();
     let extra = run_executor(&extra_output, "");
     assert!(!extra.status.success());
-    assert!(failure_text(&extra).contains("exactly the four documented inputs"));
+    assert!(failure_text(&extra).contains("exactly the documented inputs for its mode"));
     assert_eq!(fs::read_dir(&extra_output).unwrap().count(), 0);
     fs::remove_file(signing.join("unexpected.pem")).unwrap();
 
@@ -1782,6 +1799,76 @@ fi
         .expect("run executor without output directory");
     assert!(!rejected.status.success());
     assert!(failure_text(&rejected).contains("must be a non-symlink directory"));
+
+    // Exercise the actual snapshot/finalization/publication path without
+    // privileged authentication or real machine keys. Only the installed
+    // helper ownership boundary is substituted here; helper tests cover it.
+    let mut root_wrapper = fs::read_to_string(&wrapper).unwrap();
+    let trust_start = root_wrapper
+        .find("        /usr/bin/python3 -I - \"$root_signer\" <<'PY'")
+        .unwrap();
+    let trust_end = trust_start + root_wrapper[trust_start..].find("\nPY\n").unwrap() + 4;
+    root_wrapper.replace_range(
+        trust_start..trust_end,
+        "        : # simulated installed root helper\n",
+    );
+    root_wrapper = root_wrapper
+        .replace(
+            "/usr/local/libexec/pt31553-sign-kernel",
+            &bin.join("root-signer").display().to_string(),
+        )
+        .replace("/usr/bin/pkexec", &bin.join("pkexec").display().to_string());
+    fs::write(&wrapper, root_wrapper).unwrap();
+    fs::rename(
+        signing.join("kernel-signing-key.pem"),
+        root.join("external-kernel-key.pem"),
+    )
+    .unwrap();
+    fs::write(bin.join("pkexec"), "#!/bin/bash\nset -eu\nexec \"$@\"\n").unwrap();
+    fs::write(
+        bin.join("root-signer"),
+        r#"#!/bin/bash
+set -euo pipefail
+[[ "$1" == sign && "$2" == "$SOURCE_LOCK_KERNEL_CERT_SHA256" ]]
+[[ ! -e "$TEST_SIGNING/kernel-signing-key.pem" ]]
+[[ "${TEST_PACKAGE_MUTATION:-}" != root-signing-denied ]] || exit 23
+sign_test_tmp=$(mktemp -d)
+trap 'rm -r -- "$sign_test_tmp"' EXIT
+cat >"$sign_test_tmp/image"
+[[ "$(sha256sum "$sign_test_tmp/image" | cut -d ' ' -f 1)" == "$3" ]]
+if [[ "${TEST_PACKAGE_MUTATION:-}" == root-signing-unsigned ]]; then
+    cat "$sign_test_tmp/image"
+else
+    /usr/bin/sbsign --key "$TEST_SIGNING/../external-kernel-key.pem" \
+        --cert "$TEST_SIGNING/kernel-signing-certificate.pem" \
+        --output "$sign_test_tmp/signed" "$sign_test_tmp/image" >/dev/null
+    cat "$sign_test_tmp/signed"
+fi
+"#,
+    )
+    .unwrap();
+    for name in ["pkexec", "root-signer"] {
+        fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for mutation in [
+        "root-signing-success",
+        "root-signing-denied",
+        "root-signing-unsigned",
+    ] {
+        let result_dir = root.join(mutation);
+        fs::create_dir(&result_dir).unwrap();
+        let result = run_executor(&result_dir, mutation);
+        assert_eq!(
+            result.status.success(),
+            mutation == "root-signing-success",
+            "{mutation}: {}",
+            failure_text(&result)
+        );
+        assert_eq!(
+            result_dir.join("SHA256SUMS").exists(),
+            mutation == "root-signing-success"
+        );
+    }
 
     fs::remove_dir_all(&root).expect("remove actual executor fixture");
 }

@@ -306,6 +306,11 @@ printf '%s\n' "${signing_recipe[@]}" >>"$package_root/PKGBUILD"
 
 if (( $# == 0 )); then
     : "${SOURCE_LOCK_SIGNING_DIR:?set SOURCE_LOCK_SIGNING_DIR to the external signing directory}"
+    kernel_signer=${SOURCE_LOCK_KERNEL_SIGNER:-file}
+    case "$kernel_signer" in
+        file|root-sbctl) ;;
+        *) echo "unsupported kernel signing mode" >&2; exit 2 ;;
+    esac
     trusted_tools=(
         "/usr/bin/bsdtar" "/usr/bin/openssl" "/usr/bin/python3"
         "/usr/bin/sbsign" "/usr/bin/sbverify" "/usr/bin/zstd"
@@ -329,7 +334,7 @@ if (( $# == 0 )); then
     }
     signing="$work_root/signing-snapshot"
     mkdir -m 0700 "$signing"
-    /usr/bin/python3 -I - "$signing_source" "$signing" <<'PY'
+    /usr/bin/python3 -I - "$signing_source" "$signing" "$kernel_signer" <<'PY'
 import os
 import pathlib
 import stat
@@ -343,13 +348,15 @@ expected = {
     "module-signing-certificate.der": (0o444, False),
     "module-signing-key.pem": (0o400, True),
 }
+if sys.argv[3] == "root-sbctl":
+    del expected["kernel-signing-key.pem"]
 source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 try:
     directory = os.fstat(source_fd)
     if directory.st_uid != os.geteuid() or directory.st_mode & 0o077:
         raise SystemExit("signing directory must be owned by the caller and mode 0700")
     if set(os.listdir(source_fd)) != set(expected):
-        raise SystemExit("signing directory must contain exactly the four documented inputs")
+        raise SystemExit("signing directory must contain exactly the documented inputs for its mode")
     for name, (destination_mode, private) in expected.items():
         source_file = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_fd)
         try:
@@ -425,16 +432,46 @@ PY
         echo "module signing key does not match its certificate" >&2
         exit 2
     }
-    kernel_key_public=$(/usr/bin/openssl pkey -in "$signing/kernel-signing-key.pem" \
-        -pubout -outform DER | /usr/bin/sha256sum | /usr/bin/cut -d ' ' -f 1)
-    kernel_cert_public=$(/usr/bin/openssl x509 \
-        -in "$signing/kernel-signing-certificate.pem" -pubkey -noout | \
-        /usr/bin/openssl pkey -pubin -outform DER | /usr/bin/sha256sum | \
-        /usr/bin/cut -d ' ' -f 1)
-    [[ "$kernel_key_public" == "$kernel_cert_public" ]] || {
-        echo "kernel signing key does not match its certificate" >&2
-        exit 2
-    }
+    if [[ "$kernel_signer" == file ]]; then
+        kernel_key_public=$(/usr/bin/openssl pkey -in "$signing/kernel-signing-key.pem" \
+            -pubout -outform DER | /usr/bin/sha256sum | /usr/bin/cut -d ' ' -f 1)
+        kernel_cert_public=$(/usr/bin/openssl x509 \
+            -in "$signing/kernel-signing-certificate.pem" -pubkey -noout | \
+            /usr/bin/openssl pkey -pubin -outform DER | /usr/bin/sha256sum | \
+            /usr/bin/cut -d ' ' -f 1)
+        [[ "$kernel_key_public" == "$kernel_cert_public" ]] || {
+            echo "kernel signing key does not match its certificate" >&2
+            exit 2
+        }
+    else
+        : "${SOURCE_LOCK_KERNEL_CERT_SHA256:?set the independently approved kernel certificate SHA256}"
+        [[ "$SOURCE_LOCK_KERNEL_CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+        kernel_certificate_sha256=$(/usr/bin/openssl x509 \
+            -in "$signing/kernel-signing-certificate.pem" -outform DER | \
+            /usr/bin/sha256sum | /usr/bin/cut -d ' ' -f 1)
+        [[ "$kernel_certificate_sha256" == "$SOURCE_LOCK_KERNEL_CERT_SHA256" ]] || {
+            echo "kernel certificate does not match approved fingerprint" >&2
+            exit 2
+        }
+        root_signer=/usr/local/libexec/pt31553-sign-kernel
+        /usr/bin/python3 -I - "$root_signer" <<'PY'
+import hashlib
+import pathlib
+import stat
+import sys
+
+helper = pathlib.Path(sys.argv[1])
+for path in (*reversed(helper.parents), helper, pathlib.Path("/usr/bin/pkexec")):
+    metadata = path.lstat()
+    expected_kind = stat.S_ISREG if path in (helper, pathlib.Path("/usr/bin/pkexec")) else stat.S_ISDIR
+    if not expected_kind(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+        raise SystemExit("unsafe root signing helper or authentication path")
+    if path == helper and (metadata.st_nlink != 1 or not metadata.st_mode & 0o100):
+        raise SystemExit("unsafe root signing helper")
+if hashlib.sha256(helper.read_bytes()).hexdigest() != "e36bd85a69ebfb4b88c160d4284d6e355b5bbd89804d015f75444bd789b6468f":
+    raise SystemExit("installed root signing helper does not match reviewed source")
+PY
+    fi
     module_signing="$work_root/module-signing"
     mkdir -m 0700 "$module_signing"
     install -m 0400 "$signing/module-signing-key.pem" \
@@ -496,9 +533,15 @@ if (( $# == 0 )); then
     done
     unsigned_image_size=$(stat -c %s "$kernel_image")
     signed_image="$work_root/signed-vmlinuz"
-    /usr/bin/sbsign --key "$signing/kernel-signing-key.pem" \
-        --cert "$signing/kernel-signing-certificate.pem" \
-        --output "$signed_image" "$kernel_image"
+    if [[ "$kernel_signer" == root-sbctl ]]; then
+        kernel_image_sha256=$(/usr/bin/sha256sum "$kernel_image" | /usr/bin/cut -d ' ' -f 1)
+        /usr/bin/pkexec "$root_signer" sign "$kernel_certificate_sha256" \
+            "$kernel_image_sha256" <"$kernel_image" >"$signed_image"
+    else
+        /usr/bin/sbsign --key "$signing/kernel-signing-key.pem" \
+            --cert "$signing/kernel-signing-certificate.pem" \
+            --output "$signed_image" "$kernel_image"
+    fi
     /usr/bin/sbverify --cert "$signing/kernel-signing-certificate.pem" \
         "$signed_image" >/dev/null
     install -m 0644 "$signed_image" "$kernel_image"
