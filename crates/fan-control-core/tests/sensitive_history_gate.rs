@@ -616,6 +616,37 @@ fn output_tree_allows_public_certificates_only_at_documented_artifact_paths() {
 }
 
 #[test]
+fn asn1_key_oids_must_belong_to_structural_algorithm_fields() {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .to_path_buf();
+    let source = r#"
+import runpy, sys
+m = runpy.run_path(sys.argv[1])
+scan = m['sensitive_asn1_candidates']
+scan.__globals__['MAX_ASN1_CANDIDATE_BYTES'] = 64
+oid = bytes.fromhex('06032b656e')
+payload = b'x' * 50 + oid + b'x' * 71
+decoy = b'\x30\x81\x80\x04\x7e' + payload
+assert scan(decoy) == [], 'opaque data became an oversized key candidate'
+key = bytes.fromhex('302e020100300506032b656e04220420') + b'\x01' * 32
+assert key in scan(decoy + key), 'decoy hid the separately framed private key'
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn output_tree_normalizes_mtree_digests_without_skipping_encoded_secrets() {
     let root = temporary_fixture("mtree-sensitive-scanning");
     let mut mtree = format!(
@@ -3438,6 +3469,7 @@ fn cpio_newc(name: &str, content: &[u8]) -> Vec<u8> {
 
 fn overlapping_ber_sequences() -> Vec<u8> {
     let mut content = vec![0_u8; 1024 * 1024];
+    let rsa_oid = b"\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01";
     for offset in (0..640 * 1024).step_by(4096) {
         let length = content.len() - offset - 5;
         content[offset] = 0x30;
@@ -3445,10 +3477,10 @@ fn overlapping_ber_sequences() -> Vec<u8> {
         content[offset + 2] = ((length >> 16) & 0xff) as u8;
         content[offset + 3] = ((length >> 8) & 0xff) as u8;
         content[offset + 4] = (length & 0xff) as u8;
+        // Each overlapping candidate must have a structural algorithm OID,
+        // not merely an unrelated OID buried in opaque trailing bytes.
+        content[offset + 5..offset + 5 + rsa_oid.len()].copy_from_slice(rsa_oid);
     }
-    let rsa_oid = b"\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01";
-    let oid_offset = content.len() - rsa_oid.len();
-    content[oid_offset..].copy_from_slice(rsa_oid);
     content
 }
 

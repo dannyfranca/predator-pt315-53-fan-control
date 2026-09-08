@@ -840,10 +840,23 @@ def sensitive_asn1_candidates(content: bytes) -> list[bytes]:
             and signature[0] == 0x03
             and signature[3] == parsed[2]
         )
+        # An OID in arbitrary opaque data does not make its surrounding bytes
+        # a key. Inspect AlgorithmIdentifier fields, while the outer byte walk
+        # still finds separately framed keys nested anywhere in the input.
+        oid_fields = []
+        if tbs is not None:
+            if tbs[0] == 0x06:
+                oid_fields.append(parsed[1])
+            elif tbs[0] == 0x30:
+                oid_fields.append(tbs[1])
+            elif tbs[0] == 0x02:
+                key_algorithm = ber_tlv(content, tbs[3])
+                if key_algorithm is not None and key_algorithm[0] == 0x30:
+                    oid_fields.append(key_algorithm[1])
         if (
             certificate_shape
             or any(prefix in content[offset : min(parsed[3], offset + 24)] for prefix in private_prefixes)
-            or any(content.find(oid, offset, parsed[3]) >= 0 for oid in key_oids)
+            or any(content.startswith(oid, field) for field in oid_fields for oid in key_oids)
         ):
             candidate_bytes += parsed[3] - offset
             if candidate_bytes > MAX_ASN1_CANDIDATE_BYTES:
