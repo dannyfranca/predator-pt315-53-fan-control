@@ -1157,6 +1157,33 @@ fn rejects_unsafe_historical_paths_containing_newlines() {
 }
 
 #[test]
+fn large_structured_columns_keep_encoded_payload_inspection() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import base64
+import runpy
+import sys
+m = runpy.run_path(sys.argv[1])
+content = b''.join(b'--cfg=CONFIG_DRIVER_%05d="y"\n' % i for i in range(5000))
+assert not m['sensitive'](content, 'generated-config'), 'generated column exceeds small archive count'
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+encoded = base64.b64encode(secret)
+for prefix in range(4):
+    assert m['sensitive'](content + b'field: ' + b'A' * prefix + encoded + b'\n', 'generated-config'), prefix
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn direct_package_inventory_has_bounded_per_member_inspection() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = r#"

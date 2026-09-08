@@ -120,6 +120,10 @@ allow at most 16 package archives within their existing physical file/byte
 limits. Nested archives never receive a fresh package allowance. The separate
 provenance verifier uses the same aggregate/local budgets and permits at most
 65,536 direct compressed members, while retaining exact envelope validation.
+Generated symbol/configuration columns allow at most 1,048,576 structured
+fields or independently padded fragments, within the existing 16 MiB token,
+work, candidate, and expansion bounds. Ambiguous unstructured wraps retain
+their 4,096-fragment limit; every structured column is still decoded.
 
 The locked make configuration uses GNU make's silent mode to avoid retaining
 tens of thousands of routine Kbuild progress records. Compiler warnings, errors,

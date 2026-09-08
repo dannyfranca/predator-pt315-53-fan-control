@@ -95,7 +95,7 @@ MAX_BASE64_CANDIDATES = 262_144
 # separately; all other byte/work/probe limits and the history deadline apply.
 MAX_HISTORY_BASE64_CANDIDATES = 1_048_576
 MAX_OPENSSL_PROBES = 256
-MAX_STRUCTURED_FIELDS = 131_072
+MAX_STRUCTURED_FIELDS = 1_048_576
 MAX_EMBEDDED_ZSTD_PROCESSES = 64
 MAX_BASE64_TOKEN = 16 * 1024 * 1024
 MAX_ASN1_CANDIDATE_BYTES = 64 * 1024 * 1024
@@ -1240,7 +1240,7 @@ def base64_children(
         fragment_count = 0
         for match in re.finditer(rb"[A-Za-z0-9+/]+", raw):
             fragment_count += 1
-            if fragment_count > MAX_EMBEDDED_CANDIDATES:
+            if fragment_count > MAX_STRUCTURED_FIELDS:
                 return False
             fragment = match.group()
             if len(fragment) % 4 == 1:
@@ -1360,7 +1360,8 @@ def base64_children(
         reject_ambiguous: bool = True,
     ) -> bool:
         if run_size >= 64:
-            if len(run) > MAX_EMBEDDED_CANDIDATES:
+            run_limit = MAX_EMBEDDED_CANDIDATES if reject_ambiguous else MAX_STRUCTURED_FIELDS
+            if len(run) > run_limit:
                 return False
             path_rows = [part.split(b"/") for part in run]
             for part in run:
@@ -1687,7 +1688,8 @@ def base64_children(
             run.append(compact)
             run_size += len(compact)
             run_has_fields |= b" " in stripped or b"\t" in stripped
-            if len(run) > MAX_EMBEDDED_CANDIDATES or run_size > MAX_BASE64_TOKEN:
+            run_limit = MAX_STRUCTURED_FIELDS if run_has_fields else MAX_EMBEDDED_CANDIDATES
+            if len(run) > run_limit or run_size > MAX_BASE64_TOKEN:
                 return None
             continue
         if not flush_run():
