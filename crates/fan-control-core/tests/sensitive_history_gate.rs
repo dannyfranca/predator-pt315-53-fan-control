@@ -1151,6 +1151,33 @@ fn rejects_unsafe_historical_paths_containing_newlines() {
 }
 
 #[test]
+fn equals_sign_documentation_rules_still_inspect_fragmented_payloads() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import base64
+import runpy
+import sys
+scan = runpy.run_path(sys.argv[1])['sensitive']
+rule = b' * +' + b'=' * 12 + b'+' + b'=' * 24 + b'+' + b'=' * 24 + b'+\n'
+assert not scan(rule, 'header.h'), 'comment decoration is not encoded key material'
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+for width in (8, 17, 32):
+    fragments = [base64.b64encode(secret[i:i+width]) for i in range(0, len(secret), width)]
+    assert scan(rule + b''.join(fragments) + b'\n', 'header.h'), width
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn structured_base64_scanning_does_not_materialize_every_decoded_suffix() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = r#"

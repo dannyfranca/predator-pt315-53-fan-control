@@ -1236,7 +1236,13 @@ def base64_children(
         content,
     ):
         token = memoryview(content)[match.start() : match.end()]
-        if re.search(rb"=+[A-Za-z0-9+/]", token) or not append_aligned_tokens(token):
+        # ASCII table rules contain padding punctuation but no alphanumeric
+        # payload. Still inspect their decoded alignments; preserve fail-closed
+        # handling for ambiguous internally padded payloads containing data.
+        if (
+            re.search(rb"=+[A-Za-z0-9+/]", token)
+            and re.search(rb"[A-Za-z0-9]", token)
+        ) or not append_aligned_tokens(token):
             return None
 
     def append_run_candidates(run: list[bytes]) -> bool:
