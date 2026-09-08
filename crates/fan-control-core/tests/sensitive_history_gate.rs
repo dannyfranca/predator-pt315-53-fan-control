@@ -392,9 +392,9 @@ loader = importlib.machinery.SourceFileLoader("history_scanner", sys.argv[1])
 spec = importlib.util.spec_from_loader("history_scanner", loader)
 module = importlib.util.module_from_spec(spec)
 loader.exec_module(module)
-# A structural hash whose decoded bytes claim supported gzip (method 8),
+# A structural hash whose decoded bytes claim supported gzip (method 8, flags 0),
 # but contain a corrupt stream. It must remain rejected outside headers.
-tree = bytes((99, 53, 56, 54, 49, 102, 56, 98, 48, 56, 54, 57, 53, 49, 52, 57, 48, 99, 54, 50, 52, 102, 54, 99, 48, 49, 57, 98, 100, 102, 55, 100, 52, 53, 50, 102, 54, 56, 51, 50))
+tree = bytes((99, 53, 56, 54, 49, 102, 56, 98, 48, 56, 48, 48, 53, 49, 52, 57, 48, 99, 54, 50, 52, 102, 54, 99, 48, 49, 57, 98, 100, 102, 55, 100, 52, 53, 50, 102, 54, 56, 51, 50))
 parent = bytes((100, 102, 99, 56, 51, 49, 50, 101, 100, 100, 52, 51, 53, 50, 97, 101, 49, 51, 48, 102, 51, 48, 98, 101, 51, 101, 100, 54, 52, 48, 49, 97, 54, 98, 53, 99, 97, 97, 101, 57))
 header = b"tree " + tree + b"\nparent " + parent + b"\n\nsafe\n"
 message = b"tree " + b"0" * 40 + b"\nparent " + b"0" * 40 + b"\n\n" + tree + b"\n" + parent + b"\n"
@@ -767,16 +767,43 @@ fn output_tree_base64_candidate_budget_accepts_provenance_workloads_but_remains_
     fs::remove_dir_all(accepted).unwrap();
 
     let exhausted = temporary_fixture("base64-candidate-exhaustion");
-    for index in 0..11 {
+    for index in 0..2 {
         fs::write(
             exhausted.join(format!("source-lock-{index}.toml")),
             &source_lock,
         )
         .unwrap();
     }
+    // Exercise the actual tree gate with an exhausted budget. A fixed number
+    // of duplicate source locks is not a stable measure of candidate work
+    // after redundant decoding is removed.
+    let source = r#"
+import runpy
+import sys
+m = runpy.run_path(sys.argv[1])
+budget = m['inspection_budget']()
+limit = budget['base64_candidates']
+assert limit == 262144
+assert m['spend_budget'](budget, 'base64_candidates', limit)
+assert not m['spend_budget'](budget, 'base64_candidates', 1)
+original = m['inspection_budget']
+def exhausted_budget():
+    result = original()
+    result['base64_candidates'] = 0
+    return result
+m['scan_tree'].__globals__['inspection_budget'] = exhausted_budget
+assert m['scan_tree'](sys.argv[2], frozenset()) == 1
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .arg(&exhausted)
+        .output()
+        .unwrap();
     assert!(
-        !tree_gate(&exhausted, &[]).status.success(),
-        "accepted a tree beyond the Base64 candidate bound"
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
     fs::remove_dir_all(exhausted).unwrap();
 }
@@ -1121,6 +1148,37 @@ fn rejects_unsafe_historical_paths_containing_newlines() {
         String::from_utf8_lossy(&output.stderr)
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn structured_base64_scanning_does_not_materialize_every_decoded_suffix() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import base64
+import runpy
+import sys
+m = runpy.run_path(sys.argv[1])
+content = b''.join(b'path = include/linux/header%04d.h\n' % i for i in range(800))
+budget = m['inspection_budget']()
+children = m['base64_children'](content, 'dependencies.cmd', budget)
+assert children is not None, 'ordinary dependency inventory exhausted expansion'
+assert m['MAX_BLOB'] - budget['expanded'] < 8*1024*1024, 'quadratic decoded suffix residency'
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+encoded = base64.b64encode(secret)
+for offset in range(4):
+    wrapped = b'field = ' + b'A' * offset + encoded + b'\n'
+    assert m['sensitive'](content + wrapped, 'dependencies.cmd'), offset
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

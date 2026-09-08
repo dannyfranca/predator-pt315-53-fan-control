@@ -42,10 +42,10 @@ CERTIFICATE = re.compile(
     + rb"IFICATE-----\r?$"
 )
 PRIVATE_PEM_HEADER = re.compile(
-    rb"(?m)^[ \t]*-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[ \t]*\r?$"
+    rb"(?m)-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[ \t]*\r?$"
 )
 PGP_PRIVATE_HEADER = re.compile(
-    rb"(?m)^[ \t]*-----BEGIN PGP PRIVATE KEY BLOCK-----[ \t]*\r?$"
+    rb"(?m)-----BEGIN PGP PRIVATE KEY BLOCK-----[ \t]*\r?$"
 )
 AGE_SECRET_KEY = re.compile(
     rb"(?i)(?<![a-z0-9-])AGE-SECRET-KEY-1[0-9a-z]{16,}(?![a-z0-9])"
@@ -1244,12 +1244,10 @@ def base64_children(
         if not append_fragmented_token(compacted):
             return False
         normalized = normalize_token(compacted)
-        offset = 0
-        for part in run:
-            if not append_aligned_normalized(memoryview(normalized)[offset:]):
-                return False
-            offset += sum(byte != 0x3D for byte in part)
-        return True
+        # All four starting alignments already contain every decoded suffix.
+        # Recursive sensitive inspection searches all byte offsets, so copying
+        # each line suffix adds quadratic residency without new coverage.
+        return append_aligned_normalized(normalized)
 
     def inspect_large_ordered_run(run: list[bytes], run_size: int) -> bool:
         compacted = b"".join(run)
