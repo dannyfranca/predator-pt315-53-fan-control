@@ -1443,6 +1443,32 @@ assert scan(prefix + gzip.compress(secret), 'host-tool')
 }
 
 #[test]
+fn module_description_assignment_is_not_ambiguous_base64_padding() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import base64, runpy, sys
+scan = runpy.run_path(sys.argv[1])['sensitive']
+description = b'description=DA9211/DA9212/DA9213/DA9223/DA9214/DA9224/DA9215/DA9225'
+assert not scan(b'\x7fELF\0' + description + b'\0', 'driver.ko')
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+for offset in range(4):
+    assert scan(b'\0description=' + b'A' * offset + base64.b64encode(secret) + b'\0', 'driver.ko')
+encoded = base64.b64encode(secret)
+assert scan(encoded[:16] + b'=' + encoded[16:], 'fragmented.txt')
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn incidental_gzip_stored_block_must_have_complementary_lengths() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = r#"

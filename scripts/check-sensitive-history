@@ -1347,12 +1347,21 @@ def base64_children(
         content,
     ):
         token = memoryview(content)[match.start() : match.end()]
+        assignment = re.fullmatch(
+            rb"[A-Za-z_][A-Za-z0-9_]{0,63}=([A-Za-z0-9+/]+={0,2})", token
+        )
+        # A metadata assignment is not internal Base64 padding. Inspect its
+        # value independently and retain normalized/fragmented interpretations
+        # of the entire token, including keys disguised as assignment names.
+        if assignment and not append_aligned_tokens(assignment.group(1)):
+            return None
         # ASCII table rules contain padding punctuation but no alphanumeric
         # payload. Still inspect their decoded alignments; preserve fail-closed
         # handling for ambiguous internally padded payloads containing data.
         if (
             re.search(rb"=+[A-Za-z0-9+/]", token)
             and re.search(rb"[A-Za-z0-9]", token)
+            and not assignment
         ) or not append_aligned_tokens(token):
             return None
 
