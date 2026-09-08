@@ -122,7 +122,7 @@ assert not scan(bytes(range(256)))
 assert seen == sorted(expected), seen
 scan.__globals__['openpgp_packet'] = packet
 # A minimal v4 RSA secret-key body, with public and secret MPIs plus checksum.
-body = bytes([4, 0, 0, 0, 0, 1, 0, 8, 128, 0, 2, 3, 0, 0, 8, 128, 0, 0])
+body = bytes([4, 0, 0, 0, 0, 1, 0, 8, 129, 0, 2, 3, 0, 0, 8, 128, 0, 0])
 for tag in (5, 7):
     packets = [bytes([192 | tag, len(body)]) + body,
                bytes([192 | tag, 255]) + len(body).to_bytes(4, 'big') + body]
@@ -133,6 +133,42 @@ for tag in (5, 7):
         assert scan(b'ordinary prefix\n' + encoded), (tag, encoded[:6])
         assert not scan(encoded[:-3]), (tag, 'truncated')
 assert not scan(bytes([198, len(body)]) + body)  # Public-key tag, same body.
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn openpgp_key_detection_validates_public_material_before_secret_fields() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import runpy
+import sys
+scan = runpy.run_path(sys.argv[1])['contains_openpgp_secret_key']
+def mpi(value):
+    return value.bit_length().to_bytes(2, 'big') + value.to_bytes((value.bit_length()+7)//8, 'big')
+def packet(version, material, length=None):
+    body = bytes([version,0,0,0,0,1])
+    if version in (5,6):
+        body += (len(material) if length is None else length).to_bytes(4,'big')
+    body += material + bytes([0]) + mpi(11) + bytes(2)
+    return bytes([197, len(body)]) + body
+for version in (4,5,6):
+    assert scan(packet(version, mpi(143) + mpi(7))), version
+    for modulus, exponent in ((142,7), (143,6), (143,1), (143,145)):
+        assert not scan(packet(version, mpi(modulus) + mpi(exponent))), (version,modulus,exponent)
+for version in (5,6):
+    for length in (1, 5, 7):
+        assert not scan(packet(version, mpi(143) + mpi(7), length)), (version,length)
+    assert not scan(packet(version, b'arbitrary public field')), version
 "#;
     let output = Command::new("python3")
         .args(["-I", "-c", source])

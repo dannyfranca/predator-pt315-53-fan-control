@@ -416,20 +416,35 @@ def openpgp_public_material_end(
 ) -> int | None:
     algorithm_offset = body + (7 if version in (2, 3) else 5)
     cursor = algorithm_offset + 1
+    declared_end = None
     if version in (5, 6):
         if cursor + 4 > end:
             return None
         material_length = int.from_bytes(content[cursor : cursor + 4], "big")
         cursor += 4
-        material_end = cursor + material_length
-        return material_end if material_length > 0 and material_end < end else None
+        declared_end = cursor + material_length
+        if material_length == 0 or declared_end >= end:
+            return None
+        # RFC 9580 section 5.5.2.3: the count bounds algorithm-specific
+        # material; it does not replace parsing that material.
+        end = declared_end
     mpi_counts = {1: 2, 2: 2, 3: 2, 16: 3, 17: 4}
     if algorithm in mpi_counts:
+        values = []
         for _ in range(mpi_counts[algorithm]):
-            cursor = openpgp_mpi_end(content, cursor, end)
-            if cursor is None:
+            next_cursor = openpgp_mpi_end(content, cursor, end)
+            if next_cursor is None:
                 return None
-        return cursor
+            values.append(int.from_bytes(content[cursor + 2 : next_cursor], "big"))
+            cursor = next_cursor
+        if algorithm in (1, 2, 3):
+            modulus, exponent = values
+            # RFC 8017 section 3.1: an RSA modulus is odd, and the public
+            # exponent is odd and lies in [3, n). Machine instructions can
+            # resemble MPI envelopes without being RSA public material.
+            if not (modulus & 1 and exponent & 1 and 3 <= exponent < modulus):
+                return None
+        return cursor if declared_end is None or cursor == declared_end else None
     if algorithm in (18, 19, 22):
         if cursor >= end or content[cursor] == 0 or cursor + 1 + content[cursor] > end:
             return None
@@ -441,7 +456,11 @@ def openpgp_public_material_end(
             if cursor >= end or content[cursor] < 3 or cursor + 1 + content[cursor] > end:
                 return None
             cursor += 1 + content[cursor]
-        return cursor
+        return cursor if declared_end is None or cursor == declared_end else None
+    fixed_lengths = {25: 32, 26: 56, 27: 32, 28: 57}
+    if algorithm in fixed_lengths and version == 6:
+        cursor += fixed_lengths[algorithm]
+        return cursor if cursor == declared_end else None
     return None
 
 
