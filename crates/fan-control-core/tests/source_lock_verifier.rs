@@ -1037,8 +1037,13 @@ fn external_module_signer_never_enters_kernel_key_generation() {
     .unwrap();
     // The pinned kernel reserves this exact default path for its GENKEY rule.
     fs::write(
+        root.join("auto.conf"),
+        "CONFIG_MODULE_SIG_KEY=certs/signing_key.pem\n",
+    )
+    .unwrap();
+    fs::write(
         root.join("Makefile"),
-        "ifeq ($(CONFIG_MODULE_SIG_KEY),certs/signing_key.pem)\ncerts/signing_key.pem: FORCE\n\t@echo 'unexpected kernel key generation' >&2; exit 1\nendif\n.PHONY: FORCE\nFORCE:\n",
+        "include auto.conf\n.PHONY: syncconfig FORCE\nsyncconfig:\n\tsed 's/\"//g' .config > auto.conf\nifeq ($(CONFIG_MODULE_SIG_KEY),certs/signing_key.pem)\ncerts/signing_key.pem: FORCE\n\t@echo 'unexpected kernel key generation' >&2; exit 1\nendif\ncerts/signing_key.x509: $(CONFIG_MODULE_SIG_KEY) FORCE\n\topenssl x509 -in $(CONFIG_MODULE_SIG_KEY) -outform DER -out $@\nFORCE:\n",
     )
     .unwrap();
     let wrapper =
@@ -1055,15 +1060,14 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=module-key-test \
 openssl x509 -in signing/certificate.pem -outform DER -out signing/module-signing-certificate.der
 source <(sed -n '/^signing_recipe=(/,/^)/p' "$1")
 pkgbase=linux-cachyos-pt31553
+BUILD_FLAGS=()
 prepare() { :; }
 package_linux-cachyos-pt31553-headers() { :; }
 eval "$(printf '%s\n' "${signing_recipe[@]}")"
 prepare
 key_path=$(sed -n 's/^CONFIG_MODULE_SIG_KEY="\(.*\)"$/\1/p' .config)
-make "CONFIG_MODULE_SIG_KEY=$key_path" "$key_path"
+make certs/signing_key.x509
 [[ "$(stat -c %a "$key_path")" == 400 ]]
-openssl x509 -in "$key_path" -outform DER -out certs/extracted.der
-cmp signing/module-signing-certificate.der certs/extracted.der
 cmp signing/module-signing-certificate.der certs/signing_key.x509
 openssl pkey -in "$key_path" -pubout -out certs/key-public.pem
 openssl x509 -in "$key_path" -pubkey -noout >certs/certificate-public.pem
@@ -1170,6 +1174,11 @@ fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
     fs::write(
         kernel_root.join(".config"),
         "CONFIG_MODULE_SIG_KEY=\"certs/signing_key.pem\"\n",
+    )
+    .unwrap();
+    fs::write(
+        kernel_root.join("Makefile"),
+        ".PHONY: syncconfig\nsyncconfig:\n\tmkdir -p include/config\n\tsed 's/\"//g' .config > include/config/auto.conf\n",
     )
     .unwrap();
     fs::write(
@@ -1453,7 +1462,10 @@ declare -p source | grep -Fq '0002-acer-wmi-enable-pt31553-pwm.patch'
 if [[ "${TEST_PACKAGE_MUTATION:-}" == probe-kernel-key ]]; then
     [[ ! -e "$SOURCE_LOCK_INSIDE_SIGNING_DIR/kernel-signing-key.pem" ]]
 fi
-[[ -n "${TEST_PACKAGE_MUTATION:-}" ]] || prepare
+if [[ -z "${TEST_PACKAGE_MUTATION:-}" ]]; then
+    prepare
+    openssl x509 -in certs/pt31553-signing-key.pem -outform DER -out certs/signing_key.x509
+fi
 create_package() {
     local package_name=$1 archive=$2 include_kernel=${3:-no}
     local stage

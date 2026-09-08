@@ -328,7 +328,7 @@ signing_recipe=(
     '    install -Dm0600 "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-key.pem" "certs/pt31553-signing-key.pem"'
     '    openssl x509 -inform DER -in "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der" >>"certs/pt31553-signing-key.pem"'
     '    chmod 0400 "certs/pt31553-signing-key.pem"'
-    '    install -Dm0444 "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der" "certs/signing_key.x509"'
+    '    make "${BUILD_FLAGS[@]}" syncconfig'
     '}'
     'eval "$(declare -f "package_$pkgbase-headers" | sed "1s/^package_${pkgbase}-headers /_source_lock_package_headers /")"'
     'eval "package_$pkgbase-headers() { _source_lock_package_headers; install -Dm0444 \"\$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der\" \"\$pkgdir/usr/lib/modules/\$(<version)/build/certs/signing_key.x509\"; }"'

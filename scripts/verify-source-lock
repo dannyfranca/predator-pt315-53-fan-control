@@ -74,7 +74,7 @@ STAGE1_PATCH_SHA256 = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9ca
 STAGE2_PATCH_SHA256 = "67b0d9fcd62451ae717e452d63f6419c02d8f4a34a82a060229cde5b3a96009d"
 STAGE1_BUILD_WRAPPER_SHA256 = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
 STAGE2_BUILD_WRAPPER_SHA256 = "5b47af002478f06de04575ba56e233959d83d855758ce13ad0a0c919675f42f7"
-PACKAGE_BUILD_WRAPPER_SHA256 = "2055b6d888cdc7bc8f88bf99947fabd673fb603a50d48d8bb8329d962413f3bc"
+PACKAGE_BUILD_WRAPPER_SHA256 = "ed58104074562a43f030e63d8187974b20e514e1e7646f68bda7727aaa3033fd"
 PACKAGE_SENSITIVE_SCANNER_SHA256 = "945aabcc1bac1273f8ff33b65b2b431cee0ffaa14d7f258f0fb9df383d90b7be"
 PACKAGE_SENSITIVE_SCANNER_SIZE = 100810
 PACKAGE_BUILD_DEPENDENCIES_SHA256 = "8eeea0c4de0ff046f32edba1572a47b9cd61ff7c9fd20cf7799ff1bd07cbd384"
@@ -1086,7 +1086,7 @@ def verify_patch_wrapper(wrapper: str, candidate: str) -> None:
                     'install -Dm0600 "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-key.pem" "certs/pt31553-signing-key.pem"': "does not hand the external module key to the disposable kernel build",
                     'openssl x509 -inform DER -in "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der" >>"certs/pt31553-signing-key.pem"': "does not bind the external module certificate to the key bundle",
                     'chmod 0400 "certs/pt31553-signing-key.pem"': "does not protect the external module key bundle",
-                    'install -Dm0444 "$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der" "certs/signing_key.x509"': "does not hand the external module certificate to the disposable kernel build",
+                    'make "${BUILD_FLAGS[@]}" syncconfig': "does not synchronize generated module-key configuration before timestamp normalization",
                     'src=$module_signing,dst=/signing,ro=true': "does not isolate container-visible module signing inputs from the Secure-Boot key",
                     '/usr/bin/sbsign --key "$signing/kernel-signing-key.pem"': "does not sign the packaged kernel image during finalization",
                     '/usr/bin/sbverify --cert "$signing/kernel-signing-certificate.pem"': "does not verify the finalized kernel signature",
