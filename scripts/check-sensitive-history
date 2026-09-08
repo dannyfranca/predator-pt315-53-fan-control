@@ -1019,6 +1019,12 @@ def embedded_compressed_children(
             ):
                 offset = content.find(magic, offset + 1)
                 continue
+            # RFC 8878 reserves descriptor bit 3; it cannot identify a
+            # supported frame. Do not confuse a compiled magic comparison
+            # with compressed data, but retain rejection of claimed streams.
+            if kind == "zstd" and offset + 4 < len(content) and content[offset + 4] & 0x08:
+                offset = content.find(magic, offset + 1)
+                continue
             if kind == "bzip2" and (
                 offset + 10 > len(content)
                 or content[offset + 3] not in b"123456789"
