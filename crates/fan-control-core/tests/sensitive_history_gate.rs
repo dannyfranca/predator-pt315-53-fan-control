@@ -1443,6 +1443,35 @@ assert scan(prefix + gzip.compress(secret), 'host-tool')
 }
 
 #[test]
+fn incidental_xz_magic_with_impossible_flags_is_not_an_embedded_stream() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import lzma, runpy, sys
+scan = runpy.run_path(sys.argv[1])['sensitive']
+prefix = b'\x7fELF\0ordinary code\0'
+magic = b'\xfd7zXZ\0'
+for suffix in (b'ERRNO\0', b'\x01\0', b'\0\x80'):
+    incidental = magic + suffix
+    assert not scan(prefix + incidental, 'host-tool')
+    assert scan(incidental, 'claimed.xz')
+for truncated in (magic, magic + b'\0', magic + b'\0\0'):
+    assert scan(prefix + truncated, 'host-tool')
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+assert scan(prefix + lzma.compress(secret), 'host-tool')
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn whitespace_delimited_prose_is_inspected_without_encoded_wrap_ambiguity() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = r#"

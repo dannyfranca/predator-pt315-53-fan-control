@@ -1010,6 +1010,15 @@ def embedded_compressed_children(
             ):
                 offset = content.find(magic, offset + 1)
                 continue
+            # XZ 2.1.1.2 requires a zero version byte and zero reserved flag
+            # bits. Compiled format-identification constants are not streams.
+            # Truncated headers and supported headers still fail closed below.
+            if kind == "xz" and (
+                (offset + 6 < len(content) and content[offset + 6] != 0)
+                or (offset + 7 < len(content) and content[offset + 7] & 0xF0)
+            ):
+                offset = content.find(magic, offset + 1)
+                continue
             if kind == "bzip2" and (
                 offset + 10 > len(content)
                 or content[offset + 3] not in b"123456789"
