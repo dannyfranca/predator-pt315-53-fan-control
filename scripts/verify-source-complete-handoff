@@ -107,6 +107,7 @@ required_executables=(
     scripts/check-sensitive-history
     scripts/build-source-candidate
     scripts/generate-candidate-declarations
+    scripts/pt31553-sign-kernel
     scripts/redact-evidence
     scripts/verify-fake-platform-flow
     scripts/verify-package-provenance
