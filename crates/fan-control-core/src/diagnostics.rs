@@ -697,16 +697,21 @@ where
 }
 
 #[cfg(test)]
+// Tracing dispatch registration and callsite-interest rebuilding are global,
+// even when the subscriber is scoped to one thread. Serialize all test captures
+// through dispatch teardown before inspecting captured events.
+static TEST_DIAGNOSTIC_CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 pub(crate) fn record_test_diagnostics<R>(
     action: impl FnOnce() -> R,
 ) -> (R, Vec<std::collections::BTreeMap<String, String>>) {
-    static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static GLOBAL_SUBSCRIBER: std::sync::Once = std::sync::Once::new();
 
+    let _capture_guard = TEST_DIAGNOSTIC_CAPTURE_LOCK.lock().unwrap();
     GLOBAL_SUBSCRIBER.call_once(|| {
         tracing::subscriber::set_global_default(tracing_subscriber::registry()).unwrap();
     });
-    let _capture_guard = CAPTURE_LOCK.lock().unwrap();
     let layer = TestDiagnosticLayer::default();
     let events = std::sync::Arc::clone(&layer.0);
     let result =
@@ -720,15 +725,35 @@ pub(crate) fn record_test_diagnostics<R>(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, process::Command, sync::Mutex, time::Duration};
+    use std::{collections::BTreeMap, fs, process::Command, time::Duration};
 
     use super::*;
 
-    static JOURNAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+    #[test]
+    fn concurrent_test_captures_preserve_native_and_recorded_events() {
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..256 {
+                    let (_, events) = record_test_diagnostics(|| {
+                        emit_fault(RuntimeFault::ShutdownRequested, None);
+                    });
+                    assert_eq!(events.len(), 1);
+                }
+            });
+            for _ in 0..256 {
+                let event = capture_native_event(|| {
+                    emit_fault(RuntimeFault::ShutdownRequested, None);
+                });
+                assert_eq!(
+                    event.get("PT31553_EVENT_ID").unwrap(),
+                    RUNTIME_FAULT_EVENT_ID
+                );
+            }
+        });
+    }
 
     #[test]
     fn native_journald_sink_delivers_every_allowlisted_event_contract() {
-        let _guard = JOURNAL_TEST_LOCK.lock().unwrap();
         let fault = capture_native_event(|| {
             emit_fault(
                 RuntimeFault::UnexpectedReadback,
@@ -912,6 +937,7 @@ mod tests {
     }
 
     fn capture_native_event(action: impl FnOnce()) -> BTreeMap<String, String> {
+        let _capture_guard = TEST_DIAGNOSTIC_CAPTURE_LOCK.lock().unwrap();
         let (sender, receiver) = UnixDatagram::pair().unwrap();
         receiver
             .set_read_timeout(Some(Duration::from_secs(1)))
@@ -923,6 +949,7 @@ mod tests {
     }
 
     fn assert_native_event_dropped(action: impl FnOnce()) {
+        let _capture_guard = TEST_DIAGNOSTIC_CAPTURE_LOCK.lock().unwrap();
         let (sender, receiver) = UnixDatagram::pair().unwrap();
         receiver
             .set_read_timeout(Some(Duration::from_millis(25)))
