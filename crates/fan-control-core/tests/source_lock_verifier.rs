@@ -1142,6 +1142,69 @@ done
 
 #[cfg(unix)]
 #[test]
+fn kernel_header_packaging_materializes_only_internal_links() {
+    let fixture = Fixture::new();
+    let root = fixture.root.join("header-links");
+    fs::create_dir_all(&root).unwrap();
+    let wrapper =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/build-candidate");
+    let output = Command::new("bash")
+        .args([
+            "-c",
+            r#"
+set -euo pipefail
+source <(sed -n '/^signing_recipe=(/,/^)/p' "$1")
+pkgbase=linux-cachyos-pt31553
+printf '%s\n' 7.1.8-cachyos-pt31553 > version
+export SOURCE_LOCK_INSIDE_SIGNING_DIR="$PWD/signing"
+mkdir signing
+printf '%s\n' public-certificate > signing/module-signing-certificate.der
+prepare() { :; }
+package_linux-cachyos-pt31553-headers() {
+    local headers="$pkgdir/usr/lib/modules/$(<version)/build"
+    mkdir -p "$headers/include/uapi" "$headers/scripts" "$pkgdir/usr/src"
+    printf '%s\n' '#define TEST 1' > "$headers/include/uapi/test.h"
+    ln -s uapi/test.h "$headers/include/test.h"
+    ln -s ../include "$headers/scripts/include-prefixes"
+    ln -s "../lib/modules/$(<version)/build" "$pkgdir/usr/src/$pkgbase"
+    case "$scenario" in
+        external) ln -s /etc/passwd "$headers/escape" ;;
+        cycle) ln -s ../scripts "$headers/scripts/cycle" ;;
+        dangling) ln -s missing "$headers/dangling" ;;
+    esac
+}
+eval "$(printf '%s\n' "${signing_recipe[@]}")"
+for scenario in valid external cycle dangling; do
+    pkgdir="$PWD/package-$scenario"
+    if [[ $scenario == valid ]]; then
+        package_linux-cachyos-pt31553-headers
+        headers="$pkgdir/usr/lib/modules/$(<version)/build"
+        [[ -z "$(find "$pkgdir" -type l -print -quit)" ]]
+        cmp "$headers/include/uapi/test.h" "$headers/include/test.h"
+        cmp "$headers/include/test.h" "$headers/scripts/include-prefixes/test.h"
+        cmp signing/module-signing-certificate.der "$headers/certs/signing_key.x509"
+        [[ ! -e "$pkgdir/usr/src/$pkgbase" ]]
+    else
+        set +e
+        (set -e; package_linux-cachyos-pt31553-headers) 2> "$scenario-error"
+        status=$?
+        set -e
+        [[ $status != 0 ]]
+        grep -Fq 'unsafe kernel header link' "$scenario-error"
+    fi
+done
+"#,
+            "header-links-test",
+        ])
+        .arg(wrapper)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", failure_text(&output));
+}
+
+#[cfg(unix)]
+#[test]
 fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
     let sbsign = Path::new("/usr/bin/sbsign");
     let sbverify = Path::new("/usr/bin/sbverify");

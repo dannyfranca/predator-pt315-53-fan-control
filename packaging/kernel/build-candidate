@@ -337,8 +337,62 @@ signing_recipe=(
     '        echo "prepared kernel release differs from the required ABI" >&2; return 2;'
     '    }'
     '}'
+    '_source_lock_materialize_headers() {
+    python3 - "$pkgdir" "$pkgbase" "$(<version)" <<"PY"
+import os
+import pathlib
+import shutil
+import stat
+import sys
+import tempfile
+
+package = pathlib.Path(sys.argv[1]).resolve(strict=True)
+root = package / "usr/lib/modules" / sys.argv[3] / "build"
+alias = package / "usr/src" / sys.argv[2]
+if root.is_symlink() or not root.is_dir() or root.resolve() != root:
+    raise SystemExit("unsafe kernel header link: build root")
+if alias.exists() or alias.is_symlink():
+    if not alias.is_symlink() or alias.resolve(strict=True) != root:
+        raise SystemExit("unsafe kernel header link: source alias")
+count = 0
+total = 0
+def validate(path, ancestors):
+    global count, total
+    count += 1
+    try:
+        target = path.resolve(strict=True)
+        target.relative_to(root)
+        mode = target.stat()
+        if target in ancestors or count > 65536:
+            raise ValueError("cycle or inventory limit")
+        if stat.S_ISDIR(mode.st_mode):
+            for child in target.iterdir():
+                validate(child, ancestors | {target})
+        elif stat.S_ISREG(mode.st_mode):
+            total += mode.st_size
+            if total > 2 * 1024 * 1024 * 1024:
+                raise ValueError("expanded size limit")
+        else:
+            raise ValueError("non-regular payload")
+    except (OSError, RuntimeError, ValueError) as error:
+        raise SystemExit("unsafe kernel header link: " + str(path)) from error
+
+validate(root, set())
+# Materialize all validated internal aliases; archive consumers reject links.
+# The redundant /usr/src alias is omitted, not duplicated with another public
+# certificate at a noncanonical location. DKMS uses the modules/<release>/build
+# directory, which remains intact.
+with tempfile.TemporaryDirectory(prefix=".headers-", dir=root.parent) as temporary:
+    copied = pathlib.Path(temporary) / "build"
+    shutil.copytree(root, copied, symlinks=False)
+    shutil.rmtree(root)
+    os.replace(copied, root)
+if alias.is_symlink():
+    alias.unlink()
+PY
+}'
     'eval "$(declare -f "package_$pkgbase-headers" | sed "1s/^package_${pkgbase}-headers /_source_lock_package_headers /")"'
-    'eval "package_$pkgbase-headers() { _source_lock_package_headers; install -Dm0444 \"\$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der\" \"\$pkgdir/usr/lib/modules/\$(<version)/build/certs/signing_key.x509\"; }"'
+    'eval "package_$pkgbase-headers() { _source_lock_package_headers; _source_lock_materialize_headers; install -Dm0444 \"\$SOURCE_LOCK_INSIDE_SIGNING_DIR/module-signing-certificate.der\" \"\$pkgdir/usr/lib/modules/\$(<version)/build/certs/signing_key.x509\"; }"'
 )
 printf '%s\n' "${signing_recipe[@]}" >>"$package_root/PKGBUILD"
 

@@ -105,6 +105,12 @@ Secure-Boot identity, rebuilds its package metadata, and rewrites
 `SHA256SUMS`. The Secure-Boot key stays on the host, and the completed output
 replaces the empty destination only after every finalization step succeeds.
 No private key enters a package or retained evidence.
+Header packaging materializes internal file/directory symlinks after checking
+their complete expansion stays within the headers root, contains only regular
+files/directories, has no cycles, and fits 65,536 entries and 2 GiB. It omits the
+redundant `/usr/src` symlink; the canonical `/usr/lib/modules/<release>/build`
+tree remains available. Package inspection continues to reject all links.
+
 The locked make configuration uses GNU make's silent mode to avoid retaining
 tens of thousands of routine Kbuild progress records. Compiler warnings, errors,
 and failure status remain intact; the complete emitted output is retained and
