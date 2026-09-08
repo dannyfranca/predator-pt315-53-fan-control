@@ -2142,6 +2142,11 @@ def contains_pkcs11_reference(content: bytes) -> bool:
     while (offset := content.find(marker, start)) >= 0:
         end = offset + len(marker)
         following = content[end : end + 1]
+        # Kbuild uses a GNU make filter pattern to select the signing backend.
+        # Its sole wildcard is not an identity or a percent-encoded URI value.
+        if content[max(0, offset - 9) : offset] == b"$(filter " and content[end : end + 2] == b"%,":
+            start = end + 2
+            continue
         if following != b"\0" and not (
             offset > 0
             and following in (b'"', b"'")

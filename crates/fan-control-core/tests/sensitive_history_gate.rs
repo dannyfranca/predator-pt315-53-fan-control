@@ -1251,12 +1251,14 @@ m = runpy.run_path(sys.argv[1])
 scan = m['sensitive']
 scheme = b'pkcs' + b'11:'
 for content in (b'\x7fELF\x00' + scheme + b'\x00',
-                b'strncmp(name, "' + scheme + b'", 7);'):
+                b'strncmp(name, "' + scheme + b'", 7);',
+                b'$(filter ' + scheme + b'%, $(CONFIG_MODULE_SIG_KEY))'):
     assert not scan(content, 'scripts/sign-file'), 'empty scheme constant is not a key reference'
 for value in (b'token=machine;object=key', b'?pin-value=synthetic', b'%74oken=x', b'/key'):
     for prefix, suffix in ((b'', b''), (b'\x7fELF\x00', b'\x00'), (b'"', b'"')):
         assert scan(prefix + scheme + value + suffix, 'scripts/sign-file'), 'populated URI was exempted'
 assert scan(scheme, 'notes.txt'), 'standalone ambiguous scheme must still fail closed'
+assert scan(b'$(filter ' + scheme + b'%25token=x, $(KEY))', 'Makefile'), 'populated filter URI was exempted'
 "#;
     let output = Command::new("python3")
         .args(["-I", "-c", source])
