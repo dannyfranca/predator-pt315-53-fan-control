@@ -2105,6 +2105,25 @@ def allowed_certificate_base64(content: bytes, allowed: frozenset[bytes]) -> boo
     return any(decoded.startswith(certificate) for certificate in allowed)
 
 
+def contains_pkcs11_reference(content: bytes) -> bool:
+    # Kernel sign-file embeds this scheme prefix in source and ELF string
+    # tables. An empty, explicitly terminated constant identifies no key or
+    # token. Never exempt the containing file, or a populated URI.
+    marker = b"pkcs" + b"11:"
+    start = 0
+    while (offset := content.find(marker, start)) >= 0:
+        end = offset + len(marker)
+        following = content[end : end + 1]
+        if following != b"\0" and not (
+            offset > 0
+            and following in (b'"', b"'")
+            and content[offset - 1 : offset] == following
+        ):
+            return True
+        start = end
+    return False
+
+
 def sensitive(
     content: bytes,
     path: str = "<historical blob>",
@@ -2187,7 +2206,7 @@ def sensitive(
             or (CERTIFICATE.search(content) and not pem_certificates_allowed)
             or b"openssh-key-v1\x00" in signature_masked_content
             or PBES2_OID in signature_masked_content
-            or b"pkcs" + b"11:" in content
+            or contains_pkcs11_reference(content)
             or re.search(
                 rb"(?m)^\[p11-kit-object-v1\]\r?$", content
             )

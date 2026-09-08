@@ -1078,6 +1078,35 @@ fn rejects_unsafe_historical_paths_containing_newlines() {
 }
 
 #[test]
+fn allows_empty_pkcs11_scheme_constants_but_rejects_key_references() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import runpy
+import sys
+m = runpy.run_path(sys.argv[1])
+scan = m['sensitive']
+scheme = b'pkcs' + b'11:'
+for content in (b'\x7fELF\x00' + scheme + b'\x00',
+                b'strncmp(name, "' + scheme + b'", 7);'):
+    assert not scan(content, 'scripts/sign-file'), 'empty scheme constant is not a key reference'
+for value in (b'token=machine;object=key', b'?pin-value=synthetic', b'%74oken=x', b'/key'):
+    for prefix, suffix in ((b'', b''), (b'\x7fELF\x00', b'\x00'), (b'"', b'"')):
+        assert scan(prefix + scheme + value + suffix, 'scripts/sign-file'), 'populated URI was exempted'
+assert scan(scheme, 'notes.txt'), 'standalone ambiguous scheme must still fail closed'
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn rejects_pkcs11_references_in_ordinary_historical_files() {
     let root = repository();
     fs::write(
