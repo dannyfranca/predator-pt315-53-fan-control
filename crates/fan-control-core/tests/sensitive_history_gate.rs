@@ -973,6 +973,33 @@ fn accepts_incidental_legacy_cpio_magic_without_a_valid_header() {
 }
 
 #[test]
+fn ripemd_digest_info_is_not_an_encrypted_key_envelope() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import runpy
+import sys
+m = runpy.run_path(sys.argv[1])
+digest = bytes.fromhex('3021300906052b2403020105000414') + bytes(20)
+assert not m['contains_encrypted_private_key_info'](digest)
+assert not m['sensitive'](digest, 'digest.bin')
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+assert m['sensitive'](digest + secret, 'digest.bin')
+unknown = bytes.fromhex('3021300906052b2403026305000414') + bytes(20)
+assert m['contains_encrypted_private_key_info'](unknown), 'unknown encryption OID must fail closed'
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn accepts_digest_info_without_treating_it_as_an_encrypted_private_key() {
     let digest_info = [
         0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
