@@ -1094,9 +1094,14 @@ def embedded_compressed_children(
     if not spend_budget(budget, "work", len(content) * len(magics)):
         return None
     cursor = 1
+    next_offsets = {kind: content.find(magic, cursor) for kind, magic in magics}
     while cursor < len(content):
-        matches = [(content.find(magic, cursor), kind) for kind, magic in magics]
-        matches = [(offset, kind) for offset, kind in matches if offset >= 0]
+        # Each format searches monotonically forward. In particular, an absent
+        # format never rescans the suffix for every incidental competing magic.
+        for kind, magic in magics:
+            if 0 <= next_offsets[kind] < cursor:
+                next_offsets[kind] = content.find(magic, cursor)
+        matches = [(offset, kind) for kind, offset in next_offsets.items() if offset >= 0]
         if not matches:
             break
         offset, kind = min(matches)

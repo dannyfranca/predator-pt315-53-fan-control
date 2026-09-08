@@ -1572,6 +1572,14 @@ import gzip, runpy, subprocess, sys
 m = runpy.run_path(sys.argv[1])
 children = m['embedded_compressed_children']
 budget = m['inspection_budget']
+class CountedBytes(bytes):
+    searches = 0
+    def find(self, *args):
+        self.searches += 1
+        return super().find(*args)
+incidental_headers = CountedBytes(b'prefix\0' + b'\x1f\x8b\x07' * 1000)
+assert children(incidental_headers, 'image', budget()) == []
+assert incidental_headers.searches <= 1008, 'absent compression kinds repeatedly rescanned the entire suffix'
 prefix = b'public image prefix\0'
 incidental = bytes.fromhex('1f8b0802038c3cc972dcb892')
 # Isolate the framing boundary: the decoder has already authenticated and
