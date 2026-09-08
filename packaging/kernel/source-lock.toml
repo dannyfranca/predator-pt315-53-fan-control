@@ -171,9 +171,9 @@ name = "makepkg-config"
 kind = "makepkg-config"
 path = "makepkg.conf"
 origin = "repository:packaging/kernel/makepkg.conf"
-revision = "1c5e4585468e8d54e4e6c8d8f5b43ad321fae0b358aaf0df6a2b1d1415c108ce"
-sha256 = "1c5e4585468e8d54e4e6c8d8f5b43ad321fae0b358aaf0df6a2b1d1415c108ce"
-size = 567
+revision = "f2bbc41d8c96cf1a56a11a0ac4374d284d95a2709c03ab1039c91c9d33d6a692"
+sha256 = "f2bbc41d8c96cf1a56a11a0ac4374d284d95a2709c03ab1039c91c9d33d6a692"
+size = 576
 
 [[inputs]]
 name = "toolchain-image"

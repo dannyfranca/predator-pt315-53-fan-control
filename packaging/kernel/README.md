@@ -105,6 +105,10 @@ Secure-Boot identity, rebuilds its package metadata, and rewrites
 `SHA256SUMS`. The Secure-Boot key stays on the host, and the completed output
 replaces the empty destination only after every finalization step succeeds.
 No private key enters a package or retained evidence.
+The locked make configuration uses GNU make's silent mode to avoid retaining
+tens of thousands of routine Kbuild progress records. Compiler warnings, errors,
+and failure status remain intact; the complete emitted output is retained and
+must pass the unchanged bounded sensitive-evidence scanner.
 The disposable kernel build uses `CONFIG_MODULE_SIG_KEY="certs/pt31553-signing-key.pem"`,
 not the kernel's auto-generated default key path. The wrapper assembles the
 externally supplied module key and matching public certificate into that

@@ -1025,6 +1025,48 @@ fn accepts_a_complete_read_only_bundle_without_modifying_it() {
 
 #[cfg(unix)]
 #[test]
+fn locked_make_flags_suppress_command_echoes_but_retain_errors() {
+    let fixture = Fixture::new();
+    let root = fixture.root.join("quiet-build");
+    fs::create_dir(&root).unwrap();
+    fs::write(
+        root.join("Makefile"),
+        ".PHONY: all broken\nall:\n\tprintf '%s\\n' 'visible build diagnostic' >&2\nbroken:\n\tfalse\n",
+    )
+    .unwrap();
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/makepkg.conf");
+    let run = Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; export MAKEFLAGS; make all",
+            "quiet-build-test",
+        ])
+        .arg(&config)
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", failure_text(&run));
+    assert!(
+        run.stdout.is_empty(),
+        "routine command echo must not enter build evidence"
+    );
+    assert_eq!(run.stderr, b"visible build diagnostic\n");
+    let failure = Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; export MAKEFLAGS; make broken",
+            "quiet-build-test",
+        ])
+        .arg(config)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!failure.status.success());
+    assert!(String::from_utf8_lossy(&failure.stderr).contains("Error 1"));
+}
+
+#[cfg(unix)]
+#[test]
 fn external_module_signer_never_enters_kernel_key_generation() {
     let fixture = Fixture::new();
     let root = fixture.root.join("module-key-build");
