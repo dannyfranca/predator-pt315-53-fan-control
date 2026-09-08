@@ -169,6 +169,12 @@ for version in (5,6):
     for length in (1, 5, 7):
         assert not scan(packet(version, mpi(143) + mpi(7), length)), (version,length)
     assert not scan(packet(version, b'arbitrary public field')), version
+public = bytes([4,0,0,0,0,1]) + mpi(143) + mpi(7)
+for cipher in (1,2,3,4,7,8,9,10,11,12,13,100,110,253,254,255):
+    assert scan(bytes([151]) + public + bytes([cipher]) + bytes(16)), cipher
+assert not scan(bytes([151]) + public + bytes([80]) + bytes(16)), 'unassigned cipher in unframed instruction bytes'
+unknown = public + bytes([80]) + bytes(16)
+assert scan(bytes([197, len(unknown)]) + unknown), 'bounded unknown secret envelope must still fail closed'
 "#;
     let output = Command::new("python3")
         .args(["-I", "-c", source])

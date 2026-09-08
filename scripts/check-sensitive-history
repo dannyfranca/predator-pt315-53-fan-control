@@ -500,6 +500,14 @@ def contains_openpgp_secret_key(content: bytes) -> bool:
         elif usage in (254, 255) and remaining >= 12:
             return True
         elif 0 < usage < 254 and remaining >= 8:
+            # An old indeterminate packet has no framing boundary: incidental
+            # instructions must at least identify a defined/experimental
+            # cipher (RFC 9580 section 9.3), or AEAD usage 253. Bounded packets
+            # still fail closed for unknown algorithms.
+            indeterminate = content[offset] in (0x97, 0x9F)
+            known_cipher = usage in (1, 2, 3, 4, 7, 8, 9, 10, 11, 12, 13, 253) or 100 <= usage <= 110
+            if indeterminate and not known_cipher:
+                continue
             return True
     return False
 
