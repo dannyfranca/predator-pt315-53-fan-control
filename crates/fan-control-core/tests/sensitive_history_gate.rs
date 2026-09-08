@@ -1184,6 +1184,33 @@ fn rejects_unsafe_historical_paths_containing_newlines() {
 }
 
 #[test]
+fn mtree_inventory_path_cache_remains_bounded_and_inspected() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"
+import runpy
+import sys
+m = runpy.run_path(sys.argv[1])
+content = b'#mtree\n' + b''.join(b'./usr/lib/include/header%05d type=file\n' % i for i in range(5000))
+assert not m['sensitive'](content, '.MTREE'), 'production path inventory exceeds small cache'
+secret = b'-----BEGIN PRI' + b'VATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+assert m['sensitive'](content + secret, '.MTREE')
+budget = m['inspection_budget']()
+budget['path_candidate_bytes'] = 1
+assert m['sensitive'](content, '.MTREE', budget=budget), 'path work allowance must remain enforced'
+"#;
+    let output = Command::new("python3")
+        .args(["-I", "-c", source])
+        .arg(workspace.join("scripts/check-sensitive-history"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn large_structured_columns_keep_encoded_payload_inspection() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = r#"

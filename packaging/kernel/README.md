@@ -124,6 +124,9 @@ Generated symbol/configuration columns allow at most 1,048,576 structured
 fields or independently padded fragments, within the existing 16 MiB token,
 work, candidate, and expansion bounds. Ambiguous unstructured wraps retain
 their 4,096-fragment limit; every structured column is still decoded.
+The deduplication cache permits 65,536 distinct path tokens (matching the
+inventory cap), while retaining its 8 MiB input-byte and 64 MiB candidate-work
+bounds. Paths and trailing payloads are never exempted from inspection.
 
 The locked make configuration uses GNU make's silent mode to avoid retaining
 tens of thousands of routine Kbuild progress records. Compiler warnings, errors,
