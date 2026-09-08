@@ -516,6 +516,16 @@ fn output_tree_allows_public_certificates_only_at_documented_artifact_paths() {
         "rejected an allowed certificate at its documented package path: {}",
         String::from_utf8_lossy(&packaged_certificate_result.stderr)
     );
+    fs::create_dir_all(root.join("kernel")).unwrap();
+    let nested_directory_package = root.join("kernel/linux-test.pkg.tar.zst");
+    fs::rename(&package, &nested_directory_package).unwrap();
+    let result = tree_gate(&root, &[&allowed_pem]);
+    assert!(
+        result.status.success(),
+        "physical package subdirectory lost certificate context: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    fs::rename(nested_directory_package, &package).unwrap();
     fs::write(
         &package,
         zstd_bytes(&tar_bytes("usr/share/doc/unapproved.pem", &certificate)),

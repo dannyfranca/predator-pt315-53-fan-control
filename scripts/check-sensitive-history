@@ -2260,7 +2260,7 @@ def sensitive(
         return True
     package_compression = (
         depth == 0
-        and re.fullmatch(r"[^/]+\.pkg\.tar\.zst", path) is not None
+        and re.fullmatch(r"[^/]+\.pkg\.tar\.zst", pathlib.PurePosixPath(path).name) is not None
         and (zstd_container(content) or path.lower().endswith(".zst"))
     )
     for child_path, child_content in children:
