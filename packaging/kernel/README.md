@@ -105,6 +105,12 @@ Secure-Boot identity, rebuilds its package metadata, and rewrites
 `SHA256SUMS`. The Secure-Boot key stays on the host, and the completed output
 replaces the empty destination only after every finalization step succeeds.
 No private key enters a package or retained evidence.
+The disposable kernel build uses `CONFIG_MODULE_SIG_KEY="certs/pt31553-signing-key.pem"`,
+not the kernel's auto-generated default key path. The wrapper assembles the
+externally supplied module key and matching public certificate into that
+owner-readable-only PEM bundle. The public DER certificate remains at
+`certs/signing_key.x509`; only that certificate is copied into the headers
+package. The provenance verifier requires the explicit external-key setting.
 The verifier places the exact parsed source-lock bytes into its private
 snapshot for retention; do not add `source-lock.toml` to the input bundle.
 

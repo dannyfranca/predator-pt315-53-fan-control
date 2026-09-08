@@ -1407,6 +1407,23 @@ fn rejects_signature_trust_and_identity_mismatches() {
 fn rejects_missing_or_drifted_packaged_kernel_module_trust() {
     let fixture = Fixture::new();
     let mut files = headers_files(b"stable module certificate DER");
+    let config = &mut files
+        .iter_mut()
+        .find(|(path, _)| path.ends_with("/.config"))
+        .unwrap()
+        .1;
+    *config = String::from_utf8(config.clone())
+        .unwrap()
+        .replace("certs/pt31553-signing-key.pem", "certs/signing_key.pem")
+        .into_bytes();
+    fixture.replace_headers(&files);
+    assert!(
+        !fixture.run().status.success(),
+        "accepted the auto-generated default module-key path"
+    );
+
+    let fixture = Fixture::new();
+    let mut files = headers_files(b"stable module certificate DER");
     files.retain(|(path, _)| !path.ends_with("/.config"));
     fixture.replace_headers(&files);
     assert!(
@@ -4330,7 +4347,7 @@ fn headers_files(module_certificate_der: &[u8]) -> Vec<(String, Vec<u8>)> {
         ),
         (
             format!("usr/lib/modules/{RELEASE}/build/.config"),
-            b"CONFIG_64BIT=y\nCONFIG_MODULE_SIG=y\nCONFIG_MODULE_SIG_ALL=y\nCONFIG_MODULE_SIG_SHA512=y\nCONFIG_MODULE_SIG_KEY=\"certs/signing_key.pem\"\nCONFIG_SYSTEM_EXTRA_CERTIFICATE=n\nCONFIG_SYSTEM_TRUSTED_KEYRING=y\nCONFIG_SYSTEM_TRUSTED_KEYS=\"\"\n"
+            b"CONFIG_64BIT=y\nCONFIG_MODULE_SIG=y\nCONFIG_MODULE_SIG_ALL=y\nCONFIG_MODULE_SIG_SHA512=y\nCONFIG_MODULE_SIG_KEY=\"certs/pt31553-signing-key.pem\"\nCONFIG_SYSTEM_EXTRA_CERTIFICATE=n\nCONFIG_SYSTEM_TRUSTED_KEYRING=y\nCONFIG_SYSTEM_TRUSTED_KEYS=\"\"\n"
                 .to_vec(),
         ),
         (

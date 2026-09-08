@@ -1025,6 +1025,62 @@ fn accepts_a_complete_read_only_bundle_without_modifying_it() {
 
 #[cfg(unix)]
 #[test]
+fn external_module_signer_never_enters_kernel_key_generation() {
+    let fixture = Fixture::new();
+    let root = fixture.root.join("module-key-build");
+    fs::create_dir_all(root.join("signing")).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        root.join(".config"),
+        "CONFIG_MODULE_SIG_KEY=\"certs/signing_key.pem\"\n",
+    )
+    .unwrap();
+    // The pinned kernel reserves this exact default path for its GENKEY rule.
+    fs::write(
+        root.join("Makefile"),
+        "ifeq ($(CONFIG_MODULE_SIG_KEY),certs/signing_key.pem)\ncerts/signing_key.pem: FORCE\n\t@echo 'unexpected kernel key generation' >&2; exit 1\nendif\n.PHONY: FORCE\nFORCE:\n",
+    )
+    .unwrap();
+    let wrapper =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/kernel/build-candidate");
+    let output = Command::new("bash")
+        .args([
+            "-c",
+            r#"
+set -euo pipefail
+umask 077
+export SOURCE_LOCK_INSIDE_SIGNING_DIR="$PWD/signing"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=module-key-test \
+    -keyout signing/module-signing-key.pem -out signing/certificate.pem >/dev/null 2>&1
+openssl x509 -in signing/certificate.pem -outform DER -out signing/module-signing-certificate.der
+source <(sed -n '/^signing_recipe=(/,/^)/p' "$1")
+pkgbase=linux-cachyos-pt31553
+prepare() { :; }
+package_linux-cachyos-pt31553-headers() { :; }
+eval "$(printf '%s\n' "${signing_recipe[@]}")"
+prepare
+key_path=$(sed -n 's/^CONFIG_MODULE_SIG_KEY="\(.*\)"$/\1/p' .config)
+make "CONFIG_MODULE_SIG_KEY=$key_path" "$key_path"
+[[ "$(stat -c %a "$key_path")" == 400 ]]
+openssl x509 -in "$key_path" -outform DER -out certs/extracted.der
+cmp signing/module-signing-certificate.der certs/extracted.der
+cmp signing/module-signing-certificate.der certs/signing_key.x509
+openssl pkey -in "$key_path" -pubout -out certs/key-public.pem
+openssl x509 -in "$key_path" -pubkey -noout >certs/certificate-public.pem
+cmp certs/key-public.pem certs/certificate-public.pem
+[[ ! -e certs/signing_key.pem ]]
+"#,
+            "module-key-test",
+        ])
+        .arg(wrapper)
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", failure_text(&output));
+}
+
+#[cfg(unix)]
+#[test]
 fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
     let sbsign = Path::new("/usr/bin/sbsign");
     let sbverify = Path::new("/usr/bin/sbverify");
@@ -1111,6 +1167,11 @@ fn checked_in_executor_builds_through_the_offline_fake_podman_boundary() {
         pinned_acer_wmi_contexts(),
     )
     .expect("write pinned acer-wmi fixture");
+    fs::write(
+        kernel_root.join(".config"),
+        "CONFIG_MODULE_SIG_KEY=\"certs/signing_key.pem\"\n",
+    )
+    .unwrap();
     fs::write(
         archive_root.join("PKGBUILD"),
         r#"_pkgsuffix=cachyos-gcc
@@ -1650,10 +1711,12 @@ fi
     assert!(patched_source.contains("Predator PT315-53"));
     assert!(patched_source.contains("DMI_EXACT_MATCH(DMI_BOARD_NAME, \"Civic_TLS\")"));
     assert!(patched_source.contains("\t.pwm = 1,"));
-    assert_eq!(
-        fs::read(kernel_root.join("certs/signing_key.pem")).unwrap(),
-        fs::read(signing.join("module-signing-key.pem")).unwrap()
+    let module_key_bundle = fs::read(kernel_root.join("certs/pt31553-signing-key.pem")).unwrap();
+    assert!(
+        module_key_bundle.starts_with(&fs::read(signing.join("module-signing-key.pem")).unwrap())
     );
+    assert!(String::from_utf8_lossy(&module_key_bundle).contains("-----BEGIN CERTIFICATE-----"));
+    assert!(!kernel_root.join("certs/signing_key.pem").exists());
     assert_eq!(
         fs::read(kernel_root.join("certs/signing_key.x509")).unwrap(),
         fs::read(signing.join("module-signing-certificate.der")).unwrap()
