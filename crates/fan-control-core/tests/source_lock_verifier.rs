@@ -877,12 +877,18 @@ elif mutation=='nvidia-missing':
     lock['inputs']=[item for item in lock['inputs'] if item['name']!='nvidia-open-source']
 elif mutation=='nvidia-altered':
     next(item for item in lock['inputs'] if item['name']=='nvidia-patch-dsc')['revision']='1'*40
+elif mutation=='dependency-missing':
+    lock['inputs']=[item for item in lock['inputs'] if item['name']!='build-dependency-000']
+elif mutation=='dependency-altered':
+    next(item for item in lock['inputs'] if item['name']=='build-dependency-000')['sha256']='0'*64
+elif mutation=='dependency-signature-missing':
+    lock['inputs']=[item for item in lock['inputs'] if item['name']!='build-dependency-000-signature']
 elif mutation=='stage-one':
-    lock['candidate']='linux-cachyos-gcc-7.1.8-stage-1-telemetry'; lock['patches']=['pt31553-telemetry']; lock['inputs']=[item for item in lock['inputs'] if item['name']!='pt31553-pwm' and not item['kind'].startswith('nvidia-')]
+    lock['candidate']='linux-cachyos-gcc-7.1.8-stage-1-telemetry'; lock['patches']=['pt31553-telemetry']; lock['inputs']=[item for item in lock['inputs'] if item['name']!='pt31553-pwm' and item['kind']!='build-dependency' and not item['kind'].startswith('nvidia-')]
 elif mutation=='reverse-patches':
     lock['patches']=list(reversed(lock['patches']))
 elif mutation=='stage-zero':
-    lock['candidate']='linux-cachyos-gcc-7.1.8-stage-0'; lock['patches']=[]; lock['inputs']=[item for item in lock['inputs'] if item['kind']!='patch' and not item['kind'].startswith('nvidia-')]
+    lock['candidate']='linux-cachyos-gcc-7.1.8-stage-0'; lock['patches']=[]; lock['inputs']=[item for item in lock['inputs'] if item['kind'] not in ('patch','build-dependency') and not item['kind'].startswith('nvidia-')]
 m['validate_manifest'](lock)
 "#,
         ])
@@ -1231,7 +1237,33 @@ fi
 if [[ "$args" == *" pull --quiet oci:"* ]]; then
     exit 0
 fi
+if [[ "$args" == *" run --name source-lock-dependencies "* ]]; then
+    [[ "$args" == *" --network=none "* && "$args" == *" --user 0 "* ]]
+    [[ "$args" == *" SOURCE_LOCK_PROVISION=1 "* ]]
+    [[ "$args" != *"dst=/signing"* && "$args" != *"dst=/work"* ]]
+    if [[ "${TEST_PACKAGE_MUTATION:-}" == dependency-failure ]]; then
+        echo 'simulated dependency preparation failure' >&2
+        exit 8
+    fi
+    touch "$TEST_BUNDLE/dependencies-prepared"
+    exit 0
+fi
+if [[ "$args" == *" commit --quiet source-lock-dependencies "* ]]; then
+    [[ -f "$TEST_BUNDLE/dependencies-prepared" ]]
+    printf '%064d\n' 1
+    exit 0
+fi
+if [[ "$args" == *" rm source-lock-dependencies "* ]]; then
+    exit 0
+fi
 if [[ "$args" == *" run --rm --pull=never --network=none --read-only "* ]]; then
+    [[ "$args" == *" --user 1000:1000 "* ]]
+    [[ "$args" == *" SOURCE_LOCK_PROVISION=0 "* ]]
+    [[ "$args" == *" sha256:0000000000000000000000000000000000000000000000000000000000000001 "* ]]
+    [[ -f "$TEST_BUNDLE/dependencies-prepared" ]] || {
+        echo 'build dependencies were not prepared before makepkg' >&2
+        exit 8
+    }
     package_root=""
     output_root=""
     signing_root=""
@@ -1628,6 +1660,11 @@ fi
     );
 
     for (case, mutation, expected_failure) in [
+        (
+            "failed-dependencies",
+            "dependency-failure",
+            "simulated dependency preparation failure",
+        ),
         (
             "failed-build",
             "fail-build",
@@ -2070,6 +2107,12 @@ fn stage_two_manifest_requires_the_one_exact_build_tool() {
         ("duplicate", "require exactly the pinned bc package"),
         ("altered", "bc package identity is not exact"),
         ("nvidia-missing", "package-set identities are not exact"),
+        ("dependency-missing", "package-set closure is not exact"),
+        ("dependency-altered", "package-set closure is not exact"),
+        (
+            "dependency-signature-missing",
+            "package-set closure is not exact",
+        ),
         (
             "nvidia-altered",
             "origin does not contain its immutable revision",

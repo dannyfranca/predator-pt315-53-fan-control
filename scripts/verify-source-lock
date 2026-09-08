@@ -39,6 +39,7 @@ SINGLETON_KINDS = {
     "toolchain-image",
 }
 KINDS = SINGLETON_KINDS | {
+    "build-dependency",
     "build-tool",
     "nvidia-patch",
     "nvidia-source",
@@ -73,9 +74,10 @@ STAGE1_PATCH_SHA256 = "e1939a48c79db88d564bcc700015a6388e98348332cbe056e8b66e9ca
 STAGE2_PATCH_SHA256 = "67b0d9fcd62451ae717e452d63f6419c02d8f4a34a82a060229cde5b3a96009d"
 STAGE1_BUILD_WRAPPER_SHA256 = "a87f57cf485cf21326e3f02f3558e55c2e869e79c17872cbce5d88266cd8e6e5"
 STAGE2_BUILD_WRAPPER_SHA256 = "5b47af002478f06de04575ba56e233959d83d855758ce13ad0a0c919675f42f7"
-PACKAGE_BUILD_WRAPPER_SHA256 = "a205684c0d9a3fbeda071045f9502a9a6c5c92a6a23f3abe5ab9c2708b743243"
+PACKAGE_BUILD_WRAPPER_SHA256 = "a7479d7ff30407d00b544b031401fab2aff513fa1940b398a583902a1ac68566"
 PACKAGE_SENSITIVE_SCANNER_SHA256 = "945aabcc1bac1273f8ff33b65b2b431cee0ffaa14d7f258f0fb9df383d90b7be"
 PACKAGE_SENSITIVE_SCANNER_SIZE = 100810
+PACKAGE_BUILD_DEPENDENCIES_SHA256 = "8eeea0c4de0ff046f32edba1572a47b9cd61ff7c9fd20cf7799ff1bd07cbd384"
 STAGE1_BC_SHA256 = "b3740d2c34090685b6ffe1b6a6b4631c45edd4801dc7a2bde1049de92165b0d3"
 STAGE1_BC_PATH = "build-tools/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
 STAGE1_BC_REVISION = "1.08.2-1.1"
@@ -284,7 +286,7 @@ def validate_manifest(lock: dict) -> list[dict]:
         sha256 = require_hash(item["sha256"], HEX64, f"{context}.sha256")
         revision = require_string(item["revision"], f"{context}.revision")
         required_revision = expected_revision.get(kind, sha256)
-        if kind not in {"build-tool", "nvidia-patch", "nvidia-source"} and revision != required_revision:
+        if kind not in {"build-dependency", "build-tool", "nvidia-patch", "nvidia-source"} and revision != required_revision:
             fail(f"{context}.revision: does not match the identity required for kind {kind}")
         validate_origin(item["origin"], revision, sha256, release_tag, f"{context}.origin")
         if type(item["size"]) is not int or item["size"] < 0:
@@ -294,6 +296,18 @@ def validate_manifest(lock: dict) -> list[dict]:
         fail(f"source lock.inputs: singleton kind count must be one: {', '.join(sorted(invalid_counts))}")
     if len(patches) != len(set(patches)) or set(patches) != patch_names:
         fail("source lock.patches: must exactly list unique patch input names")
+    dependencies = sorted(
+        (item for item in inputs if item["kind"] == "build-dependency"),
+        key=lambda item: item["name"],
+    )
+    if candidate == PACKAGE_CANDIDATE:
+        dependency_digest = hashlib.sha256(
+            json.dumps(dependencies, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if dependency_digest != PACKAGE_BUILD_DEPENDENCIES_SHA256:
+            fail("source lock build dependencies: package-set closure is not exact")
+    elif dependencies:
+        fail("source lock build dependencies: only the package-set candidate may select dependencies")
     if candidate == STAGE0_CANDIDATE and build_tools:
         fail("source lock build tools: stage 0 must not select build tools")
     if candidate in {STAGE1_CANDIDATE, STAGE2_CANDIDATE, PACKAGE_CANDIDATE}:
@@ -1470,7 +1484,11 @@ def verify_build_metadata(bundle: Bundle, lock: dict, inputs: list[dict]) -> Non
             'exec makepkg --config "$SOURCE_LOCK_BUNDLE/makepkg.conf" --skippgpcheck --skipchecksums --noconfirm --cleanbuild "$@"'
         ] = "makepkg invocation does not consume the locked configuration"
     for fragment, message in required_fragments.items():
-        if wrapper.count(fragment) != 1:
+        count = 2 if (
+            fragment == '--entrypoint /bundle/build-candidate'
+            and lock["candidate"] == PACKAGE_CANDIDATE
+        ) else 1
+        if wrapper.count(fragment) != count:
             fail(f"build wrapper: {message}")
     if lock["patches"]:
         verify_patch_wrapper(wrapper, lock["candidate"])

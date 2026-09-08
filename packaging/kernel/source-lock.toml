@@ -144,18 +144,18 @@ name = "build-environment"
 kind = "build-environment"
 path = "build-environment.toml"
 origin = "repository:packaging/kernel/build-environment.toml"
-revision = "6b8c798a1d2794e31ec1d63418b9df97a79538096a70a9a07ee68e1565d0fea3"
-sha256 = "6b8c798a1d2794e31ec1d63418b9df97a79538096a70a9a07ee68e1565d0fea3"
-size = 2096
+revision = "a805d90bd0047f32dedf3061ab50169ab12dd88a42ce7df486fc580bfce2eb23"
+sha256 = "a805d90bd0047f32dedf3061ab50169ab12dd88a42ce7df486fc580bfce2eb23"
+size = 13938
 
 [[inputs]]
 name = "build-wrapper"
 kind = "build-wrapper"
 path = "build-candidate"
 origin = "repository:packaging/kernel/build-candidate"
-revision = "a205684c0d9a3fbeda071045f9502a9a6c5c92a6a23f3abe5ab9c2708b743243"
-sha256 = "a205684c0d9a3fbeda071045f9502a9a6c5c92a6a23f3abe5ab9c2708b743243"
-size = 27801
+revision = "a7479d7ff30407d00b544b031401fab2aff513fa1940b398a583902a1ac68566"
+sha256 = "a7479d7ff30407d00b544b031401fab2aff513fa1940b398a583902a1ac68566"
+size = 29903
 
 [[inputs]]
 name = "sensitive-output-scanner"
@@ -336,3 +336,3441 @@ origin = "https://registry-1.docker.io/v2/cachyos/docker-makepkg-v4/blobs/sha256
 revision = "1de5527dab646415b0c2d8c5ebd4fcaf07010255f75c7ae7d242267800a1143b"
 sha256 = "1de5527dab646415b0c2d8c5ebd4fcaf07010255f75c7ae7d242267800a1143b"
 size = 93
+
+[[inputs]]
+name = "build-dependency-000"
+kind = "build-dependency"
+path = "build-dependencies/linux-api-headers-1:7.1-1-x86_64_v3.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/linux-api-headers-1:7.1-1-x86_64_v3.pkg.tar.zst"
+revision = "1:7.1-1"
+sha256 = "9810a6e00e8002cb41d7b699019285c029b90a08ece3b6138ed39139a189e1e8"
+size = 1576388
+
+[[inputs]]
+name = "build-dependency-000-signature"
+kind = "build-dependency"
+path = "build-dependencies/linux-api-headers-1:7.1-1-x86_64_v3.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/linux-api-headers-1:7.1-1-x86_64_v3.pkg.tar.zst.sig"
+revision = "1:7.1-1"
+sha256 = "999fa4278ca032404d11a57f9f1df8624c4b8726069b1ef33016329d278a7046"
+size = 438
+
+[[inputs]]
+name = "build-dependency-001"
+kind = "build-dependency"
+path = "build-dependencies/tzdata-2026c-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/tzdata-2026c-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2026c-1.1"
+sha256 = "97df37817732335d9db2ef22311bb9696331ad30f2fc91128f228793980e3206"
+size = 327090
+
+[[inputs]]
+name = "build-dependency-001-signature"
+kind = "build-dependency"
+path = "build-dependencies/tzdata-2026c-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/tzdata-2026c-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2026c-1.1"
+sha256 = "d6f4eb87c8911e5f39d5ae8b7779f595cd47fbc45c0ee31311863890b9a16fdf"
+size = 438
+
+[[inputs]]
+name = "build-dependency-002"
+kind = "build-dependency"
+path = "build-dependencies/iana-etc-20260617-1-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/iana-etc-20260617-1-any.pkg.tar.zst"
+revision = "20260617-1"
+sha256 = "f451da19de46e77177d959239e03b6ee837c93966ac72ca0b80a1e9a32abeb67"
+size = 411435
+
+[[inputs]]
+name = "build-dependency-002-signature"
+kind = "build-dependency"
+path = "build-dependencies/iana-etc-20260617-1-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/iana-etc-20260617-1-any.pkg.tar.zst.sig"
+revision = "20260617-1"
+sha256 = "f9ff9653772fb84c915cc1b2968aeb97a9abd9883395c5c048c5ee6d8055cf1d"
+size = 310
+
+[[inputs]]
+name = "build-dependency-003"
+kind = "build-dependency"
+path = "build-dependencies/filesystem-2025.10.12-1-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/filesystem-2025.10.12-1-any.pkg.tar.zst"
+revision = "2025.10.12-1"
+sha256 = "6b6c3fee7432204840d3b6afc9bc1a68c28f591a47fb220071715c40cca956df"
+size = 15479
+
+[[inputs]]
+name = "build-dependency-003-signature"
+kind = "build-dependency"
+path = "build-dependencies/filesystem-2025.10.12-1-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/filesystem-2025.10.12-1-any.pkg.tar.zst.sig"
+revision = "2025.10.12-1"
+sha256 = "8939636bff7fd45d24e529c95ad12517ed9ca0ae47b9775f26d0711c96e7e25a"
+size = 119
+
+[[inputs]]
+name = "build-dependency-004"
+kind = "build-dependency"
+path = "build-dependencies/glibc-2.44+r24+g16be1518495f-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/glibc-2.44+r24+g16be1518495f-1-x86_64_v4.pkg.tar.zst"
+revision = "2.44+r24+g16be1518495f-1"
+sha256 = "1ce267af9556191d2996aee88acd0daf6f7bfe764d8bf18ba5a133741fe69cf1"
+size = 11072147
+
+[[inputs]]
+name = "build-dependency-004-signature"
+kind = "build-dependency"
+path = "build-dependencies/glibc-2.44+r24+g16be1518495f-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/glibc-2.44+r24+g16be1518495f-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.44+r24+g16be1518495f-1"
+sha256 = "d4992eb0dd013982b855e2e9c9fbc48aae098182015830de9ac62deecd89247f"
+size = 438
+
+[[inputs]]
+name = "build-dependency-005"
+kind = "build-dependency"
+path = "build-dependencies/libgcc-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libgcc-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "d7b24be7f15dabc12c1caf4e3675a4004939f0ea085a41e3a848598d993c8d3d"
+size = 92760
+
+[[inputs]]
+name = "build-dependency-005-signature"
+kind = "build-dependency"
+path = "build-dependencies/libgcc-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libgcc-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "2c4baab8eb3bf4b1fb4c943067d62a0c1f20d55f0aa27405d8f46a7caf4ddca4"
+size = 438
+
+[[inputs]]
+name = "build-dependency-006"
+kind = "build-dependency"
+path = "build-dependencies/libstdc++-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libstdc++-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "bb9f8aa15e76ecdc7956f0f86f513a5d690922cd160d17e80cc67cd8648a0344"
+size = 1000696
+
+[[inputs]]
+name = "build-dependency-006-signature"
+kind = "build-dependency"
+path = "build-dependencies/libstdc++-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libstdc++-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "4ff66e053b8b62b892188ae746977fc46b2dbb7ed3f70cd561d3ff61f42f9066"
+size = 438
+
+[[inputs]]
+name = "build-dependency-007"
+kind = "build-dependency"
+path = "build-dependencies/ncurses-6.6-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/ncurses-6.6-2.1-x86_64_v4.pkg.tar.zst"
+revision = "6.6-2.1"
+sha256 = "249426fb9f6f6b4bc95ac31820ffb77191f943de0322ccc475016ac4f9e3a444"
+size = 1282272
+
+[[inputs]]
+name = "build-dependency-007-signature"
+kind = "build-dependency"
+path = "build-dependencies/ncurses-6.6-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/ncurses-6.6-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "6.6-2.1"
+sha256 = "b8d3bdb9b35036f76b51e464c371806bcf8b063aed2d7c003861d7e9efb58ec3"
+size = 438
+
+[[inputs]]
+name = "build-dependency-008"
+kind = "build-dependency"
+path = "build-dependencies/readline-8.3.003-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/readline-8.3.003-1.1-x86_64_v4.pkg.tar.zst"
+revision = "8.3.003-1.1"
+sha256 = "c672f47fc5fe4fb19ce7bd0fc345a0120e868c7d5cf9e75d138557d320459366"
+size = 430385
+
+[[inputs]]
+name = "build-dependency-008-signature"
+kind = "build-dependency"
+path = "build-dependencies/readline-8.3.003-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/readline-8.3.003-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "8.3.003-1.1"
+sha256 = "6d0e624af648aee6e9edd4496fdd2f7556dd20cd7f50830ed452f3f847f419be"
+size = 438
+
+[[inputs]]
+name = "build-dependency-009"
+kind = "build-dependency"
+path = "build-dependencies/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.08.2-1.1"
+sha256 = "b3740d2c34090685b6ffe1b6a6b4631c45edd4801dc7a2bde1049de92165b0d3"
+size = 110253
+
+[[inputs]]
+name = "build-dependency-009-signature"
+kind = "build-dependency"
+path = "build-dependencies/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/bc-1.08.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.08.2-1.1"
+sha256 = "6bc6f8ac8a032982b32da0817a1a650cd0da695b7d505064c4eacbfef9d0d3a4"
+size = 438
+
+[[inputs]]
+name = "build-dependency-010"
+kind = "build-dependency"
+path = "build-dependencies/cpio-2.15-3.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/cpio-2.15-3.1-x86_64_v4.pkg.tar.zst"
+revision = "2.15-3.1"
+sha256 = "97c876b96775061effdec69d16983719505203893b2460b359f00effb989981e"
+size = 252961
+
+[[inputs]]
+name = "build-dependency-010-signature"
+kind = "build-dependency"
+path = "build-dependencies/cpio-2.15-3.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/cpio-2.15-3.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.15-3.1"
+sha256 = "f27af0d76ac9669cf8e321c935aa3f31c920db057be637b9edcac79d738a529a"
+size = 438
+
+[[inputs]]
+name = "build-dependency-011"
+kind = "build-dependency"
+path = "build-dependencies/bash-5.3.15-2-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/bash-5.3.15-2-x86_64_v4.pkg.tar.zst"
+revision = "5.3.15-2"
+sha256 = "df67c2abaac1de3c544c39bea4535f18296fb771b307edae284b8c8e2685b2c0"
+size = 2077488
+
+[[inputs]]
+name = "build-dependency-011-signature"
+kind = "build-dependency"
+path = "build-dependencies/bash-5.3.15-2-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/bash-5.3.15-2-x86_64_v4.pkg.tar.zst.sig"
+revision = "5.3.15-2"
+sha256 = "5d419e110a70a89f65eb6452c442e51ceb98a76755f11cb3fae16649b9fbd5ba"
+size = 438
+
+[[inputs]]
+name = "build-dependency-012"
+kind = "build-dependency"
+path = "build-dependencies/brotli-1.2.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/brotli-1.2.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.2.0-1.1"
+sha256 = "a0029ea1d59e5b1a3abca3630483c1dbc75b8517948f8ae10d841273c42c3a66"
+size = 506284
+
+[[inputs]]
+name = "build-dependency-012-signature"
+kind = "build-dependency"
+path = "build-dependencies/brotli-1.2.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/brotli-1.2.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.2.0-1.1"
+sha256 = "0019924dfba339f089f5096fb741854824ceba5aa7b9b9e4602966c11d875f6e"
+size = 438
+
+[[inputs]]
+name = "build-dependency-013"
+kind = "build-dependency"
+path = "build-dependencies/zlib-ng-2.3.3-2-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/zlib-ng-2.3.3-2-x86_64_v4.pkg.tar.zst"
+revision = "2.3.3-2"
+sha256 = "542c087245b3c2310a7695440f9d8023af7e6bb41611713b71c9181a8fba4b20"
+size = 142262
+
+[[inputs]]
+name = "build-dependency-013-signature"
+kind = "build-dependency"
+path = "build-dependencies/zlib-ng-2.3.3-2-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/zlib-ng-2.3.3-2-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.3.3-2"
+sha256 = "acce1a7156b1d8f7999ddb8b7f0bd8bd0d4c2dfb2bd61f842b9bde2cb7209d26"
+size = 438
+
+[[inputs]]
+name = "build-dependency-014"
+kind = "build-dependency"
+path = "build-dependencies/zlib-ng-compat-2.3.3-2-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/zlib-ng-compat-2.3.3-2-x86_64_v4.pkg.tar.zst"
+revision = "2.3.3-2"
+sha256 = "42c0ff406d3c48981260a034fe91223289c00f2c100d7ebd0f18d2bcafd1e3f4"
+size = 142085
+
+[[inputs]]
+name = "build-dependency-014-signature"
+kind = "build-dependency"
+path = "build-dependencies/zlib-ng-compat-2.3.3-2-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/zlib-ng-compat-2.3.3-2-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.3.3-2"
+sha256 = "7d996fb6a8caa23c4db198594d891426ad7bb5c2b1d0d5659a36c797ab3201e4"
+size = 438
+
+[[inputs]]
+name = "build-dependency-015"
+kind = "build-dependency"
+path = "build-dependencies/sqlite-3.53.4-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/sqlite-3.53.4-1-x86_64_v4.pkg.tar.zst"
+revision = "3.53.4-1"
+sha256 = "c828eb5684e39706009c54f474af365f096a38361369de5c1bb93c07b9e857d7"
+size = 2429127
+
+[[inputs]]
+name = "build-dependency-015-signature"
+kind = "build-dependency"
+path = "build-dependencies/sqlite-3.53.4-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/sqlite-3.53.4-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.53.4-1"
+sha256 = "c8001bf058d678abdd3a31103bb78bb4852db6e3601071e2c53355d6774954bd"
+size = 438
+
+[[inputs]]
+name = "build-dependency-016"
+kind = "build-dependency"
+path = "build-dependencies/util-linux-libs-2.42.3-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/util-linux-libs-2.42.3-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.42.3-1.1"
+sha256 = "2666a17d50dc36904e8f229292ea993f51be6c5867e6a339f475fc87d14e64f1"
+size = 606182
+
+[[inputs]]
+name = "build-dependency-016-signature"
+kind = "build-dependency"
+path = "build-dependencies/util-linux-libs-2.42.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/util-linux-libs-2.42.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.42.3-1.1"
+sha256 = "78129a789b370714cddeae93a4c575b6a579bc5e71a79ab1f2a51b95f3c51f84"
+size = 438
+
+[[inputs]]
+name = "build-dependency-017"
+kind = "build-dependency"
+path = "build-dependencies/e2fsprogs-1.47.4-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/e2fsprogs-1.47.4-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.47.4-1.1"
+sha256 = "b135ccb414808b6644c379409166cb28c1277a23670a58b7c70277361e59c079"
+size = 1349988
+
+[[inputs]]
+name = "build-dependency-017-signature"
+kind = "build-dependency"
+path = "build-dependencies/e2fsprogs-1.47.4-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/e2fsprogs-1.47.4-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.47.4-1.1"
+sha256 = "bafde176e95241b60851a1df9fca7740583dd99c1492bcbc1c261c12cd2a563d"
+size = 438
+
+[[inputs]]
+name = "build-dependency-018"
+kind = "build-dependency"
+path = "build-dependencies/keyutils-1.6.3-4.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/keyutils-1.6.3-4.1-x86_64_v4.pkg.tar.zst"
+revision = "1.6.3-4.1"
+sha256 = "f697ffd50e10bed16e33f5292cf1174c0c5b56c232bfbb542fcaea56efe0aecd"
+size = 106234
+
+[[inputs]]
+name = "build-dependency-018-signature"
+kind = "build-dependency"
+path = "build-dependencies/keyutils-1.6.3-4.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/keyutils-1.6.3-4.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.6.3-4.1"
+sha256 = "6d23495d9d2b4dd9e47c5325e2a3d9b00da7813f08f99ef260a89d931e3cd371"
+size = 438
+
+[[inputs]]
+name = "build-dependency-019"
+kind = "build-dependency"
+path = "build-dependencies/libasan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libasan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "769acd3fa88a0919627cb04580e796c4ce62dcab8540137b6dc8e2325a735eb7"
+size = 592947
+
+[[inputs]]
+name = "build-dependency-019-signature"
+kind = "build-dependency"
+path = "build-dependencies/libasan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libasan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "5626676e601876d832713f2b83cd5eb23a9e64744e136dae982f06df763776ab"
+size = 438
+
+[[inputs]]
+name = "build-dependency-020"
+kind = "build-dependency"
+path = "build-dependencies/libatomic-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libatomic-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "0ada57d24e6f021071c8ab1f6564a98f90a059d5998f0b83bf5b089a5853792f"
+size = 15409
+
+[[inputs]]
+name = "build-dependency-020-signature"
+kind = "build-dependency"
+path = "build-dependencies/libatomic-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libatomic-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "905e5e044c8340cccd789a3ec03a41cfd66cb2f86f37bac4ebae2a17242fe5c8"
+size = 438
+
+[[inputs]]
+name = "build-dependency-021"
+kind = "build-dependency"
+path = "build-dependencies/libgfortran-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libgfortran-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "8cc38e1bc4d262594363a27875e17ec7f106b5b7c3e403183e73757f85e6f538"
+size = 1335908
+
+[[inputs]]
+name = "build-dependency-021-signature"
+kind = "build-dependency"
+path = "build-dependencies/libgfortran-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libgfortran-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "ffcc8d62e18ca925456009b841affaeb6fd3f136110e2fb9a7fb2f1239a25e23"
+size = 438
+
+[[inputs]]
+name = "build-dependency-022"
+kind = "build-dependency"
+path = "build-dependencies/libgomp-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libgomp-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "5902cd2efc41106d9c7d258c54fb635d050f3d4d3efd959bf0cb57f981ab2d84"
+size = 269775
+
+[[inputs]]
+name = "build-dependency-022-signature"
+kind = "build-dependency"
+path = "build-dependencies/libgomp-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libgomp-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "86a9372a006bbed4084e518d83e890ea0bfe3068178287aa9f48ab4781698ba1"
+size = 438
+
+[[inputs]]
+name = "build-dependency-023"
+kind = "build-dependency"
+path = "build-dependencies/libhwasan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libhwasan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "1959bb7ddf0aba325a4953dd5701caa5e3b1f2ee472ce02ea4060cf8dcb1abb5"
+size = 324111
+
+[[inputs]]
+name = "build-dependency-023-signature"
+kind = "build-dependency"
+path = "build-dependencies/libhwasan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libhwasan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "63031d63c21db1a4eb1189088afd8fdc5493e926c3292d6b88ed9950b6b99b85"
+size = 438
+
+[[inputs]]
+name = "build-dependency-024"
+kind = "build-dependency"
+path = "build-dependencies/liblsan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/liblsan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "7d915d37af2a2a7acdb60502c1e940fd719401d3c9ca21a1c4210f5189b07aa1"
+size = 276178
+
+[[inputs]]
+name = "build-dependency-024-signature"
+kind = "build-dependency"
+path = "build-dependencies/liblsan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/liblsan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "f8b6dbd6d436d18fe2d37af7dccbc402da8eff5775ac37abaf75f3da136dc90a"
+size = 438
+
+[[inputs]]
+name = "build-dependency-025"
+kind = "build-dependency"
+path = "build-dependencies/libobjc-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libobjc-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "7e65b06e860a807e2215a87246d096cea5e44e723725760f0082dceda82bf313"
+size = 48059
+
+[[inputs]]
+name = "build-dependency-025-signature"
+kind = "build-dependency"
+path = "build-dependencies/libobjc-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libobjc-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "d0600f40d346cdd551dd30dfeb94289865cb8fc4bd118dd99027ff33a7505c7e"
+size = 438
+
+[[inputs]]
+name = "build-dependency-026"
+kind = "build-dependency"
+path = "build-dependencies/libquadmath-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libquadmath-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "e3e5708d9fe5d4b4cb2ab79baa8ac3fb09d78740e8c61cf4ba8e209ef02e309e"
+size = 188768
+
+[[inputs]]
+name = "build-dependency-026-signature"
+kind = "build-dependency"
+path = "build-dependencies/libquadmath-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libquadmath-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "2fc7e86f9a3ecbeefd9d565c35d774def0303aeed5846e85cffb58a1e24b7350"
+size = 438
+
+[[inputs]]
+name = "build-dependency-027"
+kind = "build-dependency"
+path = "build-dependencies/libtsan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libtsan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "7aebb232151edf9323dab677b889aa5b59a99727cd4294383fac4d03d8a49b7d"
+size = 549503
+
+[[inputs]]
+name = "build-dependency-027-signature"
+kind = "build-dependency"
+path = "build-dependencies/libtsan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libtsan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "dafa03af842620ab4921ca0c186a2d6209da183acb5f8c1ffe7caa0f95f976c2"
+size = 438
+
+[[inputs]]
+name = "build-dependency-028"
+kind = "build-dependency"
+path = "build-dependencies/libubsan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libubsan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "55f532cfc6fc17da4fa190cd8a1b9866aa1da90707c50e660eed2368625ab8ba"
+size = 245945
+
+[[inputs]]
+name = "build-dependency-028-signature"
+kind = "build-dependency"
+path = "build-dependencies/libubsan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libubsan-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "abdfb57be8f0c37ce7573d43ec8344bd9a6398939f06e4fa4af384b3d8a48480"
+size = 438
+
+[[inputs]]
+name = "build-dependency-029"
+kind = "build-dependency"
+path = "build-dependencies/gcc-libs-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/gcc-libs-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "1220218fbab404357d0e2b35a387db8824148883b14b6a22b504e3d385dbff67"
+size = 3033
+
+[[inputs]]
+name = "build-dependency-029-signature"
+kind = "build-dependency"
+path = "build-dependencies/gcc-libs-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/gcc-libs-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "f7aeb8c54bde67f493739a6cb939f3ebb2411d4442fc93f414c0b2b578c2faab"
+size = 438
+
+[[inputs]]
+name = "build-dependency-030"
+kind = "build-dependency"
+path = "build-dependencies/xz-5.8.3-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/xz-5.8.3-1-x86_64_v4.pkg.tar.zst"
+revision = "5.8.3-1"
+sha256 = "87a16b245293fdadcc1d6788f6a1052882ea3b7c0100382d0810af81accdaf06"
+size = 752370
+
+[[inputs]]
+name = "build-dependency-030-signature"
+kind = "build-dependency"
+path = "build-dependencies/xz-5.8.3-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/xz-5.8.3-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "5.8.3-1"
+sha256 = "7de97424ec9cbc390db88c993b8ef399159591775e87e48452e00d747934192c"
+size = 438
+
+[[inputs]]
+name = "build-dependency-031"
+kind = "build-dependency"
+path = "build-dependencies/zstd-1.5.7-3-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/zstd-1.5.7-3-x86_64_v4.pkg.tar.zst"
+revision = "1.5.7-3"
+sha256 = "29166e6ea9302e56fd1e155c7530a6f5d0bf5bb4aa159eec1708f0b4b4e6831a"
+size = 683034
+
+[[inputs]]
+name = "build-dependency-031-signature"
+kind = "build-dependency"
+path = "build-dependencies/zstd-1.5.7-3-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/zstd-1.5.7-3-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.5.7-3"
+sha256 = "14ab3468ffa81a7f8b057e02395d491572abb4783ce92a476ed012de0447c6a9"
+size = 438
+
+[[inputs]]
+name = "build-dependency-032"
+kind = "build-dependency"
+path = "build-dependencies/openssl-3.6.4-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/openssl-3.6.4-1.1-x86_64_v4.pkg.tar.zst"
+revision = "3.6.4-1.1"
+sha256 = "a9dac0de6dda0ab75b77cec1d53eebd77e59d0d10a5fe7da9788c70bf69677ec"
+size = 6178158
+
+[[inputs]]
+name = "build-dependency-032-signature"
+kind = "build-dependency"
+path = "build-dependencies/openssl-3.6.4-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/openssl-3.6.4-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.6.4-1.1"
+sha256 = "910abf23439df20b34d94e968546a00909c66170d518ec92e2c9804b0e7f8c7a"
+size = 438
+
+[[inputs]]
+name = "build-dependency-033"
+kind = "build-dependency"
+path = "build-dependencies/gdbm-1.26-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gdbm-1.26-2.1-x86_64_v4.pkg.tar.zst"
+revision = "1.26-2.1"
+sha256 = "4816ecf5ae44aedcfebc02dbe27e41a5b1752285eeeef83edb99f36b1c8950e8"
+size = 270075
+
+[[inputs]]
+name = "build-dependency-033-signature"
+kind = "build-dependency"
+path = "build-dependencies/gdbm-1.26-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gdbm-1.26-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.26-2.1"
+sha256 = "6c592d1e7e787bc6d156dfae757d92aba598958a4c3d3c82802ae448f316ee49"
+size = 438
+
+[[inputs]]
+name = "build-dependency-034"
+kind = "build-dependency"
+path = "build-dependencies/libldap-2.6.13-1-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/libldap-2.6.13-1-x86_64.pkg.tar.zst"
+revision = "2.6.13-1"
+sha256 = "9d37ed49d0da014fbdf89e8b1c5e55b2d58fbffc850d79ddda5f8d1d151ba3b6"
+size = 289146
+
+[[inputs]]
+name = "build-dependency-034-signature"
+kind = "build-dependency"
+path = "build-dependencies/libldap-2.6.13-1-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/libldap-2.6.13-1-x86_64.pkg.tar.zst.sig"
+revision = "2.6.13-1"
+sha256 = "8f04b3cb2a163b6e24e2404968776ce650466cb8d3ac6b4105fedb41533c4cd5"
+size = 215
+
+[[inputs]]
+name = "build-dependency-035"
+kind = "build-dependency"
+path = "build-dependencies/libevent-2.1.13-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libevent-2.1.13-2.1-x86_64_v4.pkg.tar.zst"
+revision = "2.1.13-2.1"
+sha256 = "82d699b86fd5b1f4d1db714f9c1083477c8591a26546fc63715e0d2e0f4013dc"
+size = 332268
+
+[[inputs]]
+name = "build-dependency-035-signature"
+kind = "build-dependency"
+path = "build-dependencies/libevent-2.1.13-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libevent-2.1.13-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.1.13-2.1"
+sha256 = "54ad4c8b365475c099f09f1998d0796eab2557a230d02044131e62ac21c6a854"
+size = 438
+
+[[inputs]]
+name = "build-dependency-036"
+kind = "build-dependency"
+path = "build-dependencies/libverto-0.3.2-6.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libverto-0.3.2-6.1-x86_64_v4.pkg.tar.zst"
+revision = "0.3.2-6.1"
+sha256 = "ca1db3159db44b7fbf1c91704e4325c7becd2c0f6648e44f0e76fbd4da19b767"
+size = 19413
+
+[[inputs]]
+name = "build-dependency-036-signature"
+kind = "build-dependency"
+path = "build-dependencies/libverto-0.3.2-6.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libverto-0.3.2-6.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "0.3.2-6.1"
+sha256 = "50d247b7d1ff3ab8ec9298a0d45145134a1f1186ea0b63a6b98a009242cdd9b6"
+size = 438
+
+[[inputs]]
+name = "build-dependency-037"
+kind = "build-dependency"
+path = "build-dependencies/lmdb-0.9.35-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/lmdb-0.9.35-1.1-x86_64_v4.pkg.tar.zst"
+revision = "0.9.35-1.1"
+sha256 = "682a9ff815778952b4610a39a6a124dab4f1502277c2c99c02400556546bdf23"
+size = 132906
+
+[[inputs]]
+name = "build-dependency-037-signature"
+kind = "build-dependency"
+path = "build-dependencies/lmdb-0.9.35-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/lmdb-0.9.35-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "0.9.35-1.1"
+sha256 = "7726f93e277e69289caa873c7b5da0156f9a7f36923e5cd062b08b2ea834706e"
+size = 438
+
+[[inputs]]
+name = "build-dependency-038"
+kind = "build-dependency"
+path = "build-dependencies/krb5-1.22.2-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/krb5-1.22.2-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.22.2-1.1"
+sha256 = "49eb796157f2ab0e187fa83a493ddcad3dbc112c987b9f4eca3bcba7694a70bf"
+size = 1567039
+
+[[inputs]]
+name = "build-dependency-038-signature"
+kind = "build-dependency"
+path = "build-dependencies/krb5-1.22.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/krb5-1.22.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.22.2-1.1"
+sha256 = "864c5e85f1bc141ae9418b5b58f93f453442deb0e1f27a309123221a0ba6dcf3"
+size = 438
+
+[[inputs]]
+name = "build-dependency-039"
+kind = "build-dependency"
+path = "build-dependencies/libunistring-1.4.2-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libunistring-1.4.2-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.4.2-1.1"
+sha256 = "122fd745098b78aae78169c3d03ed8f5cfde1ae4746980f59a9d94149e704de1"
+size = 776636
+
+[[inputs]]
+name = "build-dependency-039-signature"
+kind = "build-dependency"
+path = "build-dependencies/libunistring-1.4.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libunistring-1.4.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.4.2-1.1"
+sha256 = "275ff57beaf1963e6b72aa7b666931f122cd172d5e066d30dcaf11b8f552c5fb"
+size = 438
+
+[[inputs]]
+name = "build-dependency-040"
+kind = "build-dependency"
+path = "build-dependencies/libidn2-2.3.8-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libidn2-2.3.8-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.3.8-1.1"
+sha256 = "d419d99fc0d20f90e165597e1465d94be692765a2ab9390b3965c0004cd3935c"
+size = 137869
+
+[[inputs]]
+name = "build-dependency-040-signature"
+kind = "build-dependency"
+path = "build-dependencies/libidn2-2.3.8-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libidn2-2.3.8-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.3.8-1.1"
+sha256 = "05515654d0aaf62270995e86d346b98df7c225f4504e288756beb3081ecdab6c"
+size = 438
+
+[[inputs]]
+name = "build-dependency-041"
+kind = "build-dependency"
+path = "build-dependencies/libnghttp2-1.70.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libnghttp2-1.70.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.70.0-1.1"
+sha256 = "cf87e5aaf6d961759f072ced588fbb96e0624dfe0ba1f62e489f31190ee40851"
+size = 108957
+
+[[inputs]]
+name = "build-dependency-041-signature"
+kind = "build-dependency"
+path = "build-dependencies/libnghttp2-1.70.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libnghttp2-1.70.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.70.0-1.1"
+sha256 = "4b149993806617b1442b331203d524ee98d490a25d420ea1598b9f02f42aa629"
+size = 438
+
+[[inputs]]
+name = "build-dependency-042"
+kind = "build-dependency"
+path = "build-dependencies/libnghttp3-1.18.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libnghttp3-1.18.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.18.0-1.1"
+sha256 = "af15ed09a46012c81bd48bb17840a24a191d317ee9bb0e8ab5c77066bfef98bb"
+size = 92760
+
+[[inputs]]
+name = "build-dependency-042-signature"
+kind = "build-dependency"
+path = "build-dependencies/libnghttp3-1.18.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libnghttp3-1.18.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.18.0-1.1"
+sha256 = "f6cea1217fd3e58506a0dd39ff25898fd425d703549e03c21ac2c6672d5badd7"
+size = 438
+
+[[inputs]]
+name = "build-dependency-043"
+kind = "build-dependency"
+path = "build-dependencies/gmp-6.3.0-3.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gmp-6.3.0-3.1-x86_64_v4.pkg.tar.zst"
+revision = "6.3.0-3.1"
+sha256 = "5b9355cf617b0a9714a71d56f500187582644187d67fd4d9018bfcd4561ff3b7"
+size = 531608
+
+[[inputs]]
+name = "build-dependency-043-signature"
+kind = "build-dependency"
+path = "build-dependencies/gmp-6.3.0-3.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gmp-6.3.0-3.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "6.3.0-3.1"
+sha256 = "2dcf15d2888b9fae3bf784f2258619d7644a90b71fbf0f8988e5d341a69092bd"
+size = 438
+
+[[inputs]]
+name = "build-dependency-044"
+kind = "build-dependency"
+path = "build-dependencies/libtasn1-4.21.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libtasn1-4.21.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "4.21.0-1.1"
+sha256 = "9388210a3072cb014e641f532dcec6110bacebf2396bad11bf7c2cdcc6f8a05a"
+size = 143715
+
+[[inputs]]
+name = "build-dependency-044-signature"
+kind = "build-dependency"
+path = "build-dependencies/libtasn1-4.21.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libtasn1-4.21.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "4.21.0-1.1"
+sha256 = "caf2c565a23c2e846100d6073710b07889bf4f662dfd882d6d8e667a9827b65f"
+size = 438
+
+[[inputs]]
+name = "build-dependency-045"
+kind = "build-dependency"
+path = "build-dependencies/nettle-4.0-1-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/nettle-4.0-1-x86_64.pkg.tar.zst"
+revision = "4.0-1"
+sha256 = "679138a8405ca383aba7836d54fdc282db9394b7dc23c097b8965f70119adf13"
+size = 468859
+
+[[inputs]]
+name = "build-dependency-045-signature"
+kind = "build-dependency"
+path = "build-dependencies/nettle-4.0-1-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/nettle-4.0-1-x86_64.pkg.tar.zst.sig"
+revision = "4.0-1"
+sha256 = "f12ebb9488ac9190793201397136631c48134972ffe1e268b937864f5a42a099"
+size = 310
+
+[[inputs]]
+name = "build-dependency-046"
+kind = "build-dependency"
+path = "build-dependencies/leancrypto-1.8.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/leancrypto-1.8.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.8.0-1.1"
+sha256 = "b065c3a6d42348974c06f6c40db9153fcaadb69c1f7192efd3dacd93a9aa13a5"
+size = 1784477
+
+[[inputs]]
+name = "build-dependency-046-signature"
+kind = "build-dependency"
+path = "build-dependencies/leancrypto-1.8.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/leancrypto-1.8.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.8.0-1.1"
+sha256 = "e3d0924d4cdfd13144c05787aba43a90e0427c6efea74e478b6ebf4261667ba1"
+size = 438
+
+[[inputs]]
+name = "build-dependency-047"
+kind = "build-dependency"
+path = "build-dependencies/libffi-3.8.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libffi-3.8.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "3.8.0-1.1"
+sha256 = "09ba09b024fa16ed986a3b6df61fc49723b9c2588e7cd774889782ff3e655c12"
+size = 58710
+
+[[inputs]]
+name = "build-dependency-047-signature"
+kind = "build-dependency"
+path = "build-dependencies/libffi-3.8.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libffi-3.8.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.8.0-1.1"
+sha256 = "84b688976f298d25540ccd73d718251cc323476050155250bc61a740997ea53d"
+size = 438
+
+[[inputs]]
+name = "build-dependency-048"
+kind = "build-dependency"
+path = "build-dependencies/libp11-kit-0.26.5-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libp11-kit-0.26.5-1.1-x86_64_v4.pkg.tar.zst"
+revision = "0.26.5-1.1"
+sha256 = "cab11ced1bff5e4d536274efe0751487a4685a712ac52552dc09f36195734692"
+size = 778416
+
+[[inputs]]
+name = "build-dependency-048-signature"
+kind = "build-dependency"
+path = "build-dependencies/libp11-kit-0.26.5-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libp11-kit-0.26.5-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "0.26.5-1.1"
+sha256 = "508a219c35a641fea6ccf350917add74cb71df29cc7523afa35d1e74f3a37069"
+size = 438
+
+[[inputs]]
+name = "build-dependency-049"
+kind = "build-dependency"
+path = "build-dependencies/gnutls-3.8.13-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gnutls-3.8.13-2.1-x86_64_v4.pkg.tar.zst"
+revision = "3.8.13-2.1"
+sha256 = "b9ee0ef1461749f3b746210df21126824f8bfa7d559cbaa2d0a6ae5ea7871c9c"
+size = 2056140
+
+[[inputs]]
+name = "build-dependency-049-signature"
+kind = "build-dependency"
+path = "build-dependencies/gnutls-3.8.13-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gnutls-3.8.13-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.8.13-2.1"
+sha256 = "0b3d7d534ea86a1ca4af8c09528b6460babb784c10b52fad865a8c1e0ad8529a"
+size = 438
+
+[[inputs]]
+name = "build-dependency-050"
+kind = "build-dependency"
+path = "build-dependencies/libngtcp2-1.25.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/libngtcp2-1.25.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.25.0-1.1"
+sha256 = "75169d09817f468406f294177a79018f9c0c2aab72c90134e175e054addeb3a0"
+size = 263281
+
+[[inputs]]
+name = "build-dependency-050-signature"
+kind = "build-dependency"
+path = "build-dependencies/libngtcp2-1.25.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/libngtcp2-1.25.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.25.0-1.1"
+sha256 = "3a3d728e781e7dac97b5257b1af653c2b764ccdcabf3cd8dd6d27db21223d835"
+size = 438
+
+[[inputs]]
+name = "build-dependency-051"
+kind = "build-dependency"
+path = "build-dependencies/libssh2-1.11.1-7.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libssh2-1.11.1-7.1-x86_64_v4.pkg.tar.zst"
+revision = "1.11.1-7.1"
+sha256 = "6bc0c561cef706feed5a71d1707773ef013bae5f763b3fd871d90752d6e6dd4d"
+size = 289230
+
+[[inputs]]
+name = "build-dependency-051-signature"
+kind = "build-dependency"
+path = "build-dependencies/libssh2-1.11.1-7.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libssh2-1.11.1-7.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.11.1-7.1"
+sha256 = "331a20a38b06afdb74a49e7ede7e7291ed4cb6b64a2a2290112eb91500624e69"
+size = 438
+
+[[inputs]]
+name = "build-dependency-052"
+kind = "build-dependency"
+path = "build-dependencies/acl-2.4.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/acl-2.4.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.4.0-1.1"
+sha256 = "de89f05725a61ff8b12fe60265e843229806cb7f257b1bcc43b5d91b2003840e"
+size = 155963
+
+[[inputs]]
+name = "build-dependency-052-signature"
+kind = "build-dependency"
+path = "build-dependencies/acl-2.4.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/acl-2.4.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.4.0-1.1"
+sha256 = "1d79a7a30d69c5d1db52d4b2874434b8cb5d7f4524865637ee8f2628d20e884c"
+size = 438
+
+[[inputs]]
+name = "build-dependency-053"
+kind = "build-dependency"
+path = "build-dependencies/attr-2.6.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/attr-2.6.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.6.0-1.1"
+sha256 = "2fc8d9b09fd4a4a01b5f27055ff39fd3a8ce8f3d49a709f9e6dbc68ad7e6a727"
+size = 76013
+
+[[inputs]]
+name = "build-dependency-053-signature"
+kind = "build-dependency"
+path = "build-dependencies/attr-2.6.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/attr-2.6.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.6.0-1.1"
+sha256 = "bc9baee9cef013b62e4b4a6e323d9c73851075f3a8e9929b0e7c8c37fd93926c"
+size = 438
+
+[[inputs]]
+name = "build-dependency-054"
+kind = "build-dependency"
+path = "build-dependencies/libtirpc-1.3.7-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libtirpc-1.3.7-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.3.7-1.1"
+sha256 = "b24c83ca62e60ee0a538f6355b63dc0dbb7d89430ab65c6f35bc697d4113a3c6"
+size = 183093
+
+[[inputs]]
+name = "build-dependency-054-signature"
+kind = "build-dependency"
+path = "build-dependencies/libtirpc-1.3.7-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libtirpc-1.3.7-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.3.7-1.1"
+sha256 = "6d05c0e5969c94a2fe267521073898787728a96f8b637d1e9c18948a2aa8d3ab"
+size = 438
+
+[[inputs]]
+name = "build-dependency-055"
+kind = "build-dependency"
+path = "build-dependencies/libnsl-2.0.1-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libnsl-2.0.1-2.1-x86_64_v4.pkg.tar.zst"
+revision = "2.0.1-2.1"
+sha256 = "6f1a0a4ca52f2a89c619695de4457741ac3db7dd74941c95ba2e1d56002c7816"
+size = 22863
+
+[[inputs]]
+name = "build-dependency-055-signature"
+kind = "build-dependency"
+path = "build-dependencies/libnsl-2.0.1-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libnsl-2.0.1-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.0.1-2.1"
+sha256 = "559f1641e00b3f9a26e025e31653daa871bc6d006e4a5167b000e45a42d000d9"
+size = 438
+
+[[inputs]]
+name = "build-dependency-056"
+kind = "build-dependency"
+path = "build-dependencies/libxcrypt-4.5.2-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libxcrypt-4.5.2-1.1-x86_64_v4.pkg.tar.zst"
+revision = "4.5.2-1.1"
+sha256 = "0347dea77d85e1825af0152140c3c78d9c694a366ec2f2be75d53b9f692af531"
+size = 99101
+
+[[inputs]]
+name = "build-dependency-056-signature"
+kind = "build-dependency"
+path = "build-dependencies/libxcrypt-4.5.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libxcrypt-4.5.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "4.5.2-1.1"
+sha256 = "540b90c1e47b32b75e476f2f8ec9ee44ef993dd948ba7d5cdb77ef6f3569b97e"
+size = 438
+
+[[inputs]]
+name = "build-dependency-057"
+kind = "build-dependency"
+path = "build-dependencies/libcap-ng-0.9.5-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libcap-ng-0.9.5-1.1-x86_64_v4.pkg.tar.zst"
+revision = "0.9.5-1.1"
+sha256 = "3df2d353f277c5b3aca051099b1398345c4ef5b846d42457b658470eaa80633e"
+size = 79213
+
+[[inputs]]
+name = "build-dependency-057-signature"
+kind = "build-dependency"
+path = "build-dependencies/libcap-ng-0.9.5-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libcap-ng-0.9.5-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "0.9.5-1.1"
+sha256 = "82da06367b00b8483e843bd948c492f38b90176ffba27054f7d18cce87575392"
+size = 438
+
+[[inputs]]
+name = "build-dependency-058"
+kind = "build-dependency"
+path = "build-dependencies/audit-4.2.1-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/audit-4.2.1-1.1-x86_64_v4.pkg.tar.zst"
+revision = "4.2.1-1.1"
+sha256 = "731a426dd0bd7d7bcd615c7bcc830e9cda8cec27da7088e65228cb744acf00df"
+size = 429942
+
+[[inputs]]
+name = "build-dependency-058-signature"
+kind = "build-dependency"
+path = "build-dependencies/audit-4.2.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/audit-4.2.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "4.2.1-1.1"
+sha256 = "1328e2b57cf35213c577f7a0679925e2dcfb967ba677e0137261292f41abb84e"
+size = 438
+
+[[inputs]]
+name = "build-dependency-059"
+kind = "build-dependency"
+path = "build-dependencies/pambase-20260616-1-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/pambase-20260616-1-any.pkg.tar.zst"
+revision = "20260616-1"
+sha256 = "306265b486e3f7d2854d583202409cdd90f131368c92aa56f845822a5d2bbf65"
+size = 3386
+
+[[inputs]]
+name = "build-dependency-059-signature"
+kind = "build-dependency"
+path = "build-dependencies/pambase-20260616-1-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/pambase-20260616-1-any.pkg.tar.zst.sig"
+revision = "20260616-1"
+sha256 = "9058ef8f2cea22f83d198b470a6ccb13faf8e59aa2443769ad1dc719d4c664ff"
+size = 310
+
+[[inputs]]
+name = "build-dependency-060"
+kind = "build-dependency"
+path = "build-dependencies/libgpg-error-1.61-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libgpg-error-1.61-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.61-1.1"
+sha256 = "e93d35bc75a6164c948b6e6d84c01c5afa967ea4273a03d1ffe49a47c43c0e84"
+size = 300448
+
+[[inputs]]
+name = "build-dependency-060-signature"
+kind = "build-dependency"
+path = "build-dependencies/libgpg-error-1.61-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libgpg-error-1.61-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.61-1.1"
+sha256 = "494ca1d001f9b29623c4664398519c0e79545215dbfe4534564b4744aeb23e93"
+size = 438
+
+[[inputs]]
+name = "build-dependency-061"
+kind = "build-dependency"
+path = "build-dependencies/libgcrypt-1.12.3-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libgcrypt-1.12.3-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.12.3-1.1"
+sha256 = "58acd2adf279a5e070c9ba174ccf644fa5264061749b6e9fb79018186b61d78b"
+size = 993639
+
+[[inputs]]
+name = "build-dependency-061-signature"
+kind = "build-dependency"
+path = "build-dependencies/libgcrypt-1.12.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libgcrypt-1.12.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.12.3-1.1"
+sha256 = "3f68d3f80b289986ab2ba469181d086307f9e5a2c139a5034d1cc48beb2d6f44"
+size = 438
+
+[[inputs]]
+name = "build-dependency-062"
+kind = "build-dependency"
+path = "build-dependencies/systemd-libs-261.2-1-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/systemd-libs-261.2-1-x86_64.pkg.tar.zst"
+revision = "261.2-1"
+sha256 = "c12d5a2c4bb7cc0088af3f6addddac3219277a14b4aefb135b508d6d9ea15de9"
+size = 1482646
+
+[[inputs]]
+name = "build-dependency-062-signature"
+kind = "build-dependency"
+path = "build-dependencies/systemd-libs-261.2-1-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/systemd-libs-261.2-1-x86_64.pkg.tar.zst.sig"
+revision = "261.2-1"
+sha256 = "ed7cbdcbad66d2190f1468a2ec3aea9ba77c58c1aefb136ee67037a3a193266b"
+size = 119
+
+[[inputs]]
+name = "build-dependency-063"
+kind = "build-dependency"
+path = "build-dependencies/pam-1.7.2-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/pam-1.7.2-2.1-x86_64_v4.pkg.tar.zst"
+revision = "1.7.2-2.1"
+sha256 = "4c9e093fa379cf552ab0cbfcddda24ffe32e88f9896389c4ca5438f63e909e99"
+size = 626031
+
+[[inputs]]
+name = "build-dependency-063-signature"
+kind = "build-dependency"
+path = "build-dependencies/pam-1.7.2-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/pam-1.7.2-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.7.2-2.1"
+sha256 = "b1272a9284f00f4f9b8f9c0a284feda8fca6d16790d3d3d4db410049b9f1869a"
+size = 438
+
+[[inputs]]
+name = "build-dependency-064"
+kind = "build-dependency"
+path = "build-dependencies/libcap-2.78-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libcap-2.78-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.78-1.1"
+sha256 = "c11b1048ffb976495ee3ee6273d0ca297fe06e9f1991605d653705a253507544"
+size = 857749
+
+[[inputs]]
+name = "build-dependency-064-signature"
+kind = "build-dependency"
+path = "build-dependencies/libcap-2.78-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libcap-2.78-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.78-1.1"
+sha256 = "9f9e1078c1b6b1cac30bee60cb2b5f411b273db5f586badcf34058047f44a040"
+size = 438
+
+[[inputs]]
+name = "build-dependency-065"
+kind = "build-dependency"
+path = "build-dependencies/coreutils-9.11-2-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/coreutils-9.11-2-x86_64.pkg.tar.zst"
+revision = "9.11-2"
+sha256 = "8d6668fba51085e680b1510f16ff43d32fbfdd068e78b2000783a4dab1c15513"
+size = 3062677
+
+[[inputs]]
+name = "build-dependency-065-signature"
+kind = "build-dependency"
+path = "build-dependencies/coreutils-9.11-2-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/coreutils-9.11-2-x86_64.pkg.tar.zst.sig"
+revision = "9.11-2"
+sha256 = "afc8f23698419ee9e9aed53301424f98a72c63887571a6a913480414867363d1"
+size = 310
+
+[[inputs]]
+name = "build-dependency-066"
+kind = "build-dependency"
+path = "build-dependencies/findutils-4.11.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/findutils-4.11.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "4.11.0-1.1"
+sha256 = "92f51819b9e12ef1530ae4a338be063671ca9367c9aa7adc5b6dbcaab75472af"
+size = 568745
+
+[[inputs]]
+name = "build-dependency-066-signature"
+kind = "build-dependency"
+path = "build-dependencies/findutils-4.11.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/findutils-4.11.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "4.11.0-1.1"
+sha256 = "c3685b8accf46da89794a2ca9af600cd5dbaab1ca45d509ea582b43a88e8cc1e"
+size = 438
+
+[[inputs]]
+name = "build-dependency-067"
+kind = "build-dependency"
+path = "build-dependencies/p11-kit-0.26.5-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/p11-kit-0.26.5-1.1-x86_64_v4.pkg.tar.zst"
+revision = "0.26.5-1.1"
+sha256 = "b51a202c2fdd91b03ec1638b72f1dae9fb49ff926858137945cb9d8dd19ce009"
+size = 280282
+
+[[inputs]]
+name = "build-dependency-067-signature"
+kind = "build-dependency"
+path = "build-dependencies/p11-kit-0.26.5-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/p11-kit-0.26.5-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "0.26.5-1.1"
+sha256 = "de3777f5a4faaf04099fe1dc1f27b3610b36646e4b28c86d3709150a46787002"
+size = 438
+
+[[inputs]]
+name = "build-dependency-068"
+kind = "build-dependency"
+path = "build-dependencies/ca-certificates-mozilla-3.128-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/ca-certificates-mozilla-3.128-1.1-x86_64_v4.pkg.tar.zst"
+revision = "3.128-1.1"
+sha256 = "51de52638bdea72d2a04485c5fec56858f25e6eb77b22e8e32a44f2afea78d31"
+size = 391666
+
+[[inputs]]
+name = "build-dependency-068-signature"
+kind = "build-dependency"
+path = "build-dependencies/ca-certificates-mozilla-3.128-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/ca-certificates-mozilla-3.128-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.128-1.1"
+sha256 = "4df11bc1611cfc3d7ae02d8e32bdab3fe5cdd7f2e809648a55bb04d86eedafb3"
+size = 438
+
+[[inputs]]
+name = "build-dependency-069"
+kind = "build-dependency"
+path = "build-dependencies/curl-8.22.0-1-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/curl-8.22.0-1-x86_64.pkg.tar.zst"
+revision = "8.22.0-1"
+sha256 = "60b5c0ccc169cf1e36c95a5b2cab79d73c1490715e6b122828a9590fd2fcfc1c"
+size = 1363193
+
+[[inputs]]
+name = "build-dependency-069-signature"
+kind = "build-dependency"
+path = "build-dependencies/curl-8.22.0-1-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/curl-8.22.0-1-x86_64.pkg.tar.zst.sig"
+revision = "8.22.0-1"
+sha256 = "f6875688e523eb87423c0c66fe29ec974dcc1fa86ef034b16743d6324bb9ee9a"
+size = 119
+
+[[inputs]]
+name = "build-dependency-070"
+kind = "build-dependency"
+path = "build-dependencies/json-c-0.19-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/json-c-0.19-1.1-x86_64_v4.pkg.tar.zst"
+revision = "0.19-1.1"
+sha256 = "9dd9e6429349fb8b7f0e42ce7520631e8e625934d219691a8905b80f67bbe26f"
+size = 66644
+
+[[inputs]]
+name = "build-dependency-070-signature"
+kind = "build-dependency"
+path = "build-dependencies/json-c-0.19-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/json-c-0.19-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "0.19-1.1"
+sha256 = "441d596f452d9bc0128f672cfdc671305a843f5359457d30dd2654ab633f33ea"
+size = 438
+
+[[inputs]]
+name = "build-dependency-071"
+kind = "build-dependency"
+path = "build-dependencies/libelf-0.196-1-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/libelf-0.196-1-x86_64.pkg.tar.zst"
+revision = "0.196-1"
+sha256 = "0f75f1f363c60d73f563fddc82964acd01cdc5167dbe2309d5d90e833388842b"
+size = 733210
+
+[[inputs]]
+name = "build-dependency-071-signature"
+kind = "build-dependency"
+path = "build-dependencies/libelf-0.196-1-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/libelf-0.196-1-x86_64.pkg.tar.zst.sig"
+revision = "0.196-1"
+sha256 = "e37a744f06600ae1e88673f54d6d647a50b9423a800412b5f1c4de79d44829a3"
+size = 119
+
+[[inputs]]
+name = "build-dependency-072"
+kind = "build-dependency"
+path = "build-dependencies/pahole-1:1.31-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/pahole-1:1.31-2.1-x86_64_v4.pkg.tar.zst"
+revision = "1:1.31-2.1"
+sha256 = "1da2096b07fa014ab52852f2de06e87585f94ae5d166aaa582e73101478cbc3c"
+size = 374899
+
+[[inputs]]
+name = "build-dependency-072-signature"
+kind = "build-dependency"
+path = "build-dependencies/pahole-1:1.31-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/pahole-1:1.31-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1:1.31-2.1"
+sha256 = "e85776284786f044c1128d04e54e3a8221253bd915a1788fb1ac046f21f3b2c9"
+size = 438
+
+[[inputs]]
+name = "build-dependency-073"
+kind = "build-dependency"
+path = "build-dependencies/expat-2.8.4-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/expat-2.8.4-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.8.4-1.1"
+sha256 = "323870f2d4c9ff902c8090c51279f2961ff52eda235a736cf5e6820d0f11bd14"
+size = 148171
+
+[[inputs]]
+name = "build-dependency-073-signature"
+kind = "build-dependency"
+path = "build-dependencies/expat-2.8.4-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/expat-2.8.4-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.8.4-1.1"
+sha256 = "a3a50bedf023b591aab057ebfa9a6d9cde99c40caa939ba69c5f08c691d527b7"
+size = 438
+
+[[inputs]]
+name = "build-dependency-074"
+kind = "build-dependency"
+path = "build-dependencies/mpdecimal-4.0.1-3.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/mpdecimal-4.0.1-3.1-x86_64_v4.pkg.tar.zst"
+revision = "4.0.1-3.1"
+sha256 = "47e46d76abf837f561fe5326292d99ef8232b219ee52dff71d3dea57fa38d0ab"
+size = 120318
+
+[[inputs]]
+name = "build-dependency-074-signature"
+kind = "build-dependency"
+path = "build-dependencies/mpdecimal-4.0.1-3.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/mpdecimal-4.0.1-3.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "4.0.1-3.1"
+sha256 = "29b6c879006fc3c2b295ff4a672d707991e458eee2cbe7cccc15dfb94cb06fb8"
+size = 438
+
+[[inputs]]
+name = "build-dependency-075"
+kind = "build-dependency"
+path = "build-dependencies/python-3.14.6-3-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/python-3.14.6-3-x86_64_v4.pkg.tar.zst"
+revision = "3.14.6-3"
+sha256 = "7b91d702010c5142b0a9b85b0cbe047da90aa7a851bf173e853aea6112f88f36"
+size = 14593746
+
+[[inputs]]
+name = "build-dependency-075-signature"
+kind = "build-dependency"
+path = "build-dependencies/python-3.14.6-3-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/python-3.14.6-3-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.14.6-3"
+sha256 = "073e35a28f007295094910766263aa081c2d605f836299e249205e205b602dfc"
+size = 438
+
+[[inputs]]
+name = "build-dependency-076"
+kind = "build-dependency"
+path = "build-dependencies/compiler-rt-22.1.8-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/compiler-rt-22.1.8-1.1-x86_64_v4.pkg.tar.zst"
+revision = "22.1.8-1.1"
+sha256 = "06263078c1d5b4ad813450ce3340398941f0c7ab53743234fe3a8364a0ee644a"
+size = 4942982
+
+[[inputs]]
+name = "build-dependency-076-signature"
+kind = "build-dependency"
+path = "build-dependencies/compiler-rt-22.1.8-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/compiler-rt-22.1.8-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "22.1.8-1.1"
+sha256 = "ec410d868980d891749b591870d3f3688cb695cbf8921a734ce46f744f064525"
+size = 438
+
+[[inputs]]
+name = "build-dependency-077"
+kind = "build-dependency"
+path = "build-dependencies/jansson-2.15.1-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/jansson-2.15.1-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.15.1-1.1"
+sha256 = "e43f5b7e57a707bfa0a86ca01e1c14dd4e8482b1f31f82436bbaafb71158af6d"
+size = 115501
+
+[[inputs]]
+name = "build-dependency-077-signature"
+kind = "build-dependency"
+path = "build-dependencies/jansson-2.15.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/jansson-2.15.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.15.1-1.1"
+sha256 = "fb46bc618ecb0f64074deb9b49dd0cf8278535de9db8fb5e876accd844b36b14"
+size = 438
+
+[[inputs]]
+name = "build-dependency-078"
+kind = "build-dependency"
+path = "build-dependencies/binutils-2.47-2-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/binutils-2.47-2-x86_64_v4.pkg.tar.zst"
+revision = "2.47-2"
+sha256 = "29af299f7131d8024a24ca78dbdb3db927b252bd8aeb162200986fae7a83c219"
+size = 9064737
+
+[[inputs]]
+name = "build-dependency-078-signature"
+kind = "build-dependency"
+path = "build-dependencies/binutils-2.47-2-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/binutils-2.47-2-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.47-2"
+sha256 = "2c3b7d4888f1b14828dbce6225233ad1c9fe136ed003f783c54bb26ced6ffdd2"
+size = 438
+
+[[inputs]]
+name = "build-dependency-079"
+kind = "build-dependency"
+path = "build-dependencies/libisl-0.28-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libisl-0.28-1.1-x86_64_v4.pkg.tar.zst"
+revision = "0.28-1.1"
+sha256 = "755331da732c2d549481f0fc9d37152069b1b24fcc8d396e815f1ceb6b986646"
+size = 980832
+
+[[inputs]]
+name = "build-dependency-079-signature"
+kind = "build-dependency"
+path = "build-dependencies/libisl-0.28-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libisl-0.28-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "0.28-1.1"
+sha256 = "6834b1156267aeff36f45fba4b3a0d2e820000a697b8e91a0492b9e8046fd2ae"
+size = 438
+
+[[inputs]]
+name = "build-dependency-080"
+kind = "build-dependency"
+path = "build-dependencies/mpfr-4.2.2-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/mpfr-4.2.2-1.1-x86_64_v4.pkg.tar.zst"
+revision = "4.2.2-1.1"
+sha256 = "c421fccceff4e85ca0b4ae2eada85a1eda04f5e85ba274dc219ddca54c321401"
+size = 460580
+
+[[inputs]]
+name = "build-dependency-080-signature"
+kind = "build-dependency"
+path = "build-dependencies/mpfr-4.2.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/mpfr-4.2.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "4.2.2-1.1"
+sha256 = "9c07e9c3b50b7e2454466ee9c2b3a1678d3c1c420370b0b6ccbb2a32baab0a38"
+size = 438
+
+[[inputs]]
+name = "build-dependency-081"
+kind = "build-dependency"
+path = "build-dependencies/libmpc-1.4.1-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libmpc-1.4.1-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.4.1-1.1"
+sha256 = "e2a7895a229dfff727c0d97fd5e940989925609ed0390b6592f8ef5e7af12d08"
+size = 95913
+
+[[inputs]]
+name = "build-dependency-081-signature"
+kind = "build-dependency"
+path = "build-dependencies/libmpc-1.4.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libmpc-1.4.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.4.1-1.1"
+sha256 = "cea29191a8d81289cfd24332942494a1d9f8e7294649c3d6b88e55a6bd736744"
+size = 438
+
+[[inputs]]
+name = "build-dependency-082"
+kind = "build-dependency"
+path = "build-dependencies/gcc-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/gcc-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "12c1dfab33a06269ccba3d3e9320040ab409b777fca80a9297b043385e5ad3fa"
+size = 67431440
+
+[[inputs]]
+name = "build-dependency-082-signature"
+kind = "build-dependency"
+path = "build-dependencies/gcc-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/gcc-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "1f78a1795df000688845806fe22a85d07fe3c7d5af0387c8cf712576f2caaf58"
+size = 438
+
+[[inputs]]
+name = "build-dependency-083"
+kind = "build-dependency"
+path = "build-dependencies/llhttp-9.3.1-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/llhttp-9.3.1-1.1-x86_64_v4.pkg.tar.zst"
+revision = "9.3.1-1.1"
+sha256 = "6dd2211500d202d3d5ce914787d70e019b97dc39e8c0c45eb8994e996233a560"
+size = 31638
+
+[[inputs]]
+name = "build-dependency-083-signature"
+kind = "build-dependency"
+path = "build-dependencies/llhttp-9.3.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/llhttp-9.3.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "9.3.1-1.1"
+sha256 = "a688c30eff26c8ccbdbb1366d33cadd4e2c54c5c6ee0faf4914c5d007292828c"
+size = 438
+
+[[inputs]]
+name = "build-dependency-084"
+kind = "build-dependency"
+path = "build-dependencies/pcre2-10.48-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/pcre2-10.48-1.1-x86_64_v4.pkg.tar.zst"
+revision = "10.48-1.1"
+sha256 = "a4ea98b967f4cd2f817b55c9144239d0859604f33a697ec926e547af9de1da9a"
+size = 2022556
+
+[[inputs]]
+name = "build-dependency-084-signature"
+kind = "build-dependency"
+path = "build-dependencies/pcre2-10.48-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/pcre2-10.48-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "10.48-1.1"
+sha256 = "3f25d100364184bab91366c72da1963b2370b085f401508b47f56bca9f17d784"
+size = 438
+
+[[inputs]]
+name = "build-dependency-085"
+kind = "build-dependency"
+path = "build-dependencies/libgit2-1:1.9.7-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/libgit2-1:1.9.7-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1:1.9.7-1.1"
+sha256 = "745bced3c2f3c50b3046f38c04befe2eea3b921a877388ea1c1d9ec120d64bce"
+size = 1264760
+
+[[inputs]]
+name = "build-dependency-085-signature"
+kind = "build-dependency"
+path = "build-dependencies/libgit2-1:1.9.7-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/libgit2-1:1.9.7-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1:1.9.7-1.1"
+sha256 = "bd09acf3a07525a89dc2d7a9b905f4be5f34412c50be54a77ec6c11285195f3b"
+size = 438
+
+[[inputs]]
+name = "build-dependency-086"
+kind = "build-dependency"
+path = "build-dependencies/libedit-20260512_3.1-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libedit-20260512_3.1-1.1-x86_64_v4.pkg.tar.zst"
+revision = "20260512_3.1-1.1"
+sha256 = "8c9349923719672e6d684e5c51a16dbd177d184af409110cb4ff8851d75e0f8d"
+size = 147990
+
+[[inputs]]
+name = "build-dependency-086-signature"
+kind = "build-dependency"
+path = "build-dependencies/libedit-20260512_3.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libedit-20260512_3.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "20260512_3.1-1.1"
+sha256 = "b90954aa116d07ab5693600d72c1d23579dc6e3f7c5748618890148a47a2f85d"
+size = 438
+
+[[inputs]]
+name = "build-dependency-087"
+kind = "build-dependency"
+path = "build-dependencies/icu-78.3-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/icu-78.3-1.1-x86_64_v4.pkg.tar.zst"
+revision = "78.3-1.1"
+sha256 = "78488b2ddad181bbc36bb072a53b195fe7f7d3d8ae4065f0257f13ec85e91586"
+size = 12548632
+
+[[inputs]]
+name = "build-dependency-087-signature"
+kind = "build-dependency"
+path = "build-dependencies/icu-78.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/icu-78.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "78.3-1.1"
+sha256 = "5f9e965ee2f0f4b3b27394d6a03967afa39aa7089e941f83c72cf1f28b401d5d"
+size = 438
+
+[[inputs]]
+name = "build-dependency-088"
+kind = "build-dependency"
+path = "build-dependencies/libxml2-2.15.3-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libxml2-2.15.3-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.15.3-1.1"
+sha256 = "d9b42cad29b9f1819065978bfe9756a20e6b65922eb08add4e2c5c2c375f7dea"
+size = 880316
+
+[[inputs]]
+name = "build-dependency-088-signature"
+kind = "build-dependency"
+path = "build-dependencies/libxml2-2.15.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libxml2-2.15.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.15.3-1.1"
+sha256 = "b747e95cd6a094d6224cfe39c1c382838ad0038f9624face88cdd89afc19dc82"
+size = 438
+
+[[inputs]]
+name = "build-dependency-089"
+kind = "build-dependency"
+path = "build-dependencies/llvm-libs-22.1.8-2-x86_64_v3.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/llvm-libs-22.1.8-2-x86_64_v3.pkg.tar.zst"
+revision = "22.1.8-2"
+sha256 = "95c79ac181858b8c5ddf2072593685aea56cbe441a4594dd86344a5fc941c94a"
+size = 37028598
+
+[[inputs]]
+name = "build-dependency-089-signature"
+kind = "build-dependency"
+path = "build-dependencies/llvm-libs-22.1.8-2-x86_64_v3.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/llvm-libs-22.1.8-2-x86_64_v3.pkg.tar.zst.sig"
+revision = "22.1.8-2"
+sha256 = "ba6952faeae5464c63fbe96166b1ada3e464ea1fdf6b11506d077f855a5ad696"
+size = 438
+
+[[inputs]]
+name = "build-dependency-090"
+kind = "build-dependency"
+path = "build-dependencies/lld-22.1.8-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/lld-22.1.8-1.1-x86_64_v4.pkg.tar.zst"
+revision = "22.1.8-1.1"
+sha256 = "6b93de6f75b8db257ce78cc26e809a0f0e9800e6bb7c41c88e19ccde1ba204d8"
+size = 2253492
+
+[[inputs]]
+name = "build-dependency-090-signature"
+kind = "build-dependency"
+path = "build-dependencies/lld-22.1.8-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/lld-22.1.8-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "22.1.8-1.1"
+sha256 = "7c0cf4fa5af645a0166a060f5b474243001b78472db36acec27cd19ad8dd4bdd"
+size = 438
+
+[[inputs]]
+name = "build-dependency-091"
+kind = "build-dependency"
+path = "build-dependencies/rust-1:1.98.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/rust-1:1.98.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1:1.98.0-1.1"
+sha256 = "ce6b0a8709b257162bfa02f577cedbe040fe323938031b40670046f53cb5a915"
+size = 80669355
+
+[[inputs]]
+name = "build-dependency-091-signature"
+kind = "build-dependency"
+path = "build-dependencies/rust-1:1.98.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/rust-1:1.98.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1:1.98.0-1.1"
+sha256 = "03df44f2acba53931df0fc10920840776f54162fc219949be01e5aa2a2282cac"
+size = 438
+
+[[inputs]]
+name = "build-dependency-092"
+kind = "build-dependency"
+path = "build-dependencies/clang-22.1.8-2-x86_64_v3.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/clang-22.1.8-2-x86_64_v3.pkg.tar.zst"
+revision = "22.1.8-2"
+sha256 = "a3a8ce735d0ef2ea8affda1bf00ccafff42be566dc9e22f566686fb43a4472a1"
+size = 45778550
+
+[[inputs]]
+name = "build-dependency-092-signature"
+kind = "build-dependency"
+path = "build-dependencies/clang-22.1.8-2-x86_64_v3.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/clang-22.1.8-2-x86_64_v3.pkg.tar.zst.sig"
+revision = "22.1.8-2"
+sha256 = "4c348cb30cdafafefd27f6e7dbb065ed78028b600cf745972ee911db1a9ae583"
+size = 438
+
+[[inputs]]
+name = "build-dependency-093"
+kind = "build-dependency"
+path = "build-dependencies/rust-bindgen-0.72.1-3.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/rust-bindgen-0.72.1-3.1-x86_64_v4.pkg.tar.zst"
+revision = "0.72.1-3.1"
+sha256 = "ef9c9f6e47ab3a31556d804940d4e6a926268a2349f9f8bec94fac6644cdb0bb"
+size = 1902277
+
+[[inputs]]
+name = "build-dependency-093-signature"
+kind = "build-dependency"
+path = "build-dependencies/rust-bindgen-0.72.1-3.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/rust-bindgen-0.72.1-3.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "0.72.1-3.1"
+sha256 = "356eeaea802f5a4a8f23cdd9928f517a007cc01421211a75410704673ee6deb3"
+size = 438
+
+[[inputs]]
+name = "build-dependency-094"
+kind = "build-dependency"
+path = "build-dependencies/rust-src-1:1.98.0-1-x86_64.pkg.tar.zst"
+origin = "https://archive.archlinux.org/packages/r/rust-src/rust-src-1:1.98.0-1-x86_64.pkg.tar.zst"
+revision = "1:1.98.0-1"
+sha256 = "1fea291aa899445e66692d189dab8098a351207b240c82fba538945a907eb9b9"
+size = 6134762
+
+[[inputs]]
+name = "build-dependency-094-signature"
+kind = "build-dependency"
+path = "build-dependencies/rust-src-1:1.98.0-1-x86_64.pkg.tar.zst.sig"
+origin = "https://archive.archlinux.org/packages/r/rust-src/rust-src-1:1.98.0-1-x86_64.pkg.tar.zst.sig"
+revision = "1:1.98.0-1"
+sha256 = "43f2271ff2bc150dc29a072e94ca290c7903dcb4a268bfee083f4c022fa14291"
+size = 119
+
+[[inputs]]
+name = "build-dependency-095"
+kind = "build-dependency"
+path = "build-dependencies/gawk-5.4.1-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gawk-5.4.1-1.1-x86_64_v4.pkg.tar.zst"
+revision = "5.4.1-1.1"
+sha256 = "ad5458751a0f894b3d053f8f63d8da37add8251836b4e021bfb0a0c2640458b0"
+size = 1635470
+
+[[inputs]]
+name = "build-dependency-095-signature"
+kind = "build-dependency"
+path = "build-dependencies/gawk-5.4.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gawk-5.4.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "5.4.1-1.1"
+sha256 = "fa934e9712b8e7fc3e3af0b449983e863f73042123420afda8111d0f54005e0c"
+size = 438
+
+[[inputs]]
+name = "build-dependency-096"
+kind = "build-dependency"
+path = "build-dependencies/gnulib-l10n-20241231-1-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/gnulib-l10n-20241231-1-any.pkg.tar.zst"
+revision = "20241231-1"
+sha256 = "86e6ea818cb331171018bef6e4486c1176064655e0d459bcecc9cc9c2bb74a2c"
+size = 126997
+
+[[inputs]]
+name = "build-dependency-096-signature"
+kind = "build-dependency"
+path = "build-dependencies/gnulib-l10n-20241231-1-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/gnulib-l10n-20241231-1-any.pkg.tar.zst.sig"
+revision = "20241231-1"
+sha256 = "93d221e4dd995d6583b8c541ee48f3483110c85c676899432fb4533c8eb129b5"
+size = 310
+
+[[inputs]]
+name = "build-dependency-097"
+kind = "build-dependency"
+path = "build-dependencies/gettext-1.0-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gettext-1.0-2.1-x86_64_v4.pkg.tar.zst"
+revision = "1.0-2.1"
+sha256 = "ac21d40a2969af3302854e935d491a2aaaf31ff6b7562154ad7f7568f883e436"
+size = 3504879
+
+[[inputs]]
+name = "build-dependency-097-signature"
+kind = "build-dependency"
+path = "build-dependencies/gettext-1.0-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gettext-1.0-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.0-2.1"
+sha256 = "1f2ed0d8a2d76340f8d51489f51982abfa54c5a3efeb6d9e2b9f15d9c31e530d"
+size = 438
+
+[[inputs]]
+name = "build-dependency-098"
+kind = "build-dependency"
+path = "build-dependencies/libksba-1.8.1-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libksba-1.8.1-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.8.1-1.1"
+sha256 = "b1e372fb49c359162629bbdee0265e96be85531fea875230e334e705175831f2"
+size = 180589
+
+[[inputs]]
+name = "build-dependency-098-signature"
+kind = "build-dependency"
+path = "build-dependencies/libksba-1.8.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libksba-1.8.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.8.1-1.1"
+sha256 = "4c750c329fef9757ff7b04a3854ac797e2d4ecc6ff3af813c5d15cbafbb1c691"
+size = 438
+
+[[inputs]]
+name = "build-dependency-099"
+kind = "build-dependency"
+path = "build-dependencies/libusb-1.0.30-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libusb-1.0.30-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.0.30-1.1"
+sha256 = "5a8596798a42e1b221962000bf4a7bdbeef24a1c9e006fd97125e64f20bef58c"
+size = 87563
+
+[[inputs]]
+name = "build-dependency-099-signature"
+kind = "build-dependency"
+path = "build-dependencies/libusb-1.0.30-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libusb-1.0.30-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.0.30-1.1"
+sha256 = "61a5b4659c0764ee6d1dd4a6a9acd602feb317ff494d2070ac05713154acc59d"
+size = 438
+
+[[inputs]]
+name = "build-dependency-100"
+kind = "build-dependency"
+path = "build-dependencies/libsysprof-capture-50.0-6.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/libsysprof-capture-50.0-6.1-x86_64_v4.pkg.tar.zst"
+revision = "50.0-6.1"
+sha256 = "de740a4eb8ce5f7e2a866183e0009f88b62cc8740f49fad7c6e8ddafa22a78e7"
+size = 57705
+
+[[inputs]]
+name = "build-dependency-100-signature"
+kind = "build-dependency"
+path = "build-dependencies/libsysprof-capture-50.0-6.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/libsysprof-capture-50.0-6.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "50.0-6.1"
+sha256 = "64866d28e1d20923a68ed1ba3f7069ab184c12f8103ecc67e9699018cfabaa76"
+size = 438
+
+[[inputs]]
+name = "build-dependency-101"
+kind = "build-dependency"
+path = "build-dependencies/glib2-2.88.3-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/glib2-2.88.3-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.88.3-1.1"
+sha256 = "1b759baac281692b6169eb093d90561462264e4f4d459b12004c9d8fe99460bd"
+size = 5560168
+
+[[inputs]]
+name = "build-dependency-101-signature"
+kind = "build-dependency"
+path = "build-dependencies/glib2-2.88.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/glib2-2.88.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.88.3-1.1"
+sha256 = "fde1779c75162cf9d8006d5d32318c2aa8b4f4c64b817ef1607b5dcd72c391d1"
+size = 438
+
+[[inputs]]
+name = "build-dependency-102"
+kind = "build-dependency"
+path = "build-dependencies/tpm2-tss-4.2.0-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/tpm2-tss-4.2.0-2.1-x86_64_v4.pkg.tar.zst"
+revision = "4.2.0-2.1"
+sha256 = "d6d5f9f20f7e6ee9de7f7cc86e04ed00e35f5fef37f7e0bb4266b10ef0bbefe9"
+size = 1102905
+
+[[inputs]]
+name = "build-dependency-102-signature"
+kind = "build-dependency"
+path = "build-dependencies/tpm2-tss-4.2.0-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/tpm2-tss-4.2.0-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "4.2.0-2.1"
+sha256 = "a8ef7d71b6133ba3950e2ea4fb5ab0c814cfab0b3ecea0b8e83fd2ba9a5c3441"
+size = 438
+
+[[inputs]]
+name = "build-dependency-103"
+kind = "build-dependency"
+path = "build-dependencies/libsecret-0.21.7-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libsecret-0.21.7-1.1-x86_64_v4.pkg.tar.zst"
+revision = "0.21.7-1.1"
+sha256 = "26f58fd67e09f97c5de8cef7bf4078241251e2098b7da14172765c0a1e5a70f6"
+size = 196457
+
+[[inputs]]
+name = "build-dependency-103-signature"
+kind = "build-dependency"
+path = "build-dependencies/libsecret-0.21.7-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libsecret-0.21.7-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "0.21.7-1.1"
+sha256 = "92109027c0b3b216c64a357c89ccae5ddf7d11e410c9ec336200b8969cb263ab"
+size = 438
+
+[[inputs]]
+name = "build-dependency-104"
+kind = "build-dependency"
+path = "build-dependencies/pinentry-1.3.3-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/pinentry-1.3.3-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.3.3-1.1"
+sha256 = "0526e2ce55f79422e1ca7d4df6510e7a7ea41cf2523ac24779cd0c8d534da762"
+size = 175677
+
+[[inputs]]
+name = "build-dependency-104-signature"
+kind = "build-dependency"
+path = "build-dependencies/pinentry-1.3.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/pinentry-1.3.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.3.3-1.1"
+sha256 = "f94c9bde27b120e80ae3f95997e9fd185709ebc0bb16d2d674287569f347ef29"
+size = 438
+
+[[inputs]]
+name = "build-dependency-105"
+kind = "build-dependency"
+path = "build-dependencies/npth-1.8-1.1-x86_64.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/npth-1.8-1.1-x86_64.pkg.tar.zst"
+revision = "1.8-1.1"
+sha256 = "e72d9c8bfe7aa7845217c1d943167d55aee0f8612485c8af6c81bd313e726446"
+size = 29259
+
+[[inputs]]
+name = "build-dependency-105-signature"
+kind = "build-dependency"
+path = "build-dependencies/npth-1.8-1.1-x86_64.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/npth-1.8-1.1-x86_64.pkg.tar.zst.sig"
+revision = "1.8-1.1"
+sha256 = "9c2ee50ae73ef7c3495031f2179aac362da944c9a7d0bb3860d680d26e244d50"
+size = 438
+
+[[inputs]]
+name = "build-dependency-106"
+kind = "build-dependency"
+path = "build-dependencies/gnupg-2.4.9-3.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gnupg-2.4.9-3.1-x86_64_v4.pkg.tar.zst"
+revision = "2.4.9-3.1"
+sha256 = "2915c15056f36794c01b7e0c5f6f7f9cc94378d9012e240873ccf375a5ed7556"
+size = 3352683
+
+[[inputs]]
+name = "build-dependency-106-signature"
+kind = "build-dependency"
+path = "build-dependencies/gnupg-2.4.9-3.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gnupg-2.4.9-3.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.4.9-3.1"
+sha256 = "527dad61735f1a8dc9101ec3ebd453c2f9569452332fc7f2e70ae2f22bd81e2d"
+size = 438
+
+[[inputs]]
+name = "build-dependency-107"
+kind = "build-dependency"
+path = "build-dependencies/gpgme-2.2.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gpgme-2.2.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.2.0-1.1"
+sha256 = "5befefaa93727e2f219239398236069cd2501d1e0c186e1f4233f58904e3ce4e"
+size = 369464
+
+[[inputs]]
+name = "build-dependency-107-signature"
+kind = "build-dependency"
+path = "build-dependencies/gpgme-2.2.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gpgme-2.2.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.2.0-1.1"
+sha256 = "e2c068de472186a872b01077965e1be7856585d8911b5e4b6622f52fb87ab2fc"
+size = 438
+
+[[inputs]]
+name = "build-dependency-108"
+kind = "build-dependency"
+path = "build-dependencies/grep-3.12-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/grep-3.12-2.1-x86_64_v4.pkg.tar.zst"
+revision = "3.12-2.1"
+sha256 = "816c19b0ae808c19e3990cd6279cbadd5b17a8290734e625494c9e4e9581d9cc"
+size = 251050
+
+[[inputs]]
+name = "build-dependency-108-signature"
+kind = "build-dependency"
+path = "build-dependencies/grep-3.12-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/grep-3.12-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.12-2.1"
+sha256 = "23e65c07809f963ec13c2a397249edbec60df04cf06fc12fdf43f6c613f4dfcc"
+size = 438
+
+[[inputs]]
+name = "build-dependency-109"
+kind = "build-dependency"
+path = "build-dependencies/libarchive-3.8.9-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libarchive-3.8.9-1.1-x86_64_v4.pkg.tar.zst"
+revision = "3.8.9-1.1"
+sha256 = "6fee64192706b33bb30f2a876759b294d12dc3f300ff47d74121df25aa5c3014"
+size = 718440
+
+[[inputs]]
+name = "build-dependency-109-signature"
+kind = "build-dependency"
+path = "build-dependencies/libarchive-3.8.9-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libarchive-3.8.9-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.8.9-1.1"
+sha256 = "deaf2c10a8d5409c1710e70cf7edcc4278606d8a9b9103c3605ad9ea6909ad66"
+size = 438
+
+[[inputs]]
+name = "build-dependency-110"
+kind = "build-dependency"
+path = "build-dependencies/pacman-mirrorlist-20260610-1-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/pacman-mirrorlist-20260610-1-any.pkg.tar.zst"
+revision = "20260610-1"
+sha256 = "f6008b33d950a4e4eb5930fe3852cceb0fe1fa5fdaff36125583201531fe4ae9"
+size = 6631
+
+[[inputs]]
+name = "build-dependency-110-signature"
+kind = "build-dependency"
+path = "build-dependencies/pacman-mirrorlist-20260610-1-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/pacman-mirrorlist-20260610-1-any.pkg.tar.zst.sig"
+revision = "20260610-1"
+sha256 = "3e6c60299cfa759c4018faeff0fe2cc1df4000bfb1739b0a3bc9114a9570de48"
+size = 310
+
+[[inputs]]
+name = "build-dependency-111"
+kind = "build-dependency"
+path = "build-dependencies/device-mapper-2.03.42-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/device-mapper-2.03.42-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.03.42-1.1"
+sha256 = "1cecebf5fbba1b4e91e811b6a3402dae420e32ca29612b86d4255eb84fcb3e7d"
+size = 354094
+
+[[inputs]]
+name = "build-dependency-111-signature"
+kind = "build-dependency"
+path = "build-dependencies/device-mapper-2.03.42-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/device-mapper-2.03.42-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.03.42-1.1"
+sha256 = "64d2156173c78ef0aea6ce027000378d7aaa92af39b4b5f950a59353c5ec5496"
+size = 438
+
+[[inputs]]
+name = "build-dependency-112"
+kind = "build-dependency"
+path = "build-dependencies/cryptsetup-2.8.7-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/cryptsetup-2.8.7-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.8.7-1.1"
+sha256 = "4e8b1dd3f74e58e323ea15940bb152b3a5007c17b74a24d0baa95093cd690b25"
+size = 943785
+
+[[inputs]]
+name = "build-dependency-112-signature"
+kind = "build-dependency"
+path = "build-dependencies/cryptsetup-2.8.7-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/cryptsetup-2.8.7-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.8.7-1.1"
+sha256 = "f1ae3641126629d10b4ab2492b71201c575095802ba690139676058ceee64562"
+size = 438
+
+[[inputs]]
+name = "build-dependency-113"
+kind = "build-dependency"
+path = "build-dependencies/dbus-1.16.2-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/dbus-1.16.2-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.16.2-1.1"
+sha256 = "65f542c7a1841793b1037b5a2d5763698d86c20a417565e15aac07c75e113b93"
+size = 346245
+
+[[inputs]]
+name = "build-dependency-113-signature"
+kind = "build-dependency"
+path = "build-dependencies/dbus-1.16.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/dbus-1.16.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.16.2-1.1"
+sha256 = "a2c670f42495c89555565375385800f8a946ce6ace1e0c638d31786e2bf5c0d7"
+size = 438
+
+[[inputs]]
+name = "build-dependency-114"
+kind = "build-dependency"
+path = "build-dependencies/dbus-broker-37-3.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/dbus-broker-37-3.1-x86_64_v4.pkg.tar.zst"
+revision = "37-3.1"
+sha256 = "a93c7cfe948038d40ebfc455ca45cc3de455ffea9a87c68e8fda4cdb4762d31e"
+size = 178279
+
+[[inputs]]
+name = "build-dependency-114-signature"
+kind = "build-dependency"
+path = "build-dependencies/dbus-broker-37-3.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/dbus-broker-37-3.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "37-3.1"
+sha256 = "cebecd7cdd9d9723c2833d0071316c9ee5c7f583f1c58d7079a2e3ab25582986"
+size = 438
+
+[[inputs]]
+name = "build-dependency-115"
+kind = "build-dependency"
+path = "build-dependencies/dbus-broker-units-37-3.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/dbus-broker-units-37-3.1-x86_64_v4.pkg.tar.zst"
+revision = "37-3.1"
+sha256 = "f0947e9be9ce8a5a616fcacb84cab5703792e57c4973c8b7837c5e90a170a127"
+size = 2580
+
+[[inputs]]
+name = "build-dependency-115-signature"
+kind = "build-dependency"
+path = "build-dependencies/dbus-broker-units-37-3.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/dbus-broker-units-37-3.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "37-3.1"
+sha256 = "32e08474b3f74a9fab5b348d5d271bad845294076b409a35a4568d06db46fd1e"
+size = 438
+
+[[inputs]]
+name = "build-dependency-116"
+kind = "build-dependency"
+path = "build-dependencies/sed-4.10-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/sed-4.10-2.1-x86_64_v4.pkg.tar.zst"
+revision = "4.10-2.1"
+sha256 = "92f05e863fabb07c18011d71f7cbebfee7d9576d362d458338b77e1c35d65902"
+size = 232833
+
+[[inputs]]
+name = "build-dependency-116-signature"
+kind = "build-dependency"
+path = "build-dependencies/sed-4.10-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/sed-4.10-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "4.10-2.1"
+sha256 = "d602eccaf1165bafe9ef9851269c8f7a641a3e0ac9626f2896847e9a2828afe9"
+size = 438
+
+[[inputs]]
+name = "build-dependency-117"
+kind = "build-dependency"
+path = "build-dependencies/gzip-1.14-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gzip-1.14-2.1-x86_64_v4.pkg.tar.zst"
+revision = "1.14-2.1"
+sha256 = "33a8121f97cc0c2ebab5af954d57a7f9d6b823c1fc4370bd2994a3e6887bdb2f"
+size = 99276
+
+[[inputs]]
+name = "build-dependency-117-signature"
+kind = "build-dependency"
+path = "build-dependencies/gzip-1.14-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gzip-1.14-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.14-2.1"
+sha256 = "e2b77e91327d675757d1efc837a148901f03ce8087b42c4d74ec5e958ba1b17c"
+size = 438
+
+[[inputs]]
+name = "build-dependency-118"
+kind = "build-dependency"
+path = "build-dependencies/kbd-2.10.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/kbd-2.10.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.10.0-1.1"
+sha256 = "afcce01cf8f1282cbcfe5e5e653897747e05849e09680160c53b7fac5cc23ee6"
+size = 1352130
+
+[[inputs]]
+name = "build-dependency-118-signature"
+kind = "build-dependency"
+path = "build-dependencies/kbd-2.10.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/kbd-2.10.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.10.0-1.1"
+sha256 = "bb8377bbbbc233eb9a4b9b939b858e05d74ace921ceca5d432a1e81ca049fe62"
+size = 438
+
+[[inputs]]
+name = "build-dependency-119"
+kind = "build-dependency"
+path = "build-dependencies/kmod-34.2-1-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/kmod-34.2-1-x86_64.pkg.tar.zst"
+revision = "34.2-1"
+sha256 = "8cce1b4dfd2a1f354a253bb60a36c83024042eef5d47cb0214ec5d4f47f2007e"
+size = 133390
+
+[[inputs]]
+name = "build-dependency-119-signature"
+kind = "build-dependency"
+path = "build-dependencies/kmod-34.2-1-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/kmod-34.2-1-x86_64.pkg.tar.zst.sig"
+revision = "34.2-1"
+sha256 = "e38e2194a153a67d3a0fbe8953c1d0b4a562607eff08b7dbd7ebb8c7cd0cd867"
+size = 119
+
+[[inputs]]
+name = "build-dependency-120"
+kind = "build-dependency"
+path = "build-dependencies/hwdata-0.410-1-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/hwdata-0.410-1-any.pkg.tar.zst"
+revision = "0.410-1"
+sha256 = "7fdb0f7f95bca493778d939f3a47580fb950a3c827aba337ca34412c672be083"
+size = 1776624
+
+[[inputs]]
+name = "build-dependency-120-signature"
+kind = "build-dependency"
+path = "build-dependencies/hwdata-0.410-1-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/hwdata-0.410-1-any.pkg.tar.zst.sig"
+revision = "0.410-1"
+sha256 = "0ff94c3fffbe91dccefead7796d423cabf06d25b1dcdf5ece2a471c73db6105a"
+size = 310
+
+[[inputs]]
+name = "build-dependency-121"
+kind = "build-dependency"
+path = "build-dependencies/libseccomp-2.6.0-1-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/libseccomp-2.6.0-1-x86_64.pkg.tar.zst"
+revision = "2.6.0-1"
+sha256 = "3d3effb23898177d0faece196ac664859d29027b64cdeee3a09a2c3967b8401d"
+size = 97566
+
+[[inputs]]
+name = "build-dependency-121-signature"
+kind = "build-dependency"
+path = "build-dependencies/libseccomp-2.6.0-1-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/libseccomp-2.6.0-1-x86_64.pkg.tar.zst.sig"
+revision = "2.6.0-1"
+sha256 = "ea9bd6a5c9e2bacfdca13090ec318fd4c2743db13c6d7012c3507d718e6b85af"
+size = 566
+
+[[inputs]]
+name = "build-dependency-122"
+kind = "build-dependency"
+path = "build-dependencies/file-5.48-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/file-5.48-1.1-x86_64_v4.pkg.tar.zst"
+revision = "5.48-1.1"
+sha256 = "ea5c81a483fc6283e46f1471c122dc4f37f2db22e6906b5127eb20a15df3bff4"
+size = 473349
+
+[[inputs]]
+name = "build-dependency-122-signature"
+kind = "build-dependency"
+path = "build-dependencies/file-5.48-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/file-5.48-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "5.48-1.1"
+sha256 = "37d4e684c45b34ba758183aad57c0efc8cabd1e6d3640f8cf8c92e04cae91ace"
+size = 438
+
+[[inputs]]
+name = "build-dependency-123"
+kind = "build-dependency"
+path = "build-dependencies/shadow-4.20.0.arch1-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/shadow-4.20.0.arch1-1.1-x86_64_v4.pkg.tar.zst"
+revision = "4.20.0.arch1-1.1"
+sha256 = "75b92ead58bef61a6e19b6805483f5908b65f3cb629b7ea21ce2032e47dcb3cc"
+size = 1247683
+
+[[inputs]]
+name = "build-dependency-123-signature"
+kind = "build-dependency"
+path = "build-dependencies/shadow-4.20.0.arch1-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/shadow-4.20.0.arch1-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "4.20.0.arch1-1.1"
+sha256 = "2024feb109f6fd2112f213d185fb0eea5eb9da256eb66769e122f73d3fb5bee2"
+size = 438
+
+[[inputs]]
+name = "build-dependency-124"
+kind = "build-dependency"
+path = "build-dependencies/util-linux-2.42.3-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/util-linux-2.42.3-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.42.3-1.1"
+sha256 = "2021e2ed4d8c1f08c9751fd93f3eb521006531af333839584f6bf3e4343bbb28"
+size = 6748207
+
+[[inputs]]
+name = "build-dependency-124-signature"
+kind = "build-dependency"
+path = "build-dependencies/util-linux-2.42.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/util-linux-2.42.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.42.3-1.1"
+sha256 = "51b9cb6da1c964bf03b1e4559050ecd9b2ad1c1a199018b7d2845b323285c258"
+size = 438
+
+[[inputs]]
+name = "build-dependency-125"
+kind = "build-dependency"
+path = "build-dependencies/dbus-units-37-3.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/dbus-units-37-3.1-x86_64_v4.pkg.tar.zst"
+revision = "37-3.1"
+sha256 = "173192a05147e45995d649446efef9e18f58c73ee11593e0d5e6ea4ef2000f1c"
+size = 2320
+
+[[inputs]]
+name = "build-dependency-125-signature"
+kind = "build-dependency"
+path = "build-dependencies/dbus-units-37-3.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/dbus-units-37-3.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "37-3.1"
+sha256 = "33213b03617dfbaaf2ba9cd3b734ef6746d699068bf49f87e0ffef4717363c13"
+size = 438
+
+[[inputs]]
+name = "build-dependency-126"
+kind = "build-dependency"
+path = "build-dependencies/systemd-261.2-1-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/systemd-261.2-1-x86_64.pkg.tar.zst"
+revision = "261.2-1"
+sha256 = "88ed13de43e53e6b8ba6039e7e58c1bc2a15c47234b05f48e68319c93b661cd7"
+size = 10886495
+
+[[inputs]]
+name = "build-dependency-126-signature"
+kind = "build-dependency"
+path = "build-dependencies/systemd-261.2-1-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/systemd-261.2-1-x86_64.pkg.tar.zst.sig"
+revision = "261.2-1"
+sha256 = "71a438a519a0f9a304df4dc45077a24a79e9d0eb14899e122463db6eb1977512"
+size = 119
+
+[[inputs]]
+name = "build-dependency-127"
+kind = "build-dependency"
+path = "build-dependencies/libmakepkg-dropins-20-2-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/libmakepkg-dropins-20-2-any.pkg.tar.zst"
+revision = "20-2"
+sha256 = "78c4e32d3140d11d2fd7d1bac6bcfdbdd34d3b59b56620f987fd28fd4334648e"
+size = 6365
+
+[[inputs]]
+name = "build-dependency-127-signature"
+kind = "build-dependency"
+path = "build-dependencies/libmakepkg-dropins-20-2-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/libmakepkg-dropins-20-2-any.pkg.tar.zst.sig"
+revision = "20-2"
+sha256 = "e86d49d633f0398ac6b8013e0b3fe2804b88b68c79bde95f7d3ff512af681125"
+size = 119
+
+[[inputs]]
+name = "build-dependency-128"
+kind = "build-dependency"
+path = "build-dependencies/pacman-7.1.0.r9.g54d9411-4-x86_64.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/pacman-7.1.0.r9.g54d9411-4-x86_64.pkg.tar.zst"
+revision = "7.1.0.r9.g54d9411-4"
+sha256 = "a90544a46975a3cfd483d71ae4f94da0ac8d97faa6083eafc5babd6ac5d56edb"
+size = 2999540
+
+[[inputs]]
+name = "build-dependency-128-signature"
+kind = "build-dependency"
+path = "build-dependencies/pacman-7.1.0.r9.g54d9411-4-x86_64.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/pacman-7.1.0.r9.g54d9411-4-x86_64.pkg.tar.zst.sig"
+revision = "7.1.0.r9.g54d9411-4"
+sha256 = "2ab171c42eb7add4ea4de186fda5d7e76514b8b30808ef10674827e284599fda"
+size = 438
+
+[[inputs]]
+name = "build-dependency-129"
+kind = "build-dependency"
+path = "build-dependencies/archlinux-keyring-1:20260727-1-any.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/archlinux-keyring-1:20260727-1-any.pkg.tar.zst"
+revision = "1:20260727-1"
+sha256 = "d647f77574d61d25dc342113d71281aff4480c275d9b986af7369d0c206e922a"
+size = 1272511
+
+[[inputs]]
+name = "build-dependency-129-signature"
+kind = "build-dependency"
+path = "build-dependencies/archlinux-keyring-1:20260727-1-any.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/archlinux-keyring-1:20260727-1-any.pkg.tar.zst.sig"
+revision = "1:20260727-1"
+sha256 = "81304d30c2f4d906570547b2413af5be4f5e7f8ef78d8efff51c01f14d67cf80"
+size = 438
+
+[[inputs]]
+name = "build-dependency-130"
+kind = "build-dependency"
+path = "build-dependencies/argon2-20190702-6.2-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/argon2-20190702-6.2-x86_64_v4.pkg.tar.zst"
+revision = "20190702-6.2"
+sha256 = "59180b0d90632e2e028b9243198c18ea3fb539f6295cc1a94fdb1771e4efe04c"
+size = 36407
+
+[[inputs]]
+name = "build-dependency-130-signature"
+kind = "build-dependency"
+path = "build-dependencies/argon2-20190702-6.2-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/argon2-20190702-6.2-x86_64_v4.pkg.tar.zst.sig"
+revision = "20190702-6.2"
+sha256 = "4fc8144af32c17e45e5e18aafa3734b96def08ffcb03358b090bb50730024987"
+size = 438
+
+[[inputs]]
+name = "build-dependency-131"
+kind = "build-dependency"
+path = "build-dependencies/m4-1.4.21-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/m4-1.4.21-2.1-x86_64_v4.pkg.tar.zst"
+revision = "1.4.21-2.1"
+sha256 = "3264e128a0301ce2098be7dd33920064b5b28d99714faf691d20c09ba79fea6a"
+size = 293299
+
+[[inputs]]
+name = "build-dependency-131-signature"
+kind = "build-dependency"
+path = "build-dependencies/m4-1.4.21-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/m4-1.4.21-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.4.21-2.1"
+sha256 = "ebb22c7a6048dff7d38361ae68a8ad2212cfa40cd8d336bf38d6853b11ad9217"
+size = 438
+
+[[inputs]]
+name = "build-dependency-132"
+kind = "build-dependency"
+path = "build-dependencies/diffutils-3.12-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/diffutils-3.12-2.1-x86_64_v4.pkg.tar.zst"
+revision = "3.12-2.1"
+sha256 = "1a4744e373393b3e29df7eecb772eb14165f4aafd92fd2eaf98112ee5a05fa30"
+size = 357628
+
+[[inputs]]
+name = "build-dependency-132-signature"
+kind = "build-dependency"
+path = "build-dependencies/diffutils-3.12-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/diffutils-3.12-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.12-2.1"
+sha256 = "1b7c34f1d2e0c624f62c48f83771c5174085bd6e51b5ba10d5f8d67210b537b2"
+size = 438
+
+[[inputs]]
+name = "build-dependency-133"
+kind = "build-dependency"
+path = "build-dependencies/db5.3-5.3.28-7.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/db5.3-5.3.28-7.1-x86_64_v4.pkg.tar.zst"
+revision = "5.3.28-7.1"
+sha256 = "27692b1550825528e32ad99d4d401b5dc418ceec6d23fe1791e4a62401b5dfd9"
+size = 1375106
+
+[[inputs]]
+name = "build-dependency-133-signature"
+kind = "build-dependency"
+path = "build-dependencies/db5.3-5.3.28-7.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/db5.3-5.3.28-7.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "5.3.28-7.1"
+sha256 = "9cfd57fdc59881b1cb2ae1423298bc4e39256a101bedd0718666123cc25b7abf"
+size = 438
+
+[[inputs]]
+name = "build-dependency-134"
+kind = "build-dependency"
+path = "build-dependencies/perl-5.42.2-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/perl-5.42.2-2.1-x86_64_v4.pkg.tar.zst"
+revision = "5.42.2-2.1"
+sha256 = "c398fb75ef8e8d6883f8bb87066d6d8003e3a6ce9cb99452388c83458ae11445"
+size = 18385709
+
+[[inputs]]
+name = "build-dependency-134-signature"
+kind = "build-dependency"
+path = "build-dependencies/perl-5.42.2-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/perl-5.42.2-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "5.42.2-2.1"
+sha256 = "cd0d988857eeac70e406ba0ee3be490be76ef4eef9cc5812975a4e20ff08bb92"
+size = 438
+
+[[inputs]]
+name = "build-dependency-135"
+kind = "build-dependency"
+path = "build-dependencies/autoconf-2.73-1-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/autoconf-2.73-1-any.pkg.tar.zst"
+revision = "2.73-1"
+sha256 = "70be528019e04291fe52125c59121a99a3d39da8f1b89826f323ab81a92f492e"
+size = 668651
+
+[[inputs]]
+name = "build-dependency-135-signature"
+kind = "build-dependency"
+path = "build-dependencies/autoconf-2.73-1-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/autoconf-2.73-1-any.pkg.tar.zst.sig"
+revision = "2.73-1"
+sha256 = "a90dea2badb5cbcc2ef10c5b536df1c78caed1f7d243654901198167c3991f6e"
+size = 566
+
+[[inputs]]
+name = "build-dependency-136"
+kind = "build-dependency"
+path = "build-dependencies/automake-1.18.1-1-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/automake-1.18.1-1-any.pkg.tar.zst"
+revision = "1.18.1-1"
+sha256 = "47416f72d0d579b391f9be5a55f5b3fa204a09097512b8179d6be5fa0527510a"
+size = 649767
+
+[[inputs]]
+name = "build-dependency-136-signature"
+kind = "build-dependency"
+path = "build-dependencies/automake-1.18.1-1-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/automake-1.18.1-1-any.pkg.tar.zst.sig"
+revision = "1.18.1-1"
+sha256 = "4de1db79f39e807a8828fbb33614614eee1a47b7fbfc0798a7ff80c82cd4b763"
+size = 566
+
+[[inputs]]
+name = "build-dependency-137"
+kind = "build-dependency"
+path = "build-dependencies/procps-ng-4.0.7-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/procps-ng-4.0.7-1.1-x86_64_v4.pkg.tar.zst"
+revision = "4.0.7-1.1"
+sha256 = "ef609f50e6bd68e0738add902cb7b77512fd394a07c3d84afd59a5ca5606ecbe"
+size = 1059812
+
+[[inputs]]
+name = "build-dependency-137-signature"
+kind = "build-dependency"
+path = "build-dependencies/procps-ng-4.0.7-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/procps-ng-4.0.7-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "4.0.7-1.1"
+sha256 = "b60408e656d8c4ab3e2c17b7ba59939705d69eb9d1b317a82dd30c6cd4ced397"
+size = 438
+
+[[inputs]]
+name = "build-dependency-138"
+kind = "build-dependency"
+path = "build-dependencies/tar-1.35-5.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/tar-1.35-5.1-x86_64_v4.pkg.tar.zst"
+revision = "1.35-5.1"
+sha256 = "11a3f889d45ff962aa1e76d5888e7ce69c009dfff16685d1165d47ff24c860b8"
+size = 825963
+
+[[inputs]]
+name = "build-dependency-138-signature"
+kind = "build-dependency"
+path = "build-dependencies/tar-1.35-5.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/tar-1.35-5.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.35-5.1"
+sha256 = "1abe08da1d500aadb51ffb50c5cf1eeb6f047f8bd153303b64ef6bd16bb76a53"
+size = 438
+
+[[inputs]]
+name = "build-dependency-139"
+kind = "build-dependency"
+path = "build-dependencies/pciutils-3.15.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/pciutils-3.15.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "3.15.0-1.1"
+sha256 = "028c59d000284f1dbb4c91271327c5a14ef839ebf2ba436ee56880968a460c98"
+size = 182483
+
+[[inputs]]
+name = "build-dependency-139-signature"
+kind = "build-dependency"
+path = "build-dependencies/pciutils-3.15.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/pciutils-3.15.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.15.0-1.1"
+sha256 = "9449540163d74bacaf0f048d9844214d2194cb650bedc65022a2591a4489105e"
+size = 438
+
+[[inputs]]
+name = "build-dependency-140"
+kind = "build-dependency"
+path = "build-dependencies/psmisc-23.7-2.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/psmisc-23.7-2.1-x86_64_v4.pkg.tar.zst"
+revision = "23.7-2.1"
+sha256 = "bd4c90cb21c0087bf8da72f75f78f811f381ae368e82d36954119f2aef38142d"
+size = 274131
+
+[[inputs]]
+name = "build-dependency-140-signature"
+kind = "build-dependency"
+path = "build-dependencies/psmisc-23.7-2.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/psmisc-23.7-2.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "23.7-2.1"
+sha256 = "12e23fdb04bdcd3b2c3c2e46793671b17cb9c772cf84a91c851f365a2039b3c0"
+size = 438
+
+[[inputs]]
+name = "build-dependency-141"
+kind = "build-dependency"
+path = "build-dependencies/systemd-sysvcompat-261.2-1-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/systemd-sysvcompat-261.2-1-x86_64.pkg.tar.zst"
+revision = "261.2-1"
+sha256 = "010928040f6e84df439f820e7fa9b4c684d9651f07e24ff6d27bc0f3f50eacca"
+size = 6717
+
+[[inputs]]
+name = "build-dependency-141-signature"
+kind = "build-dependency"
+path = "build-dependencies/systemd-sysvcompat-261.2-1-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/systemd-sysvcompat-261.2-1-x86_64.pkg.tar.zst.sig"
+revision = "261.2-1"
+sha256 = "303fba4fe1e34c841021aff404df0f88d4209b4139499eb3f8afb4055db64348"
+size = 119
+
+[[inputs]]
+name = "build-dependency-142"
+kind = "build-dependency"
+path = "build-dependencies/iputils-20250605-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/iputils-20250605-1.1-x86_64_v4.pkg.tar.zst"
+revision = "20250605-1.1"
+sha256 = "b6c0f84094039d1825e3da008cedf36c20f2a20a88b1fe9864dbb78bde574bbf"
+size = 145459
+
+[[inputs]]
+name = "build-dependency-142-signature"
+kind = "build-dependency"
+path = "build-dependencies/iputils-20250605-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/iputils-20250605-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "20250605-1.1"
+sha256 = "10b074e930920f0d6d477a6507973dc19e01b4b65faafe032f796b39ce175278"
+size = 438
+
+[[inputs]]
+name = "build-dependency-143"
+kind = "build-dependency"
+path = "build-dependencies/libnetfilter_conntrack-1.1.1-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libnetfilter_conntrack-1.1.1-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.1.1-1.1"
+sha256 = "c6c9774b433da9f1c39bd33550fabb410b2262c599e2ab39e0a310e4a4a213de"
+size = 52761
+
+[[inputs]]
+name = "build-dependency-143-signature"
+kind = "build-dependency"
+path = "build-dependencies/libnetfilter_conntrack-1.1.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libnetfilter_conntrack-1.1.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.1.1-1.1"
+sha256 = "5a2d34100ed5bc826649fb4395098dd5df20e07579b301d791e198ca1fce1f9e"
+size = 438
+
+[[inputs]]
+name = "build-dependency-144"
+kind = "build-dependency"
+path = "build-dependencies/libnftnl-1.3.2-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libnftnl-1.3.2-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.3.2-1.1"
+sha256 = "55af423855b22e3f240500ad12c8e0293b75e322b88fcaafaa87a9d4bf8277c4"
+size = 83122
+
+[[inputs]]
+name = "build-dependency-144-signature"
+kind = "build-dependency"
+path = "build-dependencies/libnftnl-1.3.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libnftnl-1.3.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.3.2-1.1"
+sha256 = "b86e0a7793ace0ba8b511204041a8568e58ffa8647aebce951b50660242ab213"
+size = 438
+
+[[inputs]]
+name = "build-dependency-145"
+kind = "build-dependency"
+path = "build-dependencies/libnl-3.12.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libnl-3.12.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "3.12.0-1.1"
+sha256 = "8d3e894af9f48c21ed011d1cde6b5c8f6da00686f4e8bd79951cb006f2c5cc9e"
+size = 460120
+
+[[inputs]]
+name = "build-dependency-145-signature"
+kind = "build-dependency"
+path = "build-dependencies/libnl-3.12.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libnl-3.12.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.12.0-1.1"
+sha256 = "13dc4bfcf8a1e79686b8303d5832bb59f198262489b9f68dd50d84dd69753fb6"
+size = 438
+
+[[inputs]]
+name = "build-dependency-146"
+kind = "build-dependency"
+path = "build-dependencies/libpcap-1.10.6-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libpcap-1.10.6-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.10.6-1.1"
+sha256 = "a697320555437fa6056b793911ff15853645aac4f94f1cb8235547875704b17c"
+size = 323625
+
+[[inputs]]
+name = "build-dependency-146-signature"
+kind = "build-dependency"
+path = "build-dependencies/libpcap-1.10.6-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libpcap-1.10.6-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.10.6-1.1"
+sha256 = "29a9b006fc0566b0bcd93e22b9facf561c298130c9738a539bc54b1c0c03e188"
+size = 438
+
+[[inputs]]
+name = "build-dependency-147"
+kind = "build-dependency"
+path = "build-dependencies/nftables-1:1.1.7-3.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/nftables-1:1.1.7-3.1-x86_64_v4.pkg.tar.zst"
+revision = "1:1.1.7-3.1"
+sha256 = "ff45a85035a70cd56406aca6fc1f2049daa661833c7b3163053c8b96756a3144"
+size = 529975
+
+[[inputs]]
+name = "build-dependency-147-signature"
+kind = "build-dependency"
+path = "build-dependencies/nftables-1:1.1.7-3.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/nftables-1:1.1.7-3.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1:1.1.7-3.1"
+sha256 = "2216c7f22bb249215bf620400eb9002106327e4a435eef9dd0045f9116672e7e"
+size = 438
+
+[[inputs]]
+name = "build-dependency-148"
+kind = "build-dependency"
+path = "build-dependencies/iptables-1:1.8.13-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/iptables-1:1.8.13-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1:1.8.13-1.1"
+sha256 = "59b3361d1b32de010b7d1040c57a4788327a071bb1a0ffd43c8bf94974d2dc00"
+size = 472381
+
+[[inputs]]
+name = "build-dependency-148-signature"
+kind = "build-dependency"
+path = "build-dependencies/iptables-1:1.8.13-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/iptables-1:1.8.13-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1:1.8.13-1.1"
+sha256 = "7177b25cbb4f68ec95272ed5cdfcfca486cb659b9031338c05576eb68171fc61"
+size = 438
+
+[[inputs]]
+name = "build-dependency-149"
+kind = "build-dependency"
+path = "build-dependencies/libbpf-1.7.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libbpf-1.7.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.7.0-1.1"
+sha256 = "b6aef00254dd4cf089ab2450a2001e6517d51c7ef8c5b08e7b8d4b520db6f20e"
+size = 306166
+
+[[inputs]]
+name = "build-dependency-149-signature"
+kind = "build-dependency"
+path = "build-dependencies/libbpf-1.7.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/libbpf-1.7.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.7.0-1.1"
+sha256 = "ed27404b3b62d0ae1eb54de8806fc2b1139c8ccb76e83b3aaa633da3d61f7e40"
+size = 438
+
+[[inputs]]
+name = "build-dependency-150"
+kind = "build-dependency"
+path = "build-dependencies/iproute2-7.2.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/iproute2-7.2.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "7.2.0-1.1"
+sha256 = "650ef0305c00ceafe879583f98e6c983db2ce9db31a19e4252c1815aeea17ebf"
+size = 1418336
+
+[[inputs]]
+name = "build-dependency-150-signature"
+kind = "build-dependency"
+path = "build-dependencies/iproute2-7.2.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/iproute2-7.2.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "7.2.0-1.1"
+sha256 = "a124efac4e3b3588ba89a48c2f34d7be5c5165884f459775a18287e3654f538a"
+size = 438
+
+[[inputs]]
+name = "build-dependency-151"
+kind = "build-dependency"
+path = "build-dependencies/base-3-3-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/base-3-3-any.pkg.tar.zst"
+revision = "3-3"
+sha256 = "e144d83f03b1a003d31bf9c83990bfe0a503bb7bd8721dee88d72c74606acd37"
+size = 2396
+
+[[inputs]]
+name = "build-dependency-151-signature"
+kind = "build-dependency"
+path = "build-dependencies/base-3-3-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/base-3-3-any.pkg.tar.zst.sig"
+revision = "3-3"
+sha256 = "68e32a033376ad8a2331ba8eb48a96e4bd3c34ae9e8cfbd59b51b77d1c67882a"
+size = 119
+
+[[inputs]]
+name = "build-dependency-152"
+kind = "build-dependency"
+path = "build-dependencies/cachyos-mirrorlist-27-1-any.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/cachyos-mirrorlist-27-1-any.pkg.tar.zst"
+revision = "27-1"
+sha256 = "69c6a033d45ecc105f632dcdc41528d0a2c84c927df0e2728bee2a8bd22d2015"
+size = 3630
+
+[[inputs]]
+name = "build-dependency-152-signature"
+kind = "build-dependency"
+path = "build-dependencies/cachyos-mirrorlist-27-1-any.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/cachyos-mirrorlist-27-1-any.pkg.tar.zst.sig"
+revision = "27-1"
+sha256 = "03690edfe54570f28d1c56fd882b1d4dfbc32ed131baa5a20db880431fbd1d43"
+size = 438
+
+[[inputs]]
+name = "build-dependency-153"
+kind = "build-dependency"
+path = "build-dependencies/librustls-0.15.3-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/librustls-0.15.3-1.1-x86_64_v4.pkg.tar.zst"
+revision = "0.15.3-1.1"
+sha256 = "d11272c1bed6c100977765fe85477d8f2ecbbf96a6cd9bd685f37520a9150d2e"
+size = 1397984
+
+[[inputs]]
+name = "build-dependency-153-signature"
+kind = "build-dependency"
+path = "build-dependencies/librustls-0.15.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/librustls-0.15.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "0.15.3-1.1"
+sha256 = "5b7729a9073aef73120c91e5b93fb41d7f9df6cab8b8915cb2b9d436a85926b4"
+size = 438
+
+[[inputs]]
+name = "build-dependency-154"
+kind = "build-dependency"
+path = "build-dependencies/rate-mirrors-0.31.0-2-x86_64.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/rate-mirrors-0.31.0-2-x86_64.pkg.tar.zst"
+revision = "0.31.0-2"
+sha256 = "4ecf4504f5ed2283abc63b33b05bd66924ebe7eb1e2e41e863c52a81b9076188"
+size = 2095317
+
+[[inputs]]
+name = "build-dependency-154-signature"
+kind = "build-dependency"
+path = "build-dependencies/rate-mirrors-0.31.0-2-x86_64.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/rate-mirrors-0.31.0-2-x86_64.pkg.tar.zst.sig"
+revision = "0.31.0-2"
+sha256 = "4457d970774851840bbef003df430c9752c436f6588c2f43c41b276b84435203"
+size = 438
+
+[[inputs]]
+name = "build-dependency-155"
+kind = "build-dependency"
+path = "build-dependencies/cachyos-rate-mirrors-24-1-any.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/cachyos-rate-mirrors-24-1-any.pkg.tar.zst"
+revision = "24-1"
+sha256 = "f87cee38d4341ae6c05e47ace9f47a763fb8e4650f710d5d712c9dc060b43238"
+size = 5658
+
+[[inputs]]
+name = "build-dependency-155-signature"
+kind = "build-dependency"
+path = "build-dependencies/cachyos-rate-mirrors-24-1-any.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/cachyos-rate-mirrors-24-1-any.pkg.tar.zst.sig"
+revision = "24-1"
+sha256 = "549cfe085bfbaa23df74cc5c92c2d9ac33ac964d05ab2df09b7d4abdeea50fec"
+size = 437
+
+[[inputs]]
+name = "build-dependency-156"
+kind = "build-dependency"
+path = "build-dependencies/cachyos-v3-mirrorlist-27-1-any.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/cachyos-v3-mirrorlist-27-1-any.pkg.tar.zst"
+revision = "27-1"
+sha256 = "bce9178b60daf6cae1892cc8bd21603443a92352f3d5bc231465e157dc269207"
+size = 3650
+
+[[inputs]]
+name = "build-dependency-156-signature"
+kind = "build-dependency"
+path = "build-dependencies/cachyos-v3-mirrorlist-27-1-any.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/cachyos-v3-mirrorlist-27-1-any.pkg.tar.zst.sig"
+revision = "27-1"
+sha256 = "19d57c78a06730f2b3421f675300c912550fb589bc859e85aceb442290ffbffa"
+size = 438
+
+[[inputs]]
+name = "build-dependency-157"
+kind = "build-dependency"
+path = "build-dependencies/cachyos-v4-mirrorlist-27-1-any.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/cachyos-v4-mirrorlist-27-1-any.pkg.tar.zst"
+revision = "27-1"
+sha256 = "813ecafefb03a49dfb505ad594e1dd653c95d035661f70f4e38958cc36f409b4"
+size = 3646
+
+[[inputs]]
+name = "build-dependency-157-signature"
+kind = "build-dependency"
+path = "build-dependencies/cachyos-v4-mirrorlist-27-1-any.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/cachyos-v4-mirrorlist-27-1-any.pkg.tar.zst.sig"
+revision = "27-1"
+sha256 = "0fb58718e40a95e6db6453e7ae4188b7bab2b9ccbdd247e02f94d3bea9bb6729"
+size = 438
+
+[[inputs]]
+name = "build-dependency-158"
+kind = "build-dependency"
+path = "build-dependencies/db-6.2.32-4.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/db-6.2.32-4.1-x86_64_v4.pkg.tar.zst"
+revision = "6.2.32-4.1"
+sha256 = "a894d91e20f0863eddea7a364c5031914966d846ccc4f510bcf4d8a6829a49f3"
+size = 1443353
+
+[[inputs]]
+name = "build-dependency-158-signature"
+kind = "build-dependency"
+path = "build-dependencies/db-6.2.32-4.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/db-6.2.32-4.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "6.2.32-4.1"
+sha256 = "8b07fe925eb80238ba75b6c9a95d1172c814757ab93e07219da9735bfc5e61b5"
+size = 438
+
+[[inputs]]
+name = "build-dependency-159"
+kind = "build-dependency"
+path = "build-dependencies/xxhash-0.8.3-1-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/extra/os/x86_64/xxhash-0.8.3-1-x86_64.pkg.tar.zst"
+revision = "0.8.3-1"
+sha256 = "3d48ff40b744aa4503cd5638f620c2c39a12d27967d1db3ab46bf18ff4b2fd80"
+size = 100356
+
+[[inputs]]
+name = "build-dependency-159-signature"
+kind = "build-dependency"
+path = "build-dependencies/xxhash-0.8.3-1-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/extra/os/x86_64/xxhash-0.8.3-1-x86_64.pkg.tar.zst.sig"
+revision = "0.8.3-1"
+sha256 = "ea0cabb3dfacdad66afc31eb39e7708593e0aaa6220d524465098bde95a63b15"
+size = 119
+
+[[inputs]]
+name = "build-dependency-160"
+kind = "build-dependency"
+path = "build-dependencies/elfutils-0.196-1-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/elfutils-0.196-1-x86_64.pkg.tar.zst"
+revision = "0.196-1"
+sha256 = "e62e30022561c2465e6c6bb497522d6e269f2f620379a1eb59c2c03e4c14ef7d"
+size = 711053
+
+[[inputs]]
+name = "build-dependency-160-signature"
+kind = "build-dependency"
+path = "build-dependencies/elfutils-0.196-1-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/elfutils-0.196-1-x86_64.pkg.tar.zst.sig"
+revision = "0.196-1"
+sha256 = "325cd118ff5bd4cf53d6ff11929f672895db016827ff9e10207c2e43c43d0a70"
+size = 119
+
+[[inputs]]
+name = "build-dependency-161"
+kind = "build-dependency"
+path = "build-dependencies/boost-libs-1.92.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/boost-libs-1.92.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.92.0-1.1"
+sha256 = "799c1b554b437b254d8f5437bd753f701a88641ec9d8062e00c65c05663b79dc"
+size = 6803127
+
+[[inputs]]
+name = "build-dependency-161-signature"
+kind = "build-dependency"
+path = "build-dependencies/boost-libs-1.92.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/boost-libs-1.92.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.92.0-1.1"
+sha256 = "e07bc515541fe5e0efd46ea7da61f0a790ebf27d4934be0680bf315a34493353"
+size = 438
+
+[[inputs]]
+name = "build-dependency-162"
+kind = "build-dependency"
+path = "build-dependencies/gc-8.2.12-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gc-8.2.12-1.1-x86_64_v4.pkg.tar.zst"
+revision = "8.2.12-1.1"
+sha256 = "0d52881209da0d523c4d59530a4831bd40b411e9a2c0a90b7c8908859ddd4170"
+size = 255809
+
+[[inputs]]
+name = "build-dependency-162-signature"
+kind = "build-dependency"
+path = "build-dependencies/gc-8.2.12-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/gc-8.2.12-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "8.2.12-1.1"
+sha256 = "0cbd272c17320a7ff4f4d125d89b365648d742868e4c40bc12d6e11242ed9fc6"
+size = 438
+
+[[inputs]]
+name = "build-dependency-163"
+kind = "build-dependency"
+path = "build-dependencies/guile-3.0.11-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/guile-3.0.11-1.1-x86_64_v4.pkg.tar.zst"
+revision = "3.0.11-1.1"
+sha256 = "0bfde520187f5451d324ed855cafce5f4b392e09e74416326d1a5c654300bf2d"
+size = 8859395
+
+[[inputs]]
+name = "build-dependency-163-signature"
+kind = "build-dependency"
+path = "build-dependencies/guile-3.0.11-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/guile-3.0.11-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.0.11-1.1"
+sha256 = "899b8bd1eb7a7974bbbf5a129e09a79669df0bc31a0c7687d8d9b9446c32c049"
+size = 438
+
+[[inputs]]
+name = "build-dependency-164"
+kind = "build-dependency"
+path = "build-dependencies/gdb-common-17.2-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/gdb-common-17.2-1.1-x86_64_v4.pkg.tar.zst"
+revision = "17.2-1.1"
+sha256 = "2bb4dfc97d6c7830a8e0d53192d81f73e7017e9cb5c7c7034c7f9b16cee3716f"
+size = 123274
+
+[[inputs]]
+name = "build-dependency-164-signature"
+kind = "build-dependency"
+path = "build-dependencies/gdb-common-17.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/gdb-common-17.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "17.2-1.1"
+sha256 = "0f5ba5c00efaaf7e895ba746a0e31a6abc52f1b874b2fa3772155978b0c947cd"
+size = 438
+
+[[inputs]]
+name = "build-dependency-165"
+kind = "build-dependency"
+path = "build-dependencies/source-highlight-3.1.9-19.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/source-highlight-3.1.9-19.1-x86_64_v4.pkg.tar.zst"
+revision = "3.1.9-19.1"
+sha256 = "a1ebf7bebcede90cf4c105abb27dd54e8fdc1af87a92774f17e8761c5aeadf51"
+size = 760723
+
+[[inputs]]
+name = "build-dependency-165-signature"
+kind = "build-dependency"
+path = "build-dependencies/source-highlight-3.1.9-19.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/source-highlight-3.1.9-19.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.1.9-19.1"
+sha256 = "446d6c5fd209677488f675e28d7bc7e4a73112ebf873d8de3128a2e6c70f74a2"
+size = 438
+
+[[inputs]]
+name = "build-dependency-166"
+kind = "build-dependency"
+path = "build-dependencies/gdb-17.2-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/gdb-17.2-1.1-x86_64_v4.pkg.tar.zst"
+revision = "17.2-1.1"
+sha256 = "71a69729535c65422fb73c33f9b7972645022137a0dff8af80489bfd94be7d3d"
+size = 9892721
+
+[[inputs]]
+name = "build-dependency-166-signature"
+kind = "build-dependency"
+path = "build-dependencies/gdb-17.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/gdb-17.2-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "17.2-1.1"
+sha256 = "d035a0a355f1a81235e8ed221c56af02f0bf7f3a0af20c1e35496f374746dc1e"
+size = 438
+
+[[inputs]]
+name = "build-dependency-167"
+kind = "build-dependency"
+path = "build-dependencies/debugedit-5.3-2-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/debugedit-5.3-2-x86_64.pkg.tar.zst"
+revision = "5.3-2"
+sha256 = "984e5914a6f2a456dff38518e68a67826948454a846b4047222e25a1d721a157"
+size = 52845
+
+[[inputs]]
+name = "build-dependency-167-signature"
+kind = "build-dependency"
+path = "build-dependencies/debugedit-5.3-2-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/debugedit-5.3-2-x86_64.pkg.tar.zst.sig"
+revision = "5.3-2"
+sha256 = "52a07eafa11dd536c7bf2de3588ff3145385ebfd6ee318da339f2542e45a27ab"
+size = 119
+
+[[inputs]]
+name = "build-dependency-168"
+kind = "build-dependency"
+path = "build-dependencies/fakeroot-1:1.37.2-3.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/fakeroot-1:1.37.2-3.1-x86_64_v4.pkg.tar.zst"
+revision = "1:1.37.2-3.1"
+sha256 = "e53110550c31f728a84e0597c02d325fd779847fd1c279356036895a7e7c7e05"
+size = 81627
+
+[[inputs]]
+name = "build-dependency-168-signature"
+kind = "build-dependency"
+path = "build-dependencies/fakeroot-1:1.37.2-3.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/fakeroot-1:1.37.2-3.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1:1.37.2-3.1"
+sha256 = "5faff0607204f0eab70c415edd529688fcdc2287c3098ea14e3dfbbee9028753"
+size = 438
+
+[[inputs]]
+name = "build-dependency-169"
+kind = "build-dependency"
+path = "build-dependencies/flex-2.6.4-6.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/flex-2.6.4-6.1-x86_64_v4.pkg.tar.zst"
+revision = "2.6.4-6.1"
+sha256 = "18a0597ae0bd3d765dbc2d0580ad0f27fc839fcacd504d3a1f1bdaf4cebe557d"
+size = 311925
+
+[[inputs]]
+name = "build-dependency-169-signature"
+kind = "build-dependency"
+path = "build-dependencies/flex-2.6.4-6.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/flex-2.6.4-6.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.6.4-6.1"
+sha256 = "b59d06e684121fc845a8bd6a56d0d1f96a650da48ed51a9f493995936e0350b1"
+size = 438
+
+[[inputs]]
+name = "build-dependency-170"
+kind = "build-dependency"
+path = "build-dependencies/perl-error-0.17030-3-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/extra/os/x86_64/perl-error-0.17030-3-any.pkg.tar.zst"
+revision = "0.17030-3"
+sha256 = "2a6df48b14b3ea0cd6154b46825b4d056b9525a9a3e9afe761decda1d115d196"
+size = 21635
+
+[[inputs]]
+name = "build-dependency-170-signature"
+kind = "build-dependency"
+path = "build-dependencies/perl-error-0.17030-3-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/extra/os/x86_64/perl-error-0.17030-3-any.pkg.tar.zst.sig"
+revision = "0.17030-3"
+sha256 = "09e982cc6edfe66099bb6b8e6e03864de5e86591aa4fa6eb7cdcf18cceea4d8b"
+size = 310
+
+[[inputs]]
+name = "build-dependency-171"
+kind = "build-dependency"
+path = "build-dependencies/perl-timedate-2.35-1-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/extra/os/x86_64/perl-timedate-2.35-1-any.pkg.tar.zst"
+revision = "2.35-1"
+sha256 = "225b05f5d301b7e168299240b9369cece8d0bddee8627117ce23a57880679715"
+size = 63820
+
+[[inputs]]
+name = "build-dependency-171-signature"
+kind = "build-dependency"
+path = "build-dependencies/perl-timedate-2.35-1-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/extra/os/x86_64/perl-timedate-2.35-1-any.pkg.tar.zst.sig"
+revision = "2.35-1"
+sha256 = "cd483a6b3b5f8e7af69dec3df347cff644ea2e5323d4384bec2e04d5e36953be"
+size = 566
+
+[[inputs]]
+name = "build-dependency-172"
+kind = "build-dependency"
+path = "build-dependencies/perl-mailtools-2.22-3-any.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/extra/os/x86_64/perl-mailtools-2.22-3-any.pkg.tar.zst"
+revision = "2.22-3"
+sha256 = "d93f6c122fa2301c2bd02095b8aaf9c225b5f26f64bb25d2199bfa9a1d3f47ba"
+size = 59900
+
+[[inputs]]
+name = "build-dependency-172-signature"
+kind = "build-dependency"
+path = "build-dependencies/perl-mailtools-2.22-3-any.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/extra/os/x86_64/perl-mailtools-2.22-3-any.pkg.tar.zst.sig"
+revision = "2.22-3"
+sha256 = "3bf340c8444991d8d8a16193da0f45f40245491adafeb82f8a82f1e2fb667ef8"
+size = 310
+
+[[inputs]]
+name = "build-dependency-173"
+kind = "build-dependency"
+path = "build-dependencies/git-2.55.0-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/git-2.55.0-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.55.0-1.1"
+sha256 = "89335d4142179ea0e82bffb521bf589152e0cfb9cfd01b8dfb218cc2d4eefc44"
+size = 8272882
+
+[[inputs]]
+name = "build-dependency-173-signature"
+kind = "build-dependency"
+path = "build-dependencies/git-2.55.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/git-2.55.0-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.55.0-1.1"
+sha256 = "91104a3284955f85c6478660e4952b592450e018cbb58e5fdc28f43768c15f93"
+size = 438
+
+[[inputs]]
+name = "build-dependency-174"
+kind = "build-dependency"
+path = "build-dependencies/groff-1.24.1-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/groff-1.24.1-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.24.1-1.1"
+sha256 = "9bd54088678990776710c6426dd34a0d08d35bcdda29777049778538cba75495"
+size = 2645026
+
+[[inputs]]
+name = "build-dependency-174-signature"
+kind = "build-dependency"
+path = "build-dependencies/groff-1.24.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/groff-1.24.1-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.24.1-1.1"
+sha256 = "69ea3bbb27d1ce36b2c9b2b9edb7a7a24a7f5af2bc8d8b5659ecd28029109292"
+size = 438
+
+[[inputs]]
+name = "build-dependency-175"
+kind = "build-dependency"
+path = "build-dependencies/lib32-glibc-2.44+r24+g16be1518495f-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/lib32-glibc-2.44+r24+g16be1518495f-1-x86_64_v4.pkg.tar.zst"
+revision = "2.44+r24+g16be1518495f-1"
+sha256 = "dc4cf60b40ec19da30a478a205a9e766d69904fdd7ae184d4cbb9dd7199768b2"
+size = 4117529
+
+[[inputs]]
+name = "build-dependency-175-signature"
+kind = "build-dependency"
+path = "build-dependencies/lib32-glibc-2.44+r24+g16be1518495f-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/lib32-glibc-2.44+r24+g16be1518495f-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.44+r24+g16be1518495f-1"
+sha256 = "a1c612ec33e545d2306e7da7e15aa388d573fa83c09edb33f6a6e5a2976d44eb"
+size = 438
+
+[[inputs]]
+name = "build-dependency-176"
+kind = "build-dependency"
+path = "build-dependencies/lib32-fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/multilib/os/x86_64/lib32-fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst"
+revision = "1:1.37.2-3"
+sha256 = "aac8c3dee33b3b98802130d3cd70bcfc44681ecdfa3b2b0752de1a7720f5a1f0"
+size = 19036
+
+[[inputs]]
+name = "build-dependency-176-signature"
+kind = "build-dependency"
+path = "build-dependencies/lib32-fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/multilib/os/x86_64/lib32-fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst.sig"
+revision = "1:1.37.2-3"
+sha256 = "8ffd543f38bdf4cfb4a5dba96a56af615c1c0ed3ed4dd4078638fdaf312bb6a2"
+size = 119
+
+[[inputs]]
+name = "build-dependency-177"
+kind = "build-dependency"
+path = "build-dependencies/lib32-gcc-libs-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/lib32-gcc-libs-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "4d54a7ea3c32dff39f78a49e092487edf9540dfe16068e85dfdd84eae0225c5b"
+size = 12070174
+
+[[inputs]]
+name = "build-dependency-177-signature"
+kind = "build-dependency"
+path = "build-dependencies/lib32-gcc-libs-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/lib32-gcc-libs-16.2.1+r23+gd564253eb6c8-1-x86_64_v4.pkg.tar.zst.sig"
+revision = "16.2.1+r23+gd564253eb6c8-1"
+sha256 = "5cd5a4071b09405bedf8d9cf7c75a2448689d859bbb88158268df03b4938ec91"
+size = 438
+
+[[inputs]]
+name = "build-dependency-178"
+kind = "build-dependency"
+path = "build-dependencies/libtool-2.6.1-3-x86_64_v3.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libtool-2.6.1-3-x86_64_v3.pkg.tar.zst"
+revision = "2.6.1-3"
+sha256 = "c3f3ee382de7949ae53c2df8640f543e4cba197c130f5d7f7cebe895ab0871f3"
+size = 442909
+
+[[inputs]]
+name = "build-dependency-178-signature"
+kind = "build-dependency"
+path = "build-dependencies/libtool-2.6.1-3-x86_64_v3.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/libtool-2.6.1-3-x86_64_v3.pkg.tar.zst.sig"
+revision = "2.6.1-3"
+sha256 = "d485a2113c1409108d5fb90b515a02d7bcb0aa7db346caa609b0fd40d032d0bd"
+size = 438
+
+[[inputs]]
+name = "build-dependency-179"
+kind = "build-dependency"
+path = "build-dependencies/lib32-libltdl-2.6.1-3-x86_64_v3.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/lib32-libltdl-2.6.1-3-x86_64_v3.pkg.tar.zst"
+revision = "2.6.1-3"
+sha256 = "02b419da15756f99047fa50952beb164a11ae7467611460124fe886cc4859aa5"
+size = 23210
+
+[[inputs]]
+name = "build-dependency-179-signature"
+kind = "build-dependency"
+path = "build-dependencies/lib32-libltdl-2.6.1-3-x86_64_v3.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/lib32-libltdl-2.6.1-3-x86_64_v3.pkg.tar.zst.sig"
+revision = "2.6.1-3"
+sha256 = "44f53ddc5480eb3a0c5101e6567a2b9943be0ae5ccb8204959d53608738ce7bf"
+size = 438
+
+[[inputs]]
+name = "build-dependency-180"
+kind = "build-dependency"
+path = "build-dependencies/lib32-zlib-ng-2.3.2-2-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/lib32-zlib-ng-2.3.2-2-x86_64_v4.pkg.tar.zst"
+revision = "2.3.2-2"
+sha256 = "cc81eed9498a21562c7d353c6842bb63c6e2d7a3df656a7844f8047ec8f55d74"
+size = 133008
+
+[[inputs]]
+name = "build-dependency-180-signature"
+kind = "build-dependency"
+path = "build-dependencies/lib32-zlib-ng-2.3.2-2-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/lib32-zlib-ng-2.3.2-2-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.3.2-2"
+sha256 = "dcbcb6d246b7ba0e649eda9f17e921ff85faecc35fae01ad5a489bc48bf0f19c"
+size = 438
+
+[[inputs]]
+name = "build-dependency-181"
+kind = "build-dependency"
+path = "build-dependencies/lib32-zlib-ng-compat-2.3.2-2-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/lib32-zlib-ng-compat-2.3.2-2-x86_64_v4.pkg.tar.zst"
+revision = "2.3.2-2"
+sha256 = "9946c02800f9cf883ef5184bc3bead733fc7313a201fd0c33d81d10ec45fb1d5"
+size = 133202
+
+[[inputs]]
+name = "build-dependency-181-signature"
+kind = "build-dependency"
+path = "build-dependencies/lib32-zlib-ng-compat-2.3.2-2-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-v4/lib32-zlib-ng-compat-2.3.2-2-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.3.2-2"
+sha256 = "8477692bf1bc8fbda47107a9a930de6c0282d5f26c81afe9b4e370bdc37ca87f"
+size = 438
+
+[[inputs]]
+name = "build-dependency-182"
+kind = "build-dependency"
+path = "build-dependencies/libutempter-1.2.3-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/libutempter-1.2.3-1.1-x86_64_v4.pkg.tar.zst"
+revision = "1.2.3-1.1"
+sha256 = "fd14b5252b3429da75fbdfc04c8a9b26a044687da4d6ea228171f6064015add8"
+size = 9672
+
+[[inputs]]
+name = "build-dependency-182-signature"
+kind = "build-dependency"
+path = "build-dependencies/libutempter-1.2.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/libutempter-1.2.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.2.3-1.1"
+sha256 = "d95ea3349acd5269a15ba7361b0794169c9783a90c9c323cf670272dbdaa4fba"
+size = 438
+
+[[inputs]]
+name = "build-dependency-183"
+kind = "build-dependency"
+path = "build-dependencies/make-4.4.1-3.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/make-4.4.1-3.1-x86_64_v4.pkg.tar.zst"
+revision = "4.4.1-3.1"
+sha256 = "5184cec2ee5ed9f32d7b43a8ff319ac85bb9857149f5e1ac3d4028b6a7bc9f93"
+size = 551653
+
+[[inputs]]
+name = "build-dependency-183-signature"
+kind = "build-dependency"
+path = "build-dependencies/make-4.4.1-3.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/make-4.4.1-3.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "4.4.1-3.1"
+sha256 = "4e6cd57cfabaa870754ede76ab54db2306e17c26978e8dd9055ac306a0e0dd21"
+size = 438
+
+[[inputs]]
+name = "build-dependency-184"
+kind = "build-dependency"
+path = "build-dependencies/pacman-contrib-1.13.1-1.2-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/pacman-contrib-1.13.1-1.2-x86_64_v4.pkg.tar.zst"
+revision = "1.13.1-1.2"
+sha256 = "9ee6a4fa1a41c75ef3c7c878f02af4ef63bf1ee9c21b4d3a3115876a6db7c9f3"
+size = 51354
+
+[[inputs]]
+name = "build-dependency-184-signature"
+kind = "build-dependency"
+path = "build-dependencies/pacman-contrib-1.13.1-1.2-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-extra-v4/pacman-contrib-1.13.1-1.2-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.13.1-1.2"
+sha256 = "43e52fb9dfbb002a9a62dfbdcd5be1153a6f23b31de5e42ca9fb6a91049c0719"
+size = 438
+
+[[inputs]]
+name = "build-dependency-185"
+kind = "build-dependency"
+path = "build-dependencies/paru-2.1.0-3-x86_64.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/paru-2.1.0-3-x86_64.pkg.tar.zst"
+revision = "2.1.0-3"
+sha256 = "ee2b8b118c59ce9a4079a3c2a66a88ef2dd51db63cc399c4fac94b7d347f031e"
+size = 2814470
+
+[[inputs]]
+name = "build-dependency-185-signature"
+kind = "build-dependency"
+path = "build-dependencies/paru-2.1.0-3-x86_64.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64/cachyos/paru-2.1.0-3-x86_64.pkg.tar.zst.sig"
+revision = "2.1.0-3"
+sha256 = "d217dc5aa5d5f50d3b02d817342d192331ee9a4b078ea647636ae806287a451d"
+size = 438
+
+[[inputs]]
+name = "build-dependency-186"
+kind = "build-dependency"
+path = "build-dependencies/patch-2.8-1-x86_64.pkg.tar.zst"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/patch-2.8-1-x86_64.pkg.tar.zst"
+revision = "2.8-1"
+sha256 = "b4685fc56dfc18afb754f64099b82396885fefe43e82f20b37477650f642303c"
+size = 87289
+
+[[inputs]]
+name = "build-dependency-186-signature"
+kind = "build-dependency"
+path = "build-dependencies/patch-2.8-1-x86_64.pkg.tar.zst.sig"
+origin = "https://geo.mirror.pkgbuild.com/core/os/x86_64/patch-2.8-1-x86_64.pkg.tar.zst.sig"
+revision = "2.8-1"
+sha256 = "641f5ae1be1677b1873982a1f98b664193227b12b3a88f160f98f9820e7aa460"
+size = 119
+
+[[inputs]]
+name = "build-dependency-187"
+kind = "build-dependency"
+path = "build-dependencies/pkgconf-3.0.6-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/pkgconf-3.0.6-1.1-x86_64_v4.pkg.tar.zst"
+revision = "3.0.6-1.1"
+sha256 = "8379c350cc59bc79aa35e7466f14ef1d5eb8b4c748127073dd4cb4de7e65c836"
+size = 135534
+
+[[inputs]]
+name = "build-dependency-187-signature"
+kind = "build-dependency"
+path = "build-dependencies/pkgconf-3.0.6-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/pkgconf-3.0.6-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "3.0.6-1.1"
+sha256 = "540a88936275d9c64cccf17a92e2934e14a47175e7b947b7add32eadebad5e27"
+size = 438
+
+[[inputs]]
+name = "build-dependency-188"
+kind = "build-dependency"
+path = "build-dependencies/sudo-1.9.17.p2-6.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/sudo-1.9.17.p2-6.1-x86_64_v4.pkg.tar.zst"
+revision = "1.9.17.p2-6.1"
+sha256 = "a8fefc4974d175c54acbeb6fd164f389f1b30a4fecc452e8e209f960b48ded9d"
+size = 2042573
+
+[[inputs]]
+name = "build-dependency-188-signature"
+kind = "build-dependency"
+path = "build-dependencies/sudo-1.9.17.p2-6.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/sudo-1.9.17.p2-6.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "1.9.17.p2-6.1"
+sha256 = "ca87bfaf14903352bde68e6ca59bf581d85922e7ea4b01ed11e0ad5abe764f91"
+size = 438
+
+[[inputs]]
+name = "build-dependency-189"
+kind = "build-dependency"
+path = "build-dependencies/texinfo-7.3-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/texinfo-7.3-1.1-x86_64_v4.pkg.tar.zst"
+revision = "7.3-1.1"
+sha256 = "dc6099bdd7650987b47efd2aa19a9889846d031b7a2d264c69652ee2488b16bc"
+size = 2272778
+
+[[inputs]]
+name = "build-dependency-189-signature"
+kind = "build-dependency"
+path = "build-dependencies/texinfo-7.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/texinfo-7.3-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "7.3-1.1"
+sha256 = "444c5006f0def833a28c21c13c4b668d37fa34d92ffaf0a7dabb31f65a63a218"
+size = 438
+
+[[inputs]]
+name = "build-dependency-190"
+kind = "build-dependency"
+path = "build-dependencies/which-2.25-1.1-x86_64_v4.pkg.tar.zst"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/which-2.25-1.1-x86_64_v4.pkg.tar.zst"
+revision = "2.25-1.1"
+sha256 = "a9d92d115a691cecebb2340cd21e5d0bb61bb5f33134457bffdfbef6ba8f6dbf"
+size = 18386
+
+[[inputs]]
+name = "build-dependency-190-signature"
+kind = "build-dependency"
+path = "build-dependencies/which-2.25-1.1-x86_64_v4.pkg.tar.zst.sig"
+origin = "https://mirror5.krfoss.org/cachyos/repo/x86_64_v4/cachyos-core-v4/which-2.25-1.1-x86_64_v4.pkg.tar.zst.sig"
+revision = "2.25-1.1"
+sha256 = "c8569960aa3554c2215d2917cda3128a3981ec405b2f6900c1c793ef4107b1e6"
+size = 438

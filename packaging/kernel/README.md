@@ -7,6 +7,8 @@
 - the signed CachyOS packaging commit/tree and the exact config contained by that snapshot;
 - the machine-readable build environment, executable PKGBUILD-variable wrapper, and `makepkg.conf`;
 - the raw, digest-addressed CachyOS v4 OCI manifest plus every referenced config/layer blob;
+- the complete 191-package build-root update/dependency transaction and all
+  detached signatures, including GCC, Rust, Rust source, bindgen, and pahole;
 - NVIDIA open-kernel-module source 610.57.04 and both immutable CachyOS patch revisions;
 - the ordered GPL-2.0-only PT315-53 telemetry and PWM patches.
 
@@ -40,6 +42,31 @@ metadata or other files in the bundle.
 Also fetch the exact CachyOS v4 `bc` package at its locked `origin` into
 `/bundle/build-tools/`. It is extracted without installation and used only to
 generate the kernel time constants required before compiling `acer-wmi.c`.
+
+For the full package build, populate `/bundle/build-dependencies/` with every
+`build-dependency` input, preserving the exact locked filenames. These are
+191 package archives plus their 191 detached signatures; the verifier pins
+the entire closure independently and rejects omitted or changed entries.
+Signatures can also be recovered from a repository database's `%PGPSIG%`
+field when a mirror omits the separate `.sig` URL, but the recovered bytes
+must match the locked signature hash. Repository databases are acquisition
+metadata only and never enter the offline build. The Rust source archive
+uses Arch's exact-version archive URL because the CachyOS mirror no longer
+serves the selected source package. All selected archives were authenticated
+with the distribution package-signing trust before the lock was recorded.
+
+The pinned base image alone lacks the kernel recipe's build dependencies.
+Before a full build, the wrapper updates only a disposable rootless
+container using these authenticated local archives, with networking off,
+trusted package signatures required, and normal dependency checks intact.
+It refreshes public Arch keyring data only from the locked keyring archive.
+No host package or trust store is modified. Source workspaces, output paths,
+and signing keys are absent from this preparation container. The resulting
+local image ID is then used read-only as UID 1000 for compilation, with the
+provisioning flag explicitly cleared. The base OCI and all update inputs
+remain in the retained source lock; package `.BUILDINFO` records the actual
+installed build environment. The compile-only review gate still uses the
+original immutable image and its separately locked `bc` executable.
 
 Prepare a separate, non-symlink signing directory containing exactly the
 operator-controlled signing inputs used during the handoff:
@@ -252,7 +279,7 @@ and cannot designate the candidate as default. Private keys and machine trust
 remain external. The controller source is a local archive of the controller
 recipe's committed source-lock revision, and Cargo runs offline against
 preseeded locked dependencies. Missing dependencies fail rather than being
-installed. The wrapper never installs packages, edits boot state, enables
+installed. The wrapper never installs host packages, edits boot state, enables
 services, or invokes GitHub Actions. Seed `--cargo-home` from the exact
 controller `_commit` lock as shown in the top-level runbook. Unsafe inherited
 environment overrides are rejected before signing.
@@ -288,4 +315,4 @@ qualification and promotion gates.
 The recovery package remains stock `linux-cachyos-lts` 6.18. It is always
 Firmware Auto recovery and is explicitly not PWM-capable.
 
-The wrapper reconstructs a temporary OCI layout from the verified manifest and blobs, imports it into disposable Podman root/runroot storage, and executes that exact manifest digest using `--pull=never`, no network, and a read-only container root. It extracts only the pinned packaging snapshot into a disposable work directory; clears ambient CI controls; exposes the verified source/config/patch chain through a writable cache of read-only symlinks; assigns the unique package base and kernel release suffix; adds only the locked PT315-53 patches to the authenticated recipe; builds the matching locked NVIDIA open module; writes packages and retained evidence only to the output mount; and explicitly selects CachyOS's default scheduler, GCC, `generic_v4`, and no ZFS/R8125 module build. The verifier also accepts the exact `--compile-pwm` review gate, which extracts the locked `bc` executable into the disposable work directory and compiles only the patched `acer-wmi.o`; arbitrary `makepkg` flags are rejected. `makepkg`'s inconsistent snapshot checksum array is bypassed only after the source-lock verifier has authenticated and hashed every input. The wrapper never uses the caller's checkout or host `makepkg`.
+The wrapper reconstructs a temporary OCI layout from the verified manifest and blobs, imports it into disposable Podman root/runroot storage, and uses that exact manifest digest as the base for the locked offline dependency transaction described above. Compilation then uses the derived local image ID with `--pull=never`, no network, an explicit unprivileged UID, and a read-only container root. It extracts only the pinned packaging snapshot into a disposable work directory; clears ambient CI controls; exposes the verified source/config/patch chain through a writable cache of read-only symlinks; assigns the unique package base and kernel release suffix; adds only the locked PT315-53 patches to the authenticated recipe; builds the matching locked NVIDIA open module; writes packages and retained evidence only to the output mount; and explicitly selects CachyOS's default scheduler, GCC, `generic_v4`, and no ZFS/R8125 module build. The verifier also accepts the exact `--compile-pwm` review gate, which extracts the locked `bc` executable into the disposable work directory and compiles only the patched `acer-wmi.o`; arbitrary `makepkg` flags are rejected. `makepkg`'s inconsistent snapshot checksum array is bypassed only after the source-lock verifier has authenticated and hashed every input. The wrapper never uses the caller's checkout or host `makepkg`.

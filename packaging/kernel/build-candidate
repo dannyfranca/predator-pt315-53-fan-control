@@ -11,6 +11,33 @@ trusted_path_mode=$(/usr/bin/stat -c %a /usr/bin)
 }
 
 : "${SOURCE_LOCK_BUNDLE:?set SOURCE_LOCK_BUNDLE to the verified bundle directory}"
+if [[ "${SOURCE_LOCK_PROVISION:-}" == 1 ]]; then
+    # This branch runs only in an ephemeral rootless container, before any
+    # source, output, or signing mount is exposed. The bundle was snapshotted
+    # and authenticated by verify-source-lock; no repository is contacted.
+    [[ $# == 0 && $EUID == 0 && -f /run/.containerenv && \
+        "$SOURCE_LOCK_BUNDLE" == /bundle ]]
+    dependencies=/bundle/build-dependencies
+    shopt -s nullglob
+    dependency_packages=("$dependencies"/*.pkg.tar.zst)
+    [[ ${#dependency_packages[@]} == 191 ]]
+    for dependency in "${dependency_packages[@]}"; do
+        [[ -f "$dependency.sig" && ! -L "$dependency" && ! -L "$dependency.sig" ]]
+    done
+    # Bootstrap only the public trust data from the authenticated keyring
+    # archive. All package transactions still require trusted signatures.
+    tar -xf "$dependencies/archlinux-keyring-1:20260727-1-any.pkg.tar.zst" \
+        -C / usr/share/pacman/keyrings
+    pacman-key --populate archlinux cachyos
+    printf '%s\n' '[options]' \
+        'Architecture = x86_64_v4 x86_64_v3 x86_64' \
+        'SigLevel = Required DatabaseOptional' \
+        'LocalFileSigLevel = Required' >/tmp/source-lock-pacman.conf
+    pacman --config /tmp/source-lock-pacman.conf -U --noconfirm \
+        "${dependency_packages[@]}"
+    pacman -T bc cpio libgcc pahole python rust rust-bindgen rust-src
+    exit 0
+fi
 if (( $# > 1 )); then
     echo "only the locked build, --compile-pwm, or --verifysource is allowed" >&2
     exit 2
@@ -498,8 +525,22 @@ for blob in "$bundle"/oci/blobs/sha256/*; do
 done
 podman "${podman_storage[@]}" pull --quiet "oci:$image_layout:source-lock" >/dev/null
 
+build_toolchain="$toolchain"
+if (( $# == 0 )); then
+    podman "${podman_storage[@]}" run --name source-lock-dependencies \
+        --pull=never --network=none --user 0 \
+        --mount "type=bind,src=$bundle,dst=/bundle,ro=true" \
+        --env SOURCE_LOCK_PROVISION=1 --env SOURCE_LOCK_BUNDLE=/bundle \
+        --entrypoint /bundle/build-candidate "$toolchain"
+    build_toolchain=$(podman "${podman_storage[@]}" commit --quiet source-lock-dependencies)
+    [[ "$build_toolchain" =~ ^(sha256:)?[0-9a-f]{64}$ ]]
+    build_toolchain="sha256:${build_toolchain#sha256:}"
+    podman "${podman_storage[@]}" rm source-lock-dependencies >/dev/null
+fi
+
 podman "${podman_storage[@]}" run --rm --pull=never --network=none --read-only \
     --userns=keep-id:uid=1000,gid=1000 \
+    --user 1000:1000 \
     --tmpfs /tmp:rw,nodev,nosuid \
     --mount "type=bind,src=$bundle,dst=/bundle,ro=true" \
     --mount "type=bind,src=$package_root,dst=/work,rw=true" \
@@ -507,11 +548,12 @@ podman "${podman_storage[@]}" run --rm --pull=never --network=none --read-only \
     "${signing_mount[@]}" \
     --workdir /work \
     --env SOURCE_LOCK_INSIDE=1 \
+    --env SOURCE_LOCK_PROVISION=0 \
     --env SOURCE_LOCK_INSIDE_SIGNING_DIR=/signing \
     --env SOURCE_LOCK_BUNDLE=/bundle \
     --env SOURCE_LOCK_OUTPUT=/output \
     --entrypoint /bundle/build-candidate \
-    "$toolchain" "$@"
+    "$build_toolchain" "$@"
 
 if (( $# == 0 )); then
     kernel_archive="$container_output/linux-cachyos-pt31553-7.1.8-1-x86_64.pkg.tar.zst"
