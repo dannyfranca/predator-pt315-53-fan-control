@@ -139,7 +139,10 @@ owner-readable-only PEM bundle. It runs `syncconfig` before makepkg normalizes
 source timestamps, so generated configuration cannot retain the default key.
 The kernel generates `certs/signing_key.x509` from this bundle; do not preseed
 that build target as read-only. Only the public certificate is copied into the
-headers package. The provenance verifier requires the explicit external-key setting.
+headers package, including its embedded copy in `build/vmlinux`. Both locations
+permit only the supplied public module-signing certificate, never a private key
+or an additional trust certificate. The provenance verifier requires the explicit
+external-key setting.
 The verifier places the exact parsed source-lock bytes into its private
 snapshot for retention; do not add `source-lock.toml` to the input bundle.
 

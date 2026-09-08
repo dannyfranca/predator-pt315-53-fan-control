@@ -465,6 +465,16 @@ fn output_tree_allows_public_certificates_only_at_documented_artifact_paths() {
     fs::write(root.join("usr/lib/modules/test/vmlinuz"), &certificate).unwrap();
     assert!(tree_gate(&root, &[&allowed_pem]).status.success());
 
+    let header_image = root.join("usr/lib/modules/test/build/vmlinux");
+    fs::create_dir_all(header_image.parent().unwrap()).unwrap();
+    fs::write(&header_image, &certificate).unwrap();
+    assert!(tree_gate(&root, &[&allowed_pem]).status.success());
+    fs::write(&header_image, large_rsa_certificate_der()).unwrap();
+    assert!(!tree_gate(&root, &[&allowed_pem]).status.success());
+    fs::write(&header_image, unencrypted_pkcs8_der()).unwrap();
+    assert!(!tree_gate(&root, &[&allowed_pem]).status.success());
+    fs::remove_file(header_image).unwrap();
+
     let certificate_der = large_rsa_certificate_der();
     let mut certificate_with_public_padding = certificate_der.clone();
     let allowed_der = root.with_extension("allowed.der");
@@ -518,6 +528,7 @@ fn output_tree_allows_public_certificates_only_at_documented_artifact_paths() {
 
     for path in [
         "docs/vmlinuz",
+        "docs/build/vmlinux",
         "tmp/certs/signing_key.x509",
         "tmp/payload.ko",
     ] {

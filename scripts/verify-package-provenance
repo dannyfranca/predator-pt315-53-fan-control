@@ -1321,6 +1321,11 @@ def package_records(
         allowed_certificates_by_member[policy["module_trust_certificate_path"]] = (
             module_certificates
         )
+        headers_image = str(
+            pathlib.PurePosixPath(policy["module_trust_certificate_path"]).parent.parent
+            / "vmlinux"
+        )
+        allowed_certificates_by_member[headers_image] = module_certificates
         allowed_certificates_by_member[policy["kernel_image_path"]] = frozenset(
             {module_certificate_der, kernel_certificate_der}
         )

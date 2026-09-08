@@ -1404,6 +1404,30 @@ fn rejects_signature_trust_and_identity_mismatches() {
 }
 
 #[test]
+fn headers_image_allows_only_the_supplied_module_certificate() {
+    let fixture = Fixture::with_real_crypto();
+    let module_certificate = fs::read(&fixture.module_cert_der).unwrap();
+    let mut files = headers_files(&module_certificate);
+    files.push((
+        format!("usr/lib/modules/{RELEASE}/build/vmlinux"),
+        module_certificate,
+    ));
+    fixture.replace_headers(&files);
+    let output = fixture.run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    files.last_mut().unwrap().1 = fs::read(&fixture.package_cert_der).unwrap();
+    fixture.replace_headers(&files);
+    assert!(
+        !fixture.run().status.success(),
+        "accepted an unrelated headers-image certificate"
+    );
+}
+
+#[test]
 fn rejects_missing_or_drifted_packaged_kernel_module_trust() {
     let fixture = Fixture::new();
     let mut files = headers_files(b"stable module certificate DER");

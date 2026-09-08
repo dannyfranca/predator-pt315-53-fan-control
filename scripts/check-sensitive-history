@@ -2088,6 +2088,7 @@ def artifact_allows_public_certificates(path: str) -> bool:
         re.fullmatch(pattern, logical)
         for pattern in (
             r"usr/lib/modules/[^/]+/vmlinuz",
+            r"usr/lib/modules/[^/]+/build/vmlinux",
             r"usr/lib/modules/[^/]+/build/certs/signing_key\.x509",
             r"usr/lib/modules/[^/]+/(?:kernel/(?:[^/]+/)*|extramodules/)[^/]+\.ko(?:\.(?:gz|xz|zst))?",
         )
