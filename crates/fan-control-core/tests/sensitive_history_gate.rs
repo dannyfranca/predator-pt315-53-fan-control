@@ -103,6 +103,31 @@ fn tree_gate(root: &Path, allowed_certificates: &[&Path]) -> std::process::Outpu
 }
 
 #[test]
+fn accepts_source_reference_with_incidental_decoded_gzip_magic() {
+    let root = repository();
+    let reference = b"crates/fan-control-core/tests/source_lock_verifier.rs:62:        let packaging_commit = include_bytes!(\"fixtures/source-lock-gpg/packaging.commit\");\n";
+    fs::write(root.join("review.log"), reference).unwrap();
+    git(&root, &["add", "review.log"]);
+    git(&root, &["commit", "-q", "-m", "source reference"]);
+    let output = gate_command(&root).output().unwrap();
+    assert!(
+        output.status.success(),
+        "ordinary source reference rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rejects_corrupted_embedded_deflate_gzip() {
+    let mut content = b"ordinary prefix\n".to_vec();
+    content.extend(gzip_bytes(&private_key_fixture(b"secret")));
+    content.truncate(content.len() - 4);
+    historical_blob_is_rejected("truncated-gzip.bin", &content);
+    historical_blob_is_rejected("encoded-truncated-gzip.txt", &base64_bytes(&content));
+}
+
+#[test]
 fn accepts_public_openpgp_signature_checksum_in_commit_payloads() {
     let root = repository();
     let mut signature_packet = vec![0xc2, 78];
@@ -234,7 +259,9 @@ loader = importlib.machinery.SourceFileLoader("history_scanner", sys.argv[1])
 spec = importlib.util.spec_from_loader("history_scanner", loader)
 module = importlib.util.module_from_spec(spec)
 loader.exec_module(module)
-tree = bytes((99, 53, 56, 54, 49, 102, 56, 98, 57, 99, 54, 57, 53, 49, 52, 57, 48, 99, 54, 50, 52, 102, 54, 99, 48, 49, 57, 98, 100, 102, 55, 100, 52, 53, 50, 102, 54, 56, 51, 50))
+# A structural hash whose decoded bytes claim supported gzip (method 8),
+# but contain a corrupt stream. It must remain rejected outside headers.
+tree = bytes((99, 53, 56, 54, 49, 102, 56, 98, 48, 56, 54, 57, 53, 49, 52, 57, 48, 99, 54, 50, 52, 102, 54, 99, 48, 49, 57, 98, 100, 102, 55, 100, 52, 53, 50, 102, 54, 56, 51, 50))
 parent = bytes((100, 102, 99, 56, 51, 49, 50, 101, 100, 100, 52, 51, 53, 50, 97, 101, 49, 51, 48, 102, 51, 48, 98, 101, 51, 101, 100, 54, 52, 48, 49, 97, 54, 98, 53, 99, 97, 97, 101, 57))
 header = b"tree " + tree + b"\nparent " + parent + b"\n\nsafe\n"
 message = b"tree " + b"0" * 40 + b"\nparent " + b"0" * 40 + b"\n\n" + tree + b"\n" + parent + b"\n"

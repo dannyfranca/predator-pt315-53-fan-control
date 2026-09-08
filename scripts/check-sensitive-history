@@ -904,6 +904,14 @@ def embedded_compressed_children(
     for kind, magic in magics:
         offset = content.find(magic, 1)
         while offset >= 0:
+            # RFC 1952 defines only compression method 8 (DEFLATE). Two
+            # incidental magic bytes in decoded source text are not a gzip
+            # stream when the following method byte explicitly contradicts
+            # that format. Still fail closed on truncated headers and on
+            # every malformed stream claiming the supported method.
+            if kind == "gzip" and offset + 2 < len(content) and content[offset + 2] != 8:
+                offset = content.find(magic, offset + 1)
+                continue
             if kind == "bzip2" and (
                 offset + 10 > len(content)
                 or content[offset + 3] not in b"123456789"
