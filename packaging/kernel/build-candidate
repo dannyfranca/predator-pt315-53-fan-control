@@ -284,10 +284,13 @@ sed -i 's/^pkgbase="linux-$_pkgsuffix"$/pkgbase="linux-cachyos-pt31553"/' \
 [[ "$(grep -Fxc '_kernuname="${pkgver}-${_pkgsuffix}"' "$package_root/PKGBUILD")" == 1 ]]
 sed -i 's/^_kernuname="${pkgver}-${_pkgsuffix}"$/_kernuname="${pkgver}-cachyos-pt31553"/' \
     "$package_root/PKGBUILD"
-[[ "$(grep -Fc 'CachyOS/kernel-patches/master/' "$package_root/PKGBUILD")" -ge 1 ]]
-sed -i 's#CachyOS/kernel-patches/master/#CachyOS/kernel-patches/fcdc4806b62f86b62a61b92c4b7213a1759537e5/#g' \
+[[ "$(grep -Fc 'cachyos/kernel-patches/master/' "$package_root/PKGBUILD")" -ge 1 ]] || {
+    echo "pinned packaging recipe is missing its expected patch-source URL" >&2
+    exit 2
+}
+sed -i 's#cachyos/kernel-patches/master/#CachyOS/kernel-patches/fcdc4806b62f86b62a61b92c4b7213a1759537e5/#g' \
     "$package_root/PKGBUILD"
-! grep -Fq 'CachyOS/kernel-patches/master/' "$package_root/PKGBUILD"
+! grep -Fq 'cachyos/kernel-patches/master/' "$package_root/PKGBUILD"
 printf 'b2sums+=("SKIP" "SKIP")\n' >>"$package_root/PKGBUILD"
 signing_recipe=(
     'eval "$(declare -f prepare | sed "1s/^prepare /_source_lock_prepare /")"'

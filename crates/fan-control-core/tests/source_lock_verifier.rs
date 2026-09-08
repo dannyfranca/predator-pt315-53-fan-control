@@ -1115,7 +1115,7 @@ _srcname="$TEST_KERNEL_ROOT"
 _kernuname="${pkgver}-${_pkgsuffix}"
 _nv_ver=610.57.04
 _nv_open_pkg="NVIDIA-kernel-module-source-${_nv_ver}"
-_nvpatchurl="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/7.1/misc/nvidia"
+_nvpatchurl="https://raw.githubusercontent.com/cachyos/kernel-patches/master/7.1/misc/nvidia"
 source=("cachyos-7.1.8-1.tar.gz" "cachyos-7.1.8-1.tar.gz.asc" "config")
 b2sums=("SKIP" "SKIP" "SKIP")
 if [[ "${_build_nvidia_open:-no}" == yes ]]; then
@@ -1461,7 +1461,7 @@ fi
     let srcinfo = fs::read_to_string(output.join("package-set.SRCINFO"))
         .expect("read generated package SRCINFO");
     assert!(srcinfo.contains("CachyOS/kernel-patches/fcdc4806b62f86b62a61b92c4b7213a1759537e5/"));
-    assert!(!srcinfo.contains("CachyOS/kernel-patches/master/"));
+    assert!(!srcinfo.contains("kernel-patches/master/"));
     for package_name in [
         "linux-cachyos-pt31553",
         "linux-cachyos-pt31553-headers",
